@@ -1,0 +1,16 @@
+{
+  "name": "isle-settlers",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "dev": "pnpm build:wasm && pnpm --filter @isle/web dev",
+    "build": "pnpm build:wasm && pnpm --filter @isle/web build",
+    "preview": "pnpm --filter @isle/web preview",
+    "test": "cargo test --workspace",
+    "bench": "cargo run --release -p isle-sim --"
+  },
+  "devDependencies": {
+    "binaryen": "^132.0.0"
+  }
+}

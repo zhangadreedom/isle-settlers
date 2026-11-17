@@ -112,10 +112,8 @@ pub fn play_game(
             .apply(p, action)
             .expect("bots only play legal actions");
         actions += 1;
-        if check_invariants {
-            if let Err(e) = state.check_invariants() {
-                panic!("invariant violated after {action:?}: {e}");
-            }
+        if check_invariants && let Err(e) = state.check_invariants() {
+            panic!("invariant violated after {action:?}: {e}");
         }
     }
     GameOutcome {
