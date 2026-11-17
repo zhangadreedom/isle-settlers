@@ -1,0 +1,230 @@
+//! Actions players submit, events the engine emits, and rule violations.
+
+use std::fmt;
+
+use crate::resources::{Resource, ResourceSet};
+use crate::state::DevCard;
+
+/// Everything a player can do. The acting seat is passed separately to
+/// [`crate::GameState::apply`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Action {
+    RollDice,
+    /// Free during setup and Road Building.
+    BuildRoad(u8),
+    /// Free during setup.
+    BuildSettlement(u8),
+    BuildCity(u8),
+    BuyDevCard,
+    PlayKnight,
+    PlayRoadBuilding,
+    /// Take these cards (two, or fewer if the bank runs short) from the bank.
+    PlayYearOfPlenty(ResourceSet),
+    PlayMonopoly(Resource),
+    /// Move the robber and steal from `victim`. `victim` must be `None` if and
+    /// only if nobody on the tile can be robbed.
+    MoveRobber {
+        tile: u8,
+        victim: Option<u8>,
+    },
+    /// Return exactly half (rounded down) of the hand after a 7.
+    Discard(ResourceSet),
+    /// Trade with the bank at the best ratio available for `give`.
+    MaritimeTrade {
+        give: Resource,
+        get: Resource,
+    },
+    /// Offer cards to the other players. Replaces any open offer.
+    ProposeTrade {
+        give: ResourceSet,
+        get: ResourceSet,
+    },
+    /// Accept or reject the open offer (other players only).
+    RespondTrade {
+        accept: bool,
+    },
+    /// Execute the open offer with a player who accepted it.
+    ConfirmTrade {
+        partner: u8,
+    },
+    CancelTrade,
+    EndTurn,
+}
+
+/// Something that happened. Some events carry private information
+/// (`Stolen`, `DevCardBought`) that must be filtered per viewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Event {
+    DiceRolled {
+        player: u8,
+        dice: (u8, u8),
+    },
+    ResourcesProduced {
+        player: u8,
+        resources: ResourceSet,
+    },
+    StartingResources {
+        player: u8,
+        resources: ResourceSet,
+    },
+    Discarded {
+        player: u8,
+        resources: ResourceSet,
+    },
+    RobberMoved {
+        player: u8,
+        tile: u8,
+    },
+    Stolen {
+        thief: u8,
+        victim: u8,
+        resource: Resource,
+    },
+    RoadBuilt {
+        player: u8,
+        edge: u8,
+    },
+    SettlementBuilt {
+        player: u8,
+        vertex: u8,
+    },
+    CityBuilt {
+        player: u8,
+        vertex: u8,
+    },
+    DevCardBought {
+        player: u8,
+        card: DevCard,
+    },
+    DevCardPlayed {
+        player: u8,
+        card: DevCard,
+    },
+    YearOfPlentyTaken {
+        player: u8,
+        resources: ResourceSet,
+    },
+    MonopolyTaken {
+        player: u8,
+        resource: Resource,
+        taken: [u8; crate::MAX_PLAYERS],
+    },
+    MaritimeTraded {
+        player: u8,
+        give: ResourceSet,
+        get: Resource,
+    },
+    TradeProposed {
+        player: u8,
+        give: ResourceSet,
+        get: ResourceSet,
+    },
+    TradeResponded {
+        player: u8,
+        accept: bool,
+    },
+    TradeExecuted {
+        player: u8,
+        partner: u8,
+        give: ResourceSet,
+        get: ResourceSet,
+    },
+    TradeCancelled {
+        player: u8,
+    },
+    LongestRoadChanged {
+        owner: Option<u8>,
+    },
+    LargestArmyChanged {
+        owner: Option<u8>,
+    },
+    TurnEnded {
+        player: u8,
+    },
+    GameWon {
+        player: u8,
+        points: u8,
+    },
+}
+
+/// Receives events from [`crate::GameState::apply_with`]. `()` discards them
+/// at zero cost, which is what search algorithms use.
+pub trait EventSink {
+    fn emit(&mut self, event: Event);
+}
+
+impl EventSink for () {
+    #[inline(always)]
+    fn emit(&mut self, _event: Event) {}
+}
+
+impl EventSink for Vec<Event> {
+    #[inline]
+    fn emit(&mut self, event: Event) {
+        self.push(event);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RuleError {
+    GameOver,
+    InvalidPlayer,
+    NotYourTurn,
+    WrongPhase,
+    InsufficientResources,
+    NoPiecesLeft,
+    InvalidVertex,
+    InvalidEdge,
+    Occupied,
+    TooCloseToBuilding,
+    NotConnected,
+    NotYourSettlement,
+    InvalidTile,
+    RobberMustMove,
+    InvalidVictim,
+    NoSuchCard,
+    DevCardAlreadyPlayed,
+    NoRoadSpot,
+    DeckEmpty,
+    BankShort,
+    InvalidTrade,
+    NoOpenTrade,
+    PartnerHasNotAccepted,
+    WrongDiscardAmount,
+    NothingToDiscard,
+}
+
+impl fmt::Display for RuleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            RuleError::GameOver => "the game is over",
+            RuleError::InvalidPlayer => "no such player",
+            RuleError::NotYourTurn => "it is not your turn",
+            RuleError::WrongPhase => "not allowed at this point of the turn",
+            RuleError::InsufficientResources => "not enough resources",
+            RuleError::NoPiecesLeft => "no pieces of that kind left",
+            RuleError::InvalidVertex => "no such intersection",
+            RuleError::InvalidEdge => "no such path",
+            RuleError::Occupied => "that spot is taken",
+            RuleError::TooCloseToBuilding => "too close to another building",
+            RuleError::NotConnected => "not connected to your roads",
+            RuleError::NotYourSettlement => "you have no settlement there",
+            RuleError::InvalidTile => "no such tile",
+            RuleError::RobberMustMove => "the robber must move to a different tile",
+            RuleError::InvalidVictim => "that player cannot be robbed",
+            RuleError::NoSuchCard => "you have no playable card of that kind",
+            RuleError::DevCardAlreadyPlayed => "only one development card per turn",
+            RuleError::NoRoadSpot => "there is nowhere to build a road",
+            RuleError::DeckEmpty => "no development cards left",
+            RuleError::BankShort => "the bank does not have those cards",
+            RuleError::InvalidTrade => "invalid trade",
+            RuleError::NoOpenTrade => "there is no open trade offer",
+            RuleError::PartnerHasNotAccepted => "that player has not accepted",
+            RuleError::WrongDiscardAmount => "you must discard exactly half of your hand",
+            RuleError::NothingToDiscard => "you do not need to discard",
+        };
+        f.write_str(msg)
+    }
+}
+
+impl std::error::Error for RuleError {}

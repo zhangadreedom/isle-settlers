@@ -1,0 +1,13 @@
+[package]
+name = "isle-ai"
+description = "Computer opponents for Isle Settlers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+isle-core.workspace = true
+
+[lints]
+workspace = true

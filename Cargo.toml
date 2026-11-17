@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+repository = "https://github.com/zhangadreedom/isle-settlers"
+
+[workspace.dependencies]
+isle-core = { path = "crates/isle-core" }
+isle-ai = { path = "crates/isle-ai" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+needless_range_loop = "allow"
+
+# Native builds (server, AI, simulator): maximum speed.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# Browser builds: smaller binary, abort on panic.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+panic = "abort"
+
+# Keep tests fast but with optimized dependencies.
+[profile.test]
+opt-level = 1

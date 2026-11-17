@@ -1,0 +1,14 @@
+# Rust
+/target
+
+# Node / web
+node_modules/
+web/dist/
+web/src/wasm/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
