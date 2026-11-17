@@ -403,7 +403,10 @@ impl GameState {
                 } else {
                     self.players[p].new_dev_cards[card.index()] += 1;
                 }
-                sink.emit(Event::DevCardBought { player, card });
+                sink.emit(Event::DevCardBought {
+                    player,
+                    card: Some(card),
+                });
             }
 
             Action::PlayKnight => {
@@ -457,7 +460,7 @@ impl GameState {
                     sink.emit(Event::Stolen {
                         thief: player,
                         victim: q,
-                        resource: r,
+                        resource: Some(r),
                     });
                 }
                 self.phase = self.after_interrupt();

@@ -8,6 +8,9 @@ use crate::state::DevCard;
 /// Everything a player can do. The acting seat is passed separately to
 /// [`crate::GameState::apply`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
 pub enum Action {
     RollDice,
     /// Free during setup and Road Building.
@@ -54,6 +57,9 @@ pub enum Action {
 /// Something that happened. Some events carry private information
 /// (`Stolen`, `DevCardBought`) that must be filtered per viewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
 pub enum Event {
     DiceRolled {
         player: u8,
@@ -75,10 +81,11 @@ pub enum Event {
         player: u8,
         tile: u8,
     },
+    /// `resource` is `None` in views of players other than thief and victim.
     Stolen {
         thief: u8,
         victim: u8,
-        resource: Resource,
+        resource: Option<Resource>,
     },
     RoadBuilt {
         player: u8,
@@ -92,9 +99,10 @@ pub enum Event {
         player: u8,
         vertex: u8,
     },
+    /// `card` is `None` in views of other players.
     DevCardBought {
         player: u8,
-        card: DevCard,
+        card: Option<DevCard>,
     },
     DevCardPlayed {
         player: u8,
@@ -147,6 +155,28 @@ pub enum Event {
     },
 }
 
+impl Event {
+    /// This event as seen by `viewer` (`None` for a spectator): private
+    /// details about other players are removed.
+    pub fn redacted_for(self, viewer: Option<u8>) -> Event {
+        match self {
+            Event::Stolen { thief, victim, .. }
+                if viewer != Some(thief) && viewer != Some(victim) =>
+            {
+                Event::Stolen {
+                    thief,
+                    victim,
+                    resource: None,
+                }
+            }
+            Event::DevCardBought { player, .. } if viewer != Some(player) => {
+                Event::DevCardBought { player, card: None }
+            }
+            e => e,
+        }
+    }
+}
+
 /// Receives events from [`crate::GameState::apply_with`]. `()` discards them
 /// at zero cost, which is what search algorithms use.
 pub trait EventSink {
@@ -166,6 +196,8 @@ impl EventSink for Vec<Event> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum RuleError {
     GameOver,
     InvalidPlayer,

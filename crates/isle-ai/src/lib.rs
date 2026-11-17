@@ -1,9 +1,16 @@
 //! # isle-ai
 //!
-//! Computer opponents. This first version ships the two baseline bots used
-//! for testing and benchmarking; search-based bots (expectimax, ISMCTS) will
-//! build on the same [`Bot`] trait.
+//! Computer opponents behind one [`Bot`] trait:
+//!
+//! * [`RandomBot`] / [`WeightedRandomBot`]: baselines for tests and benchmarks.
+//! * [`GreedyBot`]: plan-based heuristic player ("normal" difficulty) that
+//!   only uses public information and its own hand.
+//!
+//! Search-based bots (expectimax, ISMCTS) will build on the same trait.
 
+mod greedy;
+
+pub use greedy::GreedyBot;
 use isle_core::{Action, GameState, Rng};
 
 /// A computer player.
@@ -83,6 +90,19 @@ impl Bot for WeightedRandomBot {
     }
 }
 
+/// Names accepted by [`bot_by_name`].
+pub const BOT_NAMES: [&str; 3] = ["random", "weighted", "greedy"];
+
+/// Creates a bot from its name (`random`, `weighted` or `greedy`).
+pub fn bot_by_name(name: &str, seed: u64) -> Option<Box<dyn Bot>> {
+    Some(match name {
+        "random" => Box::new(RandomBot::new(seed)),
+        "weighted" => Box::new(WeightedRandomBot::new(seed)),
+        "greedy" => Box::new(GreedyBot::new(seed)),
+        _ => return None,
+    })
+}
+
 /// Result of [`play_game`].
 #[derive(Clone, Copy, Debug)]
 pub struct GameOutcome {
@@ -143,5 +163,45 @@ mod tests {
             }
         }
         assert!(finished >= 45, "{finished}/50 finished");
+    }
+
+    /// Plays `games` games with a fixed lineup; returns wins per seat.
+    fn tournament(games: u64, make: impl Fn(usize, u64) -> Box<dyn Bot>) -> [u32; 4] {
+        let mut wins = [0; 4];
+        for seed in 0..games {
+            let mut g = GameState::new(GameConfig::default(), 1000 + seed).unwrap();
+            let mut b: Vec<Box<dyn Bot>> = (0..4).map(|i| make(i, seed * 4 + i as u64)).collect();
+            let mut bots: Vec<&mut dyn Bot> =
+                b.iter_mut().map(|b| &mut **b as &mut dyn Bot).collect();
+            if let Some(w) = play_game(&mut g, &mut bots, 1000, true).winner {
+                wins[w as usize] += 1;
+            }
+        }
+        wins
+    }
+
+    #[test]
+    fn greedy_beats_weighted_random() {
+        let wins = tournament(100, |seat, seed| -> Box<dyn Bot> {
+            if seat == 0 {
+                Box::new(GreedyBot::new(seed))
+            } else {
+                Box::new(WeightedRandomBot::new(seed))
+            }
+        });
+        assert!(
+            wins[0] >= 70,
+            "greedy won only {} of 100 against three weighted-random bots",
+            wins[0]
+        );
+    }
+
+    #[test]
+    fn greedy_self_play_finishes() {
+        let wins = tournament(60, |_, seed| -> Box<dyn Bot> {
+            Box::new(GreedyBot::new(seed))
+        });
+        let finished: u32 = wins.iter().sum();
+        assert!(finished >= 57, "only {finished}/60 greedy games finished");
     }
 }

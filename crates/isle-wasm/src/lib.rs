@@ -1,133 +1,120 @@
-//! WebAssembly bindings. Data crosses the boundary as typed arrays (no
-//! serialization): the browser renders straight from engine tables.
+//! WebAssembly bindings.
+//!
+//! [`LocalMatch`] hosts a whole game in the browser: the engine and the bots
+//! run inside WASM, and JavaScript only ever receives the human seat's
+//! [`PlayerView`](isle_proto::PlayerView) plus events redacted for that seat,
+//! exactly what a server will send in online play.
 
+mod host;
+
+pub use host::{BotStep, HostError, MatchHost};
 use isle_ai::{Bot, WeightedRandomBot};
 use isle_core::topology::*;
-use isle_core::{Action, GameConfig, GameState, MAX_PLAYERS};
+use isle_core::{Action, GameConfig, GameState, MAX_PLAYERS, ResourceSet};
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-/// Value used in per-spot arrays for "nobody".
-pub const EMPTY: u8 = 255;
-/// Flag OR-ed into a building's owner when it is a city.
-pub const CITY_FLAG: u8 = 0x80;
+/// Values cross the boundary as JSON text: `serde_json` plus the browser's
+/// native `JSON.parse` is compact and fast, and the browser never has to
+/// encode actions (it picks them by index from `legalActions`).
+fn to_js<T: Serialize>(value: &T) -> Result<String, JsError> {
+    serde_json::to_string(value).map_err(|e| JsError::new(&e.to_string()))
+}
 
-#[wasm_bindgen]
-pub struct Game {
-    state: GameState,
-    bots: Vec<WeightedRandomBot>,
-    legal: Vec<Action>,
+fn err(e: HostError) -> JsError {
+    JsError::new(&e.code())
+}
+
+/// Legal actions together with the state version they belong to.
+#[derive(Serialize)]
+struct LegalActions<'a> {
+    version: u32,
+    actions: &'a [Action],
 }
 
 #[wasm_bindgen]
-impl Game {
-    /// New game with a random board. `seed` seeds both the board and the bots.
+pub struct LocalMatch {
+    host: MatchHost,
+}
+
+#[wasm_bindgen]
+impl LocalMatch {
+    /// New match. `human_seat` is the human's seat, or -1 to watch bots only.
+    /// `bot` is a bot name (`greedy`, `weighted`, `random`).
     #[wasm_bindgen(constructor)]
-    pub fn new(num_players: u8, seed: u32) -> Result<Game, JsError> {
-        let config = GameConfig {
-            num_players,
-            ..GameConfig::default()
-        };
-        let state = GameState::new(config, seed as u64)
-            .map_err(|e| JsError::new(&format!("invalid config: {e:?}")))?;
-        let bots = (0..num_players as u64)
-            .map(|p| WeightedRandomBot::new(((seed as u64) << 8) | p))
-            .collect();
-        Ok(Game {
-            state,
-            bots,
-            legal: Vec::with_capacity(128),
+    pub fn new(
+        num_players: u8,
+        seed: u32,
+        human_seat: i32,
+        bot: &str,
+    ) -> Result<LocalMatch, JsError> {
+        let human = u8::try_from(human_seat).ok();
+        Ok(LocalMatch {
+            host: MatchHost::new(num_players, seed as u64, human, bot).map_err(err)?,
         })
     }
 
-    #[wasm_bindgen(getter, js_name = numPlayers)]
-    pub fn num_players(&self) -> u8 {
-        self.state.config.num_players
+    /// Static board layout (`BoardInfo` JSON).
+    pub fn board(&self) -> Result<String, JsError> {
+        to_js(&isle_proto::board_info(&self.host.state))
     }
 
-    /// Terrain code per tile (see `Terrain`).
-    pub fn terrain(&self) -> Vec<u8> {
-        self.state.board.terrain.iter().map(|&t| t as u8).collect()
+    /// Current state as seen by the human seat (`PlayerView` JSON).
+    pub fn view(&self) -> Result<String, JsError> {
+        to_js(&isle_proto::player_view(&self.host.state, self.host.human))
     }
 
-    /// Number token per tile, 0 for the desert.
-    pub fn numbers(&self) -> Vec<u8> {
-        self.state.board.numbers.to_vec()
+    /// Legal actions for the human seat: `{ version, actions: Action[] }`.
+    /// Open-ended trade proposals are not listed; use `proposeTrade`.
+    #[wasm_bindgen(js_name = legalActions)]
+    pub fn legal_actions(&mut self) -> Result<String, JsError> {
+        let version = self.host.version;
+        to_js(&LegalActions {
+            version,
+            actions: self.host.legal_actions(),
+        })
     }
 
-    /// Harbor code per harbor slot: 0-4 special (resource), 5 generic 3:1.
-    pub fn harbors(&self) -> Vec<u8> {
-        self.state.board.harbors.iter().map(|h| h.code()).collect()
+    /// Plays `actions[index]` from the `legalActions()` result tagged with
+    /// `version`. Returns the resulting events (`Event[]` JSON); throws with
+    /// `Stale`, `NoSuchAction` or a `RuleError` name.
+    pub fn apply(&mut self, version: u32, index: u32) -> Result<String, JsError> {
+        to_js(
+            &self
+                .host
+                .apply_index(version, index as usize)
+                .map_err(err)?,
+        )
     }
 
-    #[wasm_bindgen(getter)]
-    pub fn robber(&self) -> u8 {
-        self.state.robber
+    /// Offers `give` for `get` (5 counts each, in resource order) to the
+    /// other players. Returns events; throws with a `RuleError` name.
+    #[wasm_bindgen(js_name = proposeTrade)]
+    pub fn propose_trade(&mut self, give: &[u8], get: &[u8]) -> Result<String, JsError> {
+        let set = |v: &[u8]| -> Result<ResourceSet, JsError> {
+            Ok(ResourceSet(
+                v.try_into().map_err(|_| JsError::new("InvalidTrade"))?,
+            ))
+        };
+        let (give, get) = (set(give)?, set(get)?);
+        to_js(&self.host.propose_trade(give, get).map_err(err)?)
     }
 
-    #[wasm_bindgen(getter)]
-    pub fn turn(&self) -> u32 {
-        self.state.turn
+    /// Seat of the bot that should act now, or -1 when waiting for the
+    /// human (or the game is over).
+    #[wasm_bindgen(js_name = nextBot)]
+    pub fn next_bot(&self) -> i32 {
+        self.host.next_bot().map_or(-1, i32::from)
     }
 
-    /// Winning seat, or -1.
-    #[wasm_bindgen(getter)]
-    pub fn winner(&self) -> i32 {
-        self.state.winner.map_or(-1, i32::from)
-    }
-
-    /// Per vertex: `EMPTY`, the owner seat, or owner | `CITY_FLAG`.
-    pub fn buildings(&self) -> Vec<u8> {
-        let mut out = vec![EMPTY; NUM_VERTICES];
-        for p in 0..self.state.num_players() {
-            for v in vertices_in(self.state.settlements[p]) {
-                out[v as usize] = p as u8;
-            }
-            for v in vertices_in(self.state.cities[p]) {
-                out[v as usize] = p as u8 | CITY_FLAG;
-            }
+    /// Lets the next bot act once. Returns `{ player, action, events }`
+    /// JSON (events redacted for the human), or `null`.
+    #[wasm_bindgen(js_name = stepBot)]
+    pub fn step_bot(&mut self) -> Result<String, JsError> {
+        match self.host.step_bot() {
+            Some(step) => to_js(&step),
+            None => Ok("null".into()),
         }
-        out
-    }
-
-    /// Per edge: `EMPTY` or the owner seat.
-    pub fn roads(&self) -> Vec<u8> {
-        let mut out = vec![EMPTY; NUM_EDGES];
-        for p in 0..self.state.num_players() {
-            for e in edges_in(self.state.roads[p]) {
-                out[e as usize] = p as u8;
-            }
-        }
-        out
-    }
-
-    /// Total victory points per seat (including hidden cards).
-    #[wasm_bindgen(js_name = victoryPoints)]
-    pub fn victory_points(&self) -> Vec<u8> {
-        (0..self.state.num_players() as u8)
-            .map(|p| self.state.victory_points(p))
-            .collect()
-    }
-
-    /// Cards in hand per seat.
-    #[wasm_bindgen(js_name = handSizes)]
-    pub fn hand_sizes(&self) -> Vec<u8> {
-        (0..self.state.num_players())
-            .map(|p| self.state.players[p].hand.total() as u8)
-            .collect()
-    }
-
-    /// Lets the built-in bots play up to `max_actions` actions. Returns
-    /// `true` while the game is still running.
-    pub fn step(&mut self, max_actions: u32) -> bool {
-        for _ in 0..max_actions {
-            let Some(p) = self.state.to_move() else {
-                return false;
-            };
-            self.state.legal_actions(p, &mut self.legal);
-            let a = self.bots[p as usize].choose(&self.state, p, &self.legal);
-            self.state.apply(p, a).expect("bots play legal actions");
-        }
-        self.state.to_move().is_some()
     }
 }
 
@@ -164,6 +151,12 @@ pub fn vertex_positions() -> Vec<i16> {
 #[wasm_bindgen(js_name = edgeVertices)]
 pub fn edge_vertices() -> Vec<u8> {
     EDGE_VERTICES.iter().flatten().copied().collect()
+}
+
+/// Corners of each tile (6 per tile, clockwise from the top), flattened.
+#[wasm_bindgen(js_name = tileVertices)]
+pub fn tile_vertices() -> Vec<u8> {
+    TILE_VERTICES.iter().flatten().copied().collect()
 }
 
 /// Coastal edge of each harbor slot.

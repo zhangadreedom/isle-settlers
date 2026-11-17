@@ -1,0 +1,22 @@
+[package]
+name = "isle-proto"
+description = "Per-player views and wire types shared by the Isle Settlers server, browser and bots."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Export TypeScript declarations (see tests/typescript.rs).
+ts = ["isle-core/ts", "dep:ts-rs"]
+
+[dependencies]
+isle-core = { workspace = true, features = ["serde"] }
+serde.workspace = true
+ts-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+isle-ai.workspace = true
+
+[lints]
+workspace = true

@@ -21,6 +21,8 @@ pub const LARGEST_ARMY_MIN: u8 = 3;
 
 /// Development card types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[repr(u8)]
 pub enum DevCard {
     Knight = 0,
@@ -58,6 +60,9 @@ impl DevCard {
 pub type DevCounts = [u8; 5];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct GameConfig {
     pub num_players: u8,
     pub victory_points: u8,
@@ -82,6 +87,9 @@ pub enum ConfigError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
 pub enum Phase {
     /// Initial placement: the current player places a free settlement.
     SetupSettlement,
@@ -105,6 +113,8 @@ pub enum Phase {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum TradeResponse {
     Pending,
     Accepted,
@@ -113,6 +123,8 @@ pub enum TradeResponse {
 
 /// An open offer from the current player to the other players.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TradeOffer {
     /// Cards the current player gives.
     pub give: ResourceSet,

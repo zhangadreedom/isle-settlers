@@ -2,11 +2,12 @@
 //!
 //! ```text
 //! cargo run --release -p isle-sim -- --games 100000 --bot weighted --threads 4
+//! cargo run --release -p isle-sim -- --games 2000 --bots greedy,weighted,weighted,weighted
 //! ```
 
 use std::time::Instant;
 
-use isle_ai::{Bot, RandomBot, WeightedRandomBot, play_game};
+use isle_ai::{BOT_NAMES, Bot, bot_by_name, play_game};
 use isle_core::{GameConfig, GameState, MAX_PLAYERS};
 
 struct Args {
@@ -14,7 +15,8 @@ struct Args {
     players: u8,
     seed: u64,
     threads: usize,
-    bot: String,
+    /// Bot name per seat.
+    bots: Vec<String>,
     max_turns: u32,
     check: bool,
 }
@@ -27,10 +29,11 @@ fn parse_args() -> Args {
         threads: std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1),
-        bot: "weighted".into(),
+        bots: Vec::new(),
         max_turns: 1000,
         check: false,
     };
+    let mut bot = String::from("weighted");
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut val = || {
@@ -42,7 +45,8 @@ fn parse_args() -> Args {
             "--players" => a.players = val().parse().unwrap_or_else(|_| usage("bad --players")),
             "--seed" => a.seed = val().parse().unwrap_or_else(|_| usage("bad --seed")),
             "--threads" => a.threads = val().parse().unwrap_or_else(|_| usage("bad --threads")),
-            "--bot" => a.bot = val(),
+            "--bot" => bot = val(),
+            "--bots" => a.bots = val().split(',').map(str::to_owned).collect(),
             "--max-turns" => {
                 a.max_turns = val().parse().unwrap_or_else(|_| usage("bad --max-turns"))
             }
@@ -54,8 +58,17 @@ fn parse_args() -> Args {
     if !(2..=MAX_PLAYERS as u8).contains(&a.players) {
         usage("--players must be 2-4");
     }
-    if !matches!(a.bot.as_str(), "random" | "weighted") {
-        usage("--bot must be random or weighted");
+    if a.bots.is_empty() {
+        a.bots = vec![bot; a.players as usize];
+    }
+    if a.bots.len() != a.players as usize {
+        usage("--bots needs one name per seat");
+    }
+    if let Some(bad) = a.bots.iter().find(|b| !BOT_NAMES.contains(&b.as_str())) {
+        usage(&format!(
+            "unknown bot {bad}; expected one of {}",
+            BOT_NAMES.join(", ")
+        ));
     }
     a.threads = a.threads.max(1);
     a
@@ -67,7 +80,8 @@ fn usage(err: &str) -> ! {
     }
     eprintln!(
         "usage: isle-sim [--games N] [--players 2-4] [--seed S] [--threads T]\n\
-         \x20               [--bot random|weighted] [--max-turns N] [--check]"
+         \x20               [--bot NAME | --bots NAME,NAME,...] [--max-turns N] [--check]\n\
+         bots: random, weighted, greedy"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 });
 }
@@ -93,20 +107,11 @@ fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
             .wrapping_mul(0x9E37_79B9)
             .wrapping_add(shard << 40 | i);
         let mut g = GameState::new(config, game_seed).expect("valid config");
-        let n = args.players as u64;
-        let outcome = if args.bot == "random" {
-            let mut b: Vec<RandomBot> = (0..n)
-                .map(|k| RandomBot::new(game_seed ^ (k + 1)))
-                .collect();
-            let mut bots: Vec<&mut dyn Bot> = b.iter_mut().map(|b| b as &mut dyn Bot).collect();
-            play_game(&mut g, &mut bots, args.max_turns, args.check)
-        } else {
-            let mut b: Vec<WeightedRandomBot> = (0..n)
-                .map(|k| WeightedRandomBot::new(game_seed ^ (k + 1)))
-                .collect();
-            let mut bots: Vec<&mut dyn Bot> = b.iter_mut().map(|b| b as &mut dyn Bot).collect();
-            play_game(&mut g, &mut bots, args.max_turns, args.check)
-        };
+        let mut b: Vec<Box<dyn Bot>> = (0..args.players as u64)
+            .map(|k| bot_by_name(&args.bots[k as usize], game_seed ^ (k + 1)).expect("validated"))
+            .collect();
+        let mut bots: Vec<&mut dyn Bot> = b.iter_mut().map(|b| &mut **b as &mut dyn Bot).collect();
+        let outcome = play_game(&mut g, &mut bots, args.max_turns, args.check);
         s.games += 1;
         s.turns += outcome.turns as u64;
         s.actions += outcome.actions;
@@ -148,7 +153,7 @@ fn main() {
         }
     }
     let g = total.games.max(1) as f64;
-    println!("bot             {}", args.bot);
+    println!("bots            {}", args.bots.join(", "));
     println!("players         {}", args.players);
     println!("threads         {}", args.threads);
     println!(

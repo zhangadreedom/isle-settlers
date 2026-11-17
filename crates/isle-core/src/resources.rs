@@ -5,6 +5,8 @@ use std::ops::{Add, AddAssign, Index, IndexMut, Sub, SubAssign};
 
 /// The five tradeable resources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[repr(u8)]
 pub enum Resource {
     Brick = 0,
@@ -36,6 +38,8 @@ impl Resource {
 
 /// Terrain of a land tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[repr(u8)]
 pub enum Terrain {
     Hills = 0,
@@ -63,6 +67,9 @@ impl Terrain {
 
 /// Kind of harbor: a generic 3:1 harbor or a 2:1 harbor for one resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
 pub enum HarborKind {
     Generic,
     Special(Resource),
@@ -90,6 +97,8 @@ impl HarborKind {
 
 /// A multiset of resources (counts per resource type).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ResourceSet(pub [u8; 5]);
 
 impl ResourceSet {

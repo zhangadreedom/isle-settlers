@@ -1,0 +1,313 @@
+//! # isle-proto
+//!
+//! What each seat is allowed to see. The server (and the in-browser match
+//! host) never sends a raw [`GameState`]: it sends a [`PlayerView`] projected
+//! for the viewer plus events passed through [`Event::redacted_for`].
+//!
+//! Hidden information: other players' hand composition and development
+//! cards, the order of the development deck, and the RNG state (future dice).
+//! Card *counts* are public.
+
+use isle_core::topology::{NUM_EDGES, NUM_VERTICES, edges_in, vertices_in};
+use isle_core::{
+    GameConfig, GameState, HarborKind, Phase, Resource, ResourceSet, Terrain, TradeOffer,
+};
+use serde::{Deserialize, Serialize};
+
+pub use isle_core::{Action, DevCard, Event, RuleError, TradeResponse};
+
+/// Owner value meaning "nobody" in per-spot arrays.
+pub const EMPTY: u8 = u8::MAX;
+/// Flag OR-ed into a building owner when the building is a city.
+pub const CITY_FLAG: u8 = 0x80;
+
+/// Static board layout, sent once per match.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct BoardInfo {
+    pub config: GameConfig,
+    /// Terrain per tile.
+    pub terrain: Vec<Terrain>,
+    /// Number token per tile (0 for the desert).
+    pub numbers: Vec<u8>,
+    /// Harbor per harbor slot.
+    pub harbors: Vec<HarborKind>,
+}
+
+/// Public information about a seat.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerPublic {
+    pub seat: u8,
+    pub resource_count: u8,
+    /// Unplayed development cards (including victory point cards).
+    pub dev_card_count: u8,
+    /// Development cards played face up, indexed by `DevCard`.
+    pub played_dev_cards: [u8; 5],
+    pub roads_left: u8,
+    pub settlements_left: u8,
+    pub cities_left: u8,
+    pub longest_road: u8,
+    /// Points from buildings, longest road and largest army.
+    pub public_victory_points: u8,
+    /// Harbor access bits: 1 << resource for 2:1 harbors, 1 << 5 for 3:1.
+    pub harbors: u8,
+}
+
+/// The viewer's own private information.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct PrivateInfo {
+    pub seat: u8,
+    pub hand: ResourceSet,
+    /// Playable development cards plus victory point cards, by `DevCard`.
+    pub dev_cards: [u8; 5],
+    /// Cards bought this turn (playable from the next turn), by `DevCard`.
+    pub new_dev_cards: [u8; 5],
+    /// Total points including hidden victory point cards.
+    pub victory_points: u8,
+    /// Best maritime ratio for giving each resource.
+    pub trade_ratios: [u8; 5],
+}
+
+/// Everything one seat may know about the game right now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerView {
+    /// Seat this view is for; `None` for spectators.
+    pub viewer: Option<u8>,
+    pub phase: Phase,
+    pub current: u8,
+    /// Seat expected to act next (during discards: lowest seat still owing).
+    pub to_move: Option<u8>,
+    pub turn: u32,
+    pub dice: Option<(u8, u8)>,
+    pub dev_card_played: bool,
+    pub robber: u8,
+    pub bank: ResourceSet,
+    pub dev_deck_len: u8,
+    /// Per vertex: `EMPTY`, owner seat, or owner | `CITY_FLAG`.
+    pub buildings: Vec<u8>,
+    /// Per edge: `EMPTY` or owner seat.
+    pub roads: Vec<u8>,
+    pub players: Vec<PlayerPublic>,
+    pub me: Option<PrivateInfo>,
+    /// Cards each seat still has to discard after a 7.
+    pub pending_discard: Vec<u8>,
+    pub trade: Option<TradeOffer>,
+    pub longest_road_owner: Option<u8>,
+    pub largest_army_owner: Option<u8>,
+    pub winner: Option<u8>,
+    /// Total points per seat, revealed once the game is over.
+    pub final_points: Option<Vec<u8>>,
+}
+
+pub fn board_info(state: &GameState) -> BoardInfo {
+    BoardInfo {
+        config: state.config,
+        terrain: state.board.terrain.to_vec(),
+        numbers: state.board.numbers.to_vec(),
+        harbors: state.board.harbors.to_vec(),
+    }
+}
+
+/// Projects `state` for `viewer` (`None` = spectator).
+pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
+    let n = state.num_players();
+    let mut buildings = vec![EMPTY; NUM_VERTICES];
+    let mut roads = vec![EMPTY; NUM_EDGES];
+    for p in 0..n {
+        for v in vertices_in(state.settlements[p]) {
+            buildings[v as usize] = p as u8;
+        }
+        for v in vertices_in(state.cities[p]) {
+            buildings[v as usize] = p as u8 | CITY_FLAG;
+        }
+        for e in edges_in(state.roads[p]) {
+            roads[e as usize] = p as u8;
+        }
+    }
+    let players = (0..n as u8)
+        .map(|p| {
+            let ps = &state.players[p as usize];
+            PlayerPublic {
+                seat: p,
+                resource_count: ps.hand.total() as u8,
+                dev_card_count: ps.dev_card_count() as u8,
+                played_dev_cards: ps.played_dev_cards,
+                roads_left: ps.roads_left,
+                settlements_left: ps.settlements_left,
+                cities_left: ps.cities_left,
+                longest_road: ps.longest_road,
+                public_victory_points: state.public_victory_points(p),
+                harbors: ps.harbors,
+            }
+        })
+        .collect();
+    let me = viewer.filter(|&p| (p as usize) < n).map(|p| {
+        let ps = &state.players[p as usize];
+        PrivateInfo {
+            seat: p,
+            hand: ps.hand,
+            dev_cards: ps.dev_cards,
+            new_dev_cards: ps.new_dev_cards,
+            victory_points: state.victory_points(p),
+            trade_ratios: Resource::ALL.map(|r| state.trade_ratio(p, r)),
+        }
+    });
+    PlayerView {
+        viewer,
+        phase: state.phase,
+        current: state.current,
+        to_move: state.to_move(),
+        turn: state.turn,
+        dice: state.dice,
+        dev_card_played: state.dev_card_played,
+        robber: state.robber,
+        bank: state.bank,
+        dev_deck_len: state.dev_deck_len,
+        buildings,
+        roads,
+        players,
+        me,
+        pending_discard: state.pending_discard[..n].to_vec(),
+        trade: state.trade,
+        longest_road_owner: state.longest_road_owner,
+        largest_army_owner: state.largest_army_owner,
+        winner: state.winner,
+        final_points: state
+            .winner
+            .map(|_| (0..n as u8).map(|p| state.victory_points(p)).collect()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isle_ai::{Bot, WeightedRandomBot};
+    use isle_core::{GameConfig, Rng};
+
+    /// Mid-game states from bot play.
+    fn sample_states() -> Vec<GameState> {
+        let mut out = Vec::new();
+        for seed in 0..30u64 {
+            let mut g = GameState::new(GameConfig::default(), seed).unwrap();
+            let mut bots: Vec<WeightedRandomBot> = (0..4)
+                .map(|k| WeightedRandomBot::new(seed * 7 + k))
+                .collect();
+            let mut legal = Vec::new();
+            for step in 0..400 {
+                let Some(p) = g.to_move() else { break };
+                g.legal_actions(p, &mut legal);
+                let a = bots[p as usize].choose(&g, p, &legal);
+                g.apply(p, a).unwrap();
+                if step % 50 == 49 {
+                    out.push(g);
+                }
+            }
+        }
+        out
+    }
+
+    /// Changes everything a viewer must not be able to observe: other seats'
+    /// hand composition and development cards (keeping counts), the deck
+    /// order and the RNG. Conservation is not preserved; only the view matters.
+    fn scramble_hidden(g: &GameState, viewer: u8, seed: u64) -> GameState {
+        let mut h = *g;
+        for q in 0..h.num_players() {
+            if q == viewer as usize {
+                continue;
+            }
+            let total = h.players[q].hand.total() as u8;
+            h.players[q].hand =
+                ResourceSet::single(Resource::from_index((q + 1) % 5).unwrap(), total);
+            let d = h.players[q].dev_cards;
+            h.players[q].dev_cards = [d[1], d[2], d[3], d[4], d[0]];
+            let nd = h.players[q].new_dev_cards;
+            h.players[q].new_dev_cards = [nd[4], nd[0], nd[1], nd[2], nd[3]];
+        }
+        let mut rng = Rng::new(seed);
+        let len = h.dev_deck_len as usize;
+        rng.shuffle(&mut h.dev_deck[..len]);
+        h.rng = Rng::new(seed ^ 0xABCD);
+        h
+    }
+
+    #[test]
+    fn views_do_not_depend_on_hidden_information() {
+        for (i, g) in sample_states().iter().enumerate() {
+            for viewer in 0..g.num_players() as u8 {
+                let h = scramble_hidden(g, viewer, i as u64);
+                // Scrambling VP cards would change the final score reveal.
+                if g.winner.is_none() {
+                    assert_eq!(player_view(g, Some(viewer)), player_view(&h, Some(viewer)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn views_show_own_private_info() {
+        for g in sample_states() {
+            for viewer in 0..g.num_players() as u8 {
+                let v = player_view(&g, Some(viewer));
+                let me = v.me.unwrap();
+                assert_eq!(me.hand, g.players[viewer as usize].hand);
+                assert_eq!(me.victory_points, g.victory_points(viewer));
+                assert_eq!(
+                    v.players[viewer as usize].resource_count as u32,
+                    me.hand.total()
+                );
+            }
+            assert!(player_view(&g, None).me.is_none());
+        }
+    }
+
+    #[test]
+    fn private_events_are_redacted() {
+        let stolen = Event::Stolen {
+            thief: 0,
+            victim: 1,
+            resource: Some(Resource::Ore),
+        };
+        assert_eq!(stolen.redacted_for(Some(0)), stolen);
+        assert_eq!(stolen.redacted_for(Some(1)), stolen);
+        assert_eq!(
+            stolen.redacted_for(Some(2)),
+            Event::Stolen {
+                thief: 0,
+                victim: 1,
+                resource: None
+            }
+        );
+        assert_eq!(
+            stolen.redacted_for(None),
+            Event::Stolen {
+                thief: 0,
+                victim: 1,
+                resource: None
+            }
+        );
+        let bought = Event::DevCardBought {
+            player: 2,
+            card: Some(DevCard::Knight),
+        };
+        assert_eq!(bought.redacted_for(Some(2)), bought);
+        assert_eq!(
+            bought.redacted_for(Some(0)),
+            Event::DevCardBought {
+                player: 2,
+                card: None
+            }
+        );
+        let roll = Event::DiceRolled {
+            player: 1,
+            dice: (3, 4),
+        };
+        assert_eq!(roll.redacted_for(None), roll);
+    }
+}
