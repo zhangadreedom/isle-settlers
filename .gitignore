@@ -12,3 +12,6 @@ web/src/wasm/
 .vscode/*
 !.vscode/extensions.json
 *.swp
+
+# E2E screenshots
+web/e2e/out/

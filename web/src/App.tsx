@@ -1,185 +1,207 @@
-import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
-import { loadEngine, type Engine, type Game } from './engine';
-import { PLAYER_CSS } from './board/palette';
-import type { BoardRenderer } from './board/BoardRenderer';
+import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import type { BoardRenderer, Insets, PickKind } from './board/BoardRenderer';
+import { DiceView, Flights, GameLog, HandBar, PlayerList } from './components/Hud';
+import { Lobby, randomSeed } from './components/Lobby';
+import { DiscardModal, GameOverModal, MonopolyModal, TradeModal, VictimModal, YearOfPlentyModal } from './components/Modals';
+import { loadEngine, Match, type Topology } from './engine';
+import { boardData, createGame, type Game, type GameOptions } from './game/controller';
+import type { DevCard } from './generated/proto';
 
-const randomSeed = () => Math.floor(Math.random() * 1_000_000);
+declare global {
+  interface Window {
+    /** Test hook, present with `?debug` in the URL. */
+    __isle?: { game: () => Game | null; project: (kind: PickKind, id: number) => { x: number; y: number }; topology: Topology };
+  }
+}
+
+/**
+ * Screen space taken by HUD panels marked `data-inset`. Each panel is
+ * attributed to the side where it hides the least of the screen.
+ */
+function measureInsets(): Insets {
+  const w = innerWidth;
+  const h = innerHeight;
+  const insets: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
+  for (const el of document.querySelectorAll<HTMLElement>('[data-inset]')) {
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const options: [keyof Insets, number][] = [
+      ['top', r.bottom],
+      ['bottom', h - r.top],
+      ['left', r.right],
+      ['right', w - r.left],
+    ];
+    const area = ([side, extent]: [keyof Insets, number]) => extent * (side === 'top' || side === 'bottom' ? w : h);
+    const [side, extent] = options.reduce((a, b) => (area(b) < area(a) ? b : a));
+    insets[side] = Math.max(insets[side], extent + 8);
+  }
+  return insets;
+}
 
 export default function App() {
   let stage!: HTMLDivElement;
-  let engine: Engine | undefined;
-  let game: Game | undefined;
-  let renderer: BoardRenderer | undefined;
-  let timer: number | undefined;
-
+  const params = new URLSearchParams(location.search);
+  const [renderer, setRenderer] = createSignal<BoardRenderer>();
+  const [topology, setTopology] = createSignal<Topology>();
+  const [game, setGame] = createSignal<Game | null>(null);
   const [status, setStatus] = createSignal('加载规则引擎…');
-  const [seed, setSeed] = createSignal(randomSeed());
-  const [players, setPlayers] = createSignal(4);
-  const [points, setPoints] = createSignal<number[]>([]);
-  const [hands, setHands] = createSignal<number[]>([]);
-  const [turn, setTurn] = createSignal(0);
-  const [winner, setWinner] = createSignal(-1);
-  const [playing, setPlaying] = createSignal(false);
   const [backend, setBackend] = createSignal('');
-  const [drawCalls, setDrawCalls] = createSignal(0);
-  const [bench, setBench] = createSignal('');
+  const [previewSeed, setPreviewSeed] = createSignal(randomSeed());
+  const [tradeOpen, setTradeOpen] = createSignal(false);
+  const [devModal, setDevModal] = createSignal<'YearOfPlenty' | 'Monopoly' | null>(null);
+  let lastOptions: GameOptions | null = null;
 
   onMount(async () => {
     try {
-      const loaded = await loadEngine();
-      engine = loaded.engine;
+      const topo = await loadEngine();
+      setTopology(topo);
       setStatus('加载 3D 场景…');
-      // Three.js lives in its own chunk, loaded after the HUD is on screen.
+      // Three.js lives in its own chunk, loaded after the lobby is on screen.
       const { BoardRenderer } = await import('./board/BoardRenderer');
-      const forceWebGL = new URLSearchParams(location.search).get('renderer') === 'webgl';
-      renderer = await BoardRenderer.create(stage, loaded.topology, forceWebGL);
-      setBackend(renderer.backend);
-      renderer.onBackendChange = setBackend;
-      newGame();
+      const r = await BoardRenderer.create(stage, topo, params.get('renderer') === 'webgl');
+      r.onBackendChange = setBackend;
+      setBackend(r.backend);
+      setRenderer(r);
       setStatus('');
+      if (params.has('debug')) window.__isle = { game, project: (k, id) => r.project(k, id), topology: topo };
     } catch (err) {
       console.error(err);
       setStatus(`初始化失败：${err instanceof Error ? err.message : String(err)}`);
     }
   });
 
-  onCleanup(() => {
-    stop();
-    renderer?.dispose();
-    game?.free();
+  // In the lobby, show the map that will be played.
+  createEffect(() => {
+    const r = renderer();
+    const seed = previewSeed();
+    if (!r || game()) return;
+    const m = new Match(4, seed, null, 'greedy');
+    r.setBoard(boardData(m.board));
+    const v = m.view();
+    r.setPieces({ buildings: v.buildings, roads: v.roads, robber: v.robber }, false);
+    m.free();
   });
 
-  function sync() {
-    if (!game || !renderer) return;
-    renderer.setPieces({ buildings: game.buildings(), roads: game.roads(), robber: game.robber });
-    setPoints(Array.from(game.victoryPoints()));
-    setHands(Array.from(game.handSizes()));
-    setTurn(game.turn);
-    setWinner(game.winner);
-    requestAnimationFrame(() => setDrawCalls(renderer?.drawCalls ?? 0));
-  }
-
-  function newGame() {
-    if (!engine || !renderer) return;
-    stop();
-    game?.free();
-    game = new engine.Game(players(), seed());
-    renderer.setBoard({ terrain: game.terrain(), numbers: game.numbers(), harbors: game.harbors() });
-    sync();
-  }
-
-  function start() {
-    if (!game) return;
-    if (game.winner >= 0) newGame();
-    setPlaying(true);
-    const tick = () => {
-      const running = game!.step(2);
-      sync();
-      if (running) timer = window.setTimeout(tick, 45);
-      else stop();
+  // Keep the island clear of the HUD while a game is on.
+  createEffect(() => {
+    const r = renderer();
+    if (!r) return;
+    if (!game()) {
+      r.setInsets({ top: 0, right: 0, bottom: 0, left: 0 });
+      return;
+    }
+    let frame = 0;
+    const fit = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => r.setInsets(measureInsets()));
     };
-    tick();
+    const observer = new ResizeObserver(fit);
+    requestAnimationFrame(() => document.querySelectorAll('[data-inset]').forEach((el) => observer.observe(el)));
+    window.addEventListener('resize', fit);
+    onCleanup(() => {
+      observer.disconnect();
+      window.removeEventListener('resize', fit);
+      cancelAnimationFrame(frame);
+    });
+  });
+
+  // Close the trade window once it is no longer the human's main phase.
+  createEffect(() => {
+    const g = game();
+    if (!g) return;
+    const v = g.view();
+    if (!(v.phase.type === 'Main' && v.current === g.me)) {
+      setTradeOpen(false);
+      setDevModal(null);
+    }
+  });
+
+  const onKey = (e: KeyboardEvent) => {
+    const g = game();
+    if (!g || (e.target as HTMLElement).closest('input, select, textarea')) return;
+    if (e.key === 'Escape') {
+      g.setMode(null);
+      setTradeOpen(false);
+      setDevModal(null);
+    } else if (e.key === ' ' && g.has('RollDice')) {
+      e.preventDefault();
+      g.act((a) => a.type === 'RollDice');
+    }
+  };
+  window.addEventListener('keydown', onKey);
+
+  onCleanup(() => {
+    window.removeEventListener('keydown', onKey);
+    game()?.dispose();
+    renderer()?.dispose();
+  });
+
+  function start(o: GameOptions) {
+    const r = renderer();
+    const t = topology();
+    if (!r || !t) return;
+    lastOptions = o;
+    game()?.dispose();
+    setTradeOpen(false);
+    setGame(createGame(o, r, t));
   }
 
-  function stop() {
-    window.clearTimeout(timer);
-    setPlaying(false);
+  function toLobby() {
+    game()?.dispose();
+    setGame(null);
+    setPreviewSeed(randomSeed());
   }
 
-  function finish() {
-    stop();
-    game?.step(1_000_000);
-    sync();
-  }
-
-  async function runBenchmark() {
-    if (!engine) return;
-    setBench('运行中…');
-    await new Promise((r) => setTimeout(r, 30));
-    const games = 1000;
-    const t0 = performance.now();
-    const actions = engine.runBenchmark(games, seed());
-    const secs = (performance.now() - t0) / 1000;
-    setBench(`WASM：${Math.round(games / secs).toLocaleString()} 局/秒 · ${(actions / secs / 1e6).toFixed(1)}M 动作/秒`);
+  function playDevCard(g: Game, card: DevCard) {
+    if (card === 'Knight') g.act((a) => a.type === 'PlayKnight');
+    else if (card === 'RoadBuilding') g.act((a) => a.type === 'PlayRoadBuilding');
+    else if (card === 'YearOfPlenty' || card === 'Monopoly') setDevModal(card);
   }
 
   return (
     <div class="app">
       <div class="stage" ref={stage} />
 
-      <header class="panel controls">
-        <div class="title">
-          <h1>Isle Settlers</h1>
-          <span class="tag">技术骨架 v0.1</span>
-        </div>
-        <div class="row">
-          <label>
-            种子
-            <input
-              type="number"
-              value={seed()}
-              onChange={(e) => {
-                setSeed(Number(e.currentTarget.value) || 0);
-                newGame();
-              }}
-            />
-          </label>
-          <label>
-            人数
-            <select
-              value={players()}
-              onChange={(e) => {
-                setPlayers(Number(e.currentTarget.value));
-                newGame();
-              }}
-            >
-              <option value="2">2</option>
-              <option value="3">3</option>
-              <option value="4">4</option>
-            </select>
-          </label>
-          <button
-            onClick={() => {
-              setSeed(randomSeed());
-              newGame();
-            }}
-          >
-            新地图
-          </button>
-        </div>
-        <div class="row">
-          <button class="primary" onClick={() => (playing() ? stop() : start())}>
-            {playing() ? '暂停' : 'AI 自动对局'}
-          </button>
-          <button onClick={finish}>直接到终局</button>
-          <button onClick={runBenchmark}>浏览器基准</button>
-        </div>
-        <Show when={bench()}>
-          <p class="muted">{bench()}</p>
-        </Show>
-      </header>
+      <Show when={game()} fallback={<Lobby ready={!!renderer()} onStart={start} seed={previewSeed()} onSeed={setPreviewSeed} />}>
+        {(g) => (
+          <>
+            <header class="topbar">
+              <button class="ghost" onClick={toLobby}>
+                ← 大厅
+              </button>
+            </header>
+            <DiceView game={g()} />
+            <PlayerList game={g()} />
+            <GameLog game={g()} />
+            <HandBar game={g()} onTrade={() => setTradeOpen(true)} onDevCard={(c) => playDevCard(g(), c)} />
+            <Flights game={g()} />
 
-      <aside class="panel scoreboard">
-        <div class="muted">第 {turn()} 回合</div>
-        <For each={points()}>
-          {(vp, i) => (
-            <div class="player" classList={{ winner: winner() === i() }}>
-              <span class="dot" style={{ background: PLAYER_CSS[i()] }} />
-              <span class="name">AI {i() + 1}</span>
-              <span class="cards muted">{hands()[i()]} 张</span>
-              <b>{vp} 分</b>
-            </div>
-          )}
-        </For>
-        <Show when={winner() >= 0}>
-          <div class="result">AI {winner() + 1} 获胜</div>
-        </Show>
-      </aside>
+            <Show when={g().me !== null && g().view().phase.type === 'Discard' && g().view().pendingDiscard[g().me!] > 0}>
+              <DiscardModal game={g()} />
+            </Show>
+            <VictimModal game={g()} />
+            <Show when={tradeOpen()}>
+              <TradeModal game={g()} onClose={() => setTradeOpen(false)} />
+            </Show>
+            <Show when={devModal() === 'YearOfPlenty'}>
+              <YearOfPlentyModal game={g()} onClose={() => setDevModal(null)} />
+            </Show>
+            <Show when={devModal() === 'Monopoly'}>
+              <MonopolyModal game={g()} onClose={() => setDevModal(null)} />
+            </Show>
+            <Show when={g().view().winner !== null}>
+              <GameOverModal game={g()} onLobby={toLobby} onAgain={() => lastOptions && start({ ...lastOptions, seed: randomSeed() })} />
+            </Show>
+            <Show when={g().toast()}>
+              <div class="toast" role="status">
+                {g().toast()}
+              </div>
+            </Show>
+          </>
+        )}
+      </Show>
 
-      <footer class="badge muted">
-        {backend() ? `${backend()} · 按需渲染 · ${drawCalls()} 次绘制` : ''}
-      </footer>
-
+      <footer class="renderer-info muted">{backend() ? `${backend()} · 按需渲染` : ''}</footer>
       <Show when={status()}>
         <div class="loading">{status()}</div>
       </Show>

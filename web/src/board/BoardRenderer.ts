@@ -1,11 +1,13 @@
 // Three.js board renderer.
 //
-// * WebGPURenderer, falling back to WebGL2 automatically.
-// * Render on demand: a frame is drawn only when the camera moves or the
-//   game state changes, so an idle board costs no GPU time.
-// * Repeated objects (tiles, decorations, pieces) are InstancedMeshes, which
-//   keeps the whole scene to a few dozen draw calls.
-// * Positions come straight from the engine's lattice tables.
+// * WebGPURenderer, falling back to WebGL2 automatically (and rebuilding on
+//   WebGL2 if a WebGPU device is lost).
+// * Render on demand: frames are drawn only while the camera moves, an
+//   animation runs or the state changes; an idle board costs no GPU time.
+// * Repeated objects (tiles, decorations, pieces, markers) are
+//   InstancedMeshes, keeping the scene to a few dozen draw calls.
+// * Picking intersects the pointer ray with the board plane and snaps to the
+//   nearest highlighted spot; no mesh raycasting.
 
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -13,26 +15,57 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CITY_FLAG, EMPTY, type Topology } from '../engine';
 import { BEACH, PLAYER_COLORS, RESOURCE_COLORS, RESOURCE_LABELS, SEA, SKY, TERRAIN_COLORS } from './palette';
 
+/** Static layout as numeric codes (see palette for terrain/harbor codes). */
 export interface BoardData {
-  terrain: Uint8Array;
-  numbers: Uint8Array;
-  harbors: Uint8Array;
+  terrain: number[];
+  numbers: number[];
+  harbors: number[];
 }
 
 export interface PieceData {
-  buildings: Uint8Array;
-  roads: Uint8Array;
+  buildings: number[];
+  roads: number[];
   robber: number;
+}
+
+export type PickKind = 'vertex' | 'edge' | 'tile';
+
+/** Screen space (CSS px) covered by HUD panels on each side. */
+export interface Insets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export interface Highlights {
+  kind: PickKind;
+  ids: number[];
+}
+
+type Backend = 'WebGPU' | 'WebGL2';
+
+/** Minimal slice of the WebGPU device API we rely on (no @webgpu/types needed). */
+interface DeviceLike {
+  lost: Promise<{ reason: string; message: string }>;
 }
 
 const TILE_HEIGHT = 0.22;
 const TOP = TILE_HEIGHT;
 const SQRT3_2 = Math.sqrt(3) / 2;
 const PIPS = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
-const BASE_CAMERA_DISTANCE = 13.5;
+/** Radius (world units) that must stay visible: tiles plus harbor labels. */
+const ISLAND_RADIUS = 5.2;
 const CAMERA_DIR = new THREE.Vector3(0, 10.5, 8.5).normalize();
+const DROP_MS = 420;
+const ROBBER_MS = 550;
+/** Pick radius (world units) per target kind. */
+const PICK_RADIUS: Record<PickKind, number> = { vertex: 0.38, edge: 0.32, tile: 0.9 };
+const ACCENT = 0xf0b429;
 
 const lattice = (x: number, y: number): [number, number] => [x * SQRT3_2, y * 0.5];
+const easeOutBack = (t: number) => 1 + 2.2 * (t - 1) ** 3 + 1.2 * (t - 1) ** 2;
+const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
 
 /** Small deterministic PRNG so decorations stay put between renders. */
 function prng(seed: number) {
@@ -47,6 +80,10 @@ function prng(seed: number) {
 
 function std(color: number, extra: Partial<THREE.MeshStandardMaterialParameters> = {}) {
   return new THREE.MeshStandardMaterial({ color, roughness: 0.85, flatShading: true, ...extra });
+}
+
+function createRenderer(forceWebGL: boolean) {
+  return new THREE.WebGPURenderer({ antialias: true, forceWebGL });
 }
 
 // ---- shared geometry ----
@@ -68,20 +105,23 @@ function box(w: number, h: number, d: number, x: number, y: number, z: number) {
 }
 
 const settlementGeometry = mergeGeometries([
-  box(0.2, 0.15, 0.2, 0, 0.075, 0),
-  prism(0.26, 0.13, 0.22).translate(0, 0.15, 0),
+  box(0.24, 0.18, 0.24, 0, 0.09, 0),
+  prism(0.31, 0.16, 0.26).translate(0, 0.18, 0),
 ])!;
 
 const cityGeometry = mergeGeometries([
-  box(0.38, 0.15, 0.22, 0, 0.075, 0),
-  box(0.17, 0.3, 0.22, -0.1, 0.15, 0),
-  prism(0.24, 0.12, 0.22).translate(0.09, 0.15, 0),
-  prism(0.21, 0.1, 0.24).translate(-0.1, 0.3, 0),
+  box(0.44, 0.18, 0.26, 0, 0.09, 0),
+  box(0.2, 0.36, 0.26, -0.12, 0.18, 0),
+  prism(0.28, 0.14, 0.26).translate(0.11, 0.18, 0),
+  prism(0.25, 0.12, 0.28).translate(-0.12, 0.36, 0),
 ])!;
 
-const roadGeometry = new THREE.BoxGeometry(0.62, 0.08, 0.1);
+const roadGeometry = new THREE.BoxGeometry(0.64, 0.09, 0.12);
 const tokenGeometry = new THREE.CylinderGeometry(0.25, 0.25, 0.05, 24);
 const labelGeometry = new THREE.PlaneGeometry(0.5, 0.5).rotateX(-Math.PI / 2);
+const vertexMarkerGeometry = new THREE.CylinderGeometry(0.14, 0.14, 0.05, 20);
+const edgeMarkerGeometry = new THREE.BoxGeometry(0.5, 0.05, 0.14);
+const tileMarkerGeometry = new THREE.RingGeometry(0.72, 0.86, 6, 1, Math.PI / 6).rotateX(-Math.PI / 2);
 
 interface Decoration {
   geometry: THREE.BufferGeometry;
@@ -90,7 +130,7 @@ interface Decoration {
   scale: [number, number];
   squash?: number;
   /** Optional cap stacked on each instance (snow on peaks). */
-  cap?: { geometry: THREE.BufferGeometry; material: THREE.Material; lift: number };
+  cap?: { geometry: THREE.BufferGeometry; material: THREE.Material };
 }
 
 const DECORATIONS: Record<number, Decoration> = {
@@ -103,74 +143,75 @@ const DECORATIONS: Record<number, Decoration> = {
     material: std(0x6f747d),
     count: 3,
     scale: [0.75, 1.15],
-    cap: { geometry: new THREE.ConeGeometry(0.108, 0.23, 5).translate(0, 0.485, 0), material: std(0xf4f6f8), lift: 0.002 },
+    cap: { geometry: new THREE.ConeGeometry(0.108, 0.23, 5).translate(0, 0.485, 0), material: std(0xf4f6f8) },
   },
   5: { geometry: new THREE.SphereGeometry(0.25, 8, 5), material: std(0xd8c08a), count: 2, scale: [0.8, 1.2], squash: 0.3 },
 };
 
-function numberTexture(n: number) {
+function canvasTexture(draw: (ctx: CanvasRenderingContext2D, size: number) => void) {
   const size = 128;
   const c = document.createElement('canvas');
   c.width = c.height = size;
-  const ctx = c.getContext('2d')!;
-  const red = n === 6 || n === 8;
-  ctx.fillStyle = red ? '#b8322a' : '#2b2b2b';
-  ctx.font = `bold ${red ? 64 : 58}px system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(String(n), size / 2, size / 2 - 8);
-  const pips = PIPS[n];
-  for (let i = 0; i < pips; i++) {
-    ctx.beginPath();
-    ctx.arc(size / 2 + (i - (pips - 1) / 2) * 11, size / 2 + 34, 4, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  draw(c.getContext('2d')!, size);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = 4;
   return t;
 }
 
+function numberTexture(n: number) {
+  return canvasTexture((ctx, size) => {
+    const red = n === 6 || n === 8;
+    ctx.fillStyle = red ? '#b8322a' : '#2b2b2b';
+    ctx.font = `bold ${red ? 64 : 58}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(n), size / 2, size / 2 - 8);
+    const pips = PIPS[n];
+    for (let i = 0; i < pips; i++) {
+      ctx.beginPath();
+      ctx.arc(size / 2 + (i - (pips - 1) / 2) * 11, size / 2 + 34, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+}
+
 function harborTexture(code: number) {
-  const size = 128;
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const ctx = c.getContext('2d')!;
-  ctx.beginPath();
-  ctx.arc(size / 2, size / 2, 58, 0, Math.PI * 2);
-  ctx.fillStyle = '#f6efdc';
-  ctx.fill();
-  ctx.lineWidth = 10;
-  ctx.strokeStyle = code === 5 ? '#5b6770' : `#${RESOURCE_COLORS[code].toString(16).padStart(6, '0')}`;
-  ctx.stroke();
-  ctx.fillStyle = '#2b2b2b';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = 'bold 40px system-ui, sans-serif';
-  ctx.fillText(code === 5 ? '3:1' : '2:1', size / 2, code === 5 ? size / 2 : size / 2 - 14);
-  if (code !== 5) {
-    ctx.font = 'bold 30px system-ui, sans-serif';
-    ctx.fillText(RESOURCE_LABELS[code], size / 2, size / 2 + 24);
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
+  return canvasTexture((ctx, size) => {
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, 58, 0, Math.PI * 2);
+    ctx.fillStyle = '#f6efdc';
+    ctx.fill();
+    ctx.lineWidth = 10;
+    ctx.strokeStyle = code === 5 ? '#5b6770' : `#${RESOURCE_COLORS[code].toString(16).padStart(6, '0')}`;
+    ctx.stroke();
+    ctx.fillStyle = '#2b2b2b';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 40px system-ui, sans-serif';
+    ctx.fillText(code === 5 ? '3:1' : '2:1', size / 2, code === 5 ? size / 2 : size / 2 - 14);
+    if (code !== 5) {
+      ctx.font = 'bold 30px system-ui, sans-serif';
+      ctx.fillText(RESOURCE_LABELS[code], size / 2, size / 2 + 24);
+    }
+  });
 }
 
-type Backend = 'WebGPU' | 'WebGL2';
-
-/** Minimal slice of the WebGPU device API we rely on (no @webgpu/types needed). */
-interface DeviceLike {
-  lost: Promise<{ reason: string; message: string }>;
-}
-
-function createRenderer(forceWebGL: boolean) {
-  return new THREE.WebGPURenderer({ antialias: true, forceWebGL });
+/** One placed piece; `born` drives the drop-in animation. */
+interface Piece {
+  x: number;
+  z: number;
+  angle: number;
+  owner: number;
+  born: number;
 }
 
 export class BoardRenderer {
   /** Called when the renderer switches backend (WebGPU device loss). */
   onBackendChange?: (backend: Backend) => void;
+  /** Called when a highlighted spot is clicked or tapped. */
+  onPick?: (kind: PickKind, id: number) => void;
+
   private _backend: Backend = 'WebGL2';
   private recovering = false;
   private readonly scene = new THREE.Scene();
@@ -180,13 +221,31 @@ export class BoardRenderer {
   private readonly roads: THREE.InstancedMesh;
   private readonly settlements: THREE.InstancedMesh;
   private readonly cities: THREE.InstancedMesh;
+  private readonly markers: Record<PickKind, THREE.InstancedMesh>;
   private readonly robber = new THREE.Group();
   private readonly resizeObserver: ResizeObserver;
   private readonly tileXZ: [number, number][];
   private readonly vertexXZ: [number, number][];
+  private readonly edgeXZ: { x: number; z: number; angle: number }[];
   private readonly numberTextures = new Map<number, THREE.Texture>();
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -TOP);
   private renderQueued = false;
   private disposables: { dispose(): void }[] = [];
+
+  // Pieces keyed by spot so new ones can be animated.
+  private roadPieces = new Map<number, Piece>();
+  private buildingPieces = new Map<number, Piece & { city: boolean }>();
+  private robberFrom: [number, number] | null = null;
+  private robberTo: [number, number] = [0, 0];
+  private robberStart = 0;
+
+  private insets: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
+  /** Camera distance that frames the island; user zoom is kept relative to it. */
+  private fitDistance = 0;
+  private highlights: Highlights | null = null;
+  private hovered = -1;
+  private pointerDown: { x: number; y: number; t: number } | null = null;
 
   /** `forceWebGL` skips WebGPU (also available as `?renderer=webgl`). */
   static async create(container: HTMLElement, topology: Topology, forceWebGL = false) {
@@ -206,6 +265,12 @@ export class BoardRenderer {
     for (let i = 0; i < topology.tilePos.length; i += 2) this.tileXZ.push(lattice(topology.tilePos[i], topology.tilePos[i + 1]));
     this.vertexXZ = [];
     for (let i = 0; i < topology.vertexPos.length; i += 2) this.vertexXZ.push(lattice(topology.vertexPos[i], topology.vertexPos[i + 1]));
+    this.edgeXZ = [];
+    for (let e = 0; e < topology.edgeVertices.length / 2; e++) {
+      const [ax, az] = this.vertexXZ[topology.edgeVertices[2 * e]];
+      const [bx, bz] = this.vertexXZ[topology.edgeVertices[2 * e + 1]];
+      this.edgeXZ.push({ x: (ax + bx) / 2, z: (az + bz) / 2, angle: -Math.atan2(bz - az, bx - ax) });
+    }
 
     this.scene.background = new THREE.Color(SKY);
     this.scene.fog = new THREE.Fog(SKY, 22, 60);
@@ -236,10 +301,22 @@ export class BoardRenderer {
     this.scene.add(sea, beach, this.board);
 
     const pieceMaterial = std(0xffffff, { roughness: 0.6 });
-    this.roads = this.instanced(roadGeometry, pieceMaterial, topology.edgeVertices.length / 2, true);
+    this.roads = this.instanced(roadGeometry, pieceMaterial, this.edgeXZ.length, true);
     this.settlements = this.instanced(settlementGeometry, pieceMaterial, this.vertexXZ.length, true);
     this.cities = this.instanced(cityGeometry, pieceMaterial, this.vertexXZ.length, true);
     this.scene.add(this.roads, this.settlements, this.cities);
+
+    const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false });
+    this.markers = {
+      vertex: this.instanced(vertexMarkerGeometry, markerMaterial, this.vertexXZ.length, true),
+      edge: this.instanced(edgeMarkerGeometry, markerMaterial, this.edgeXZ.length, true),
+      tile: this.instanced(tileMarkerGeometry, markerMaterial, this.tileXZ.length, true),
+    };
+    for (const m of Object.values(this.markers)) {
+      m.castShadow = m.receiveShadow = false;
+      m.renderOrder = 10;
+      this.scene.add(m);
+    }
 
     const robberMaterial = std(0x2d2d33, { roughness: 0.5 });
     const body = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.13, 0.3, 10).translate(0, 0.15, 0), robberMaterial);
@@ -247,6 +324,11 @@ export class BoardRenderer {
     body.castShadow = head.castShadow = true;
     this.robber.add(body, head);
     this.scene.add(this.robber);
+
+    container.addEventListener('pointermove', this.onPointerMove);
+    container.addEventListener('pointerdown', this.onPointerDown);
+    container.addEventListener('pointerup', this.onPointerUp);
+    container.addEventListener('pointerleave', this.onPointerLeave);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
@@ -264,9 +346,14 @@ export class BoardRenderer {
 
   /** Rebuilds tiles, number tokens, decorations and harbors for a new map. */
   setBoard({ terrain, numbers, harbors }: BoardData) {
+    this.camera.position.copy(CAMERA_DIR).multiplyScalar(this.fitDistance || 14);
+    this.controls.update();
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
     this.board.clear();
+    this.roadPieces.clear();
+    this.buildingPieces.clear();
+    this.robberFrom = null;
 
     const tileMaterial = std(0xffffff);
     const tiles = this.instanced(hexGeometry, tileMaterial, terrain.length, true);
@@ -278,7 +365,7 @@ export class BoardRenderer {
       tiles.setMatrixAt(i, m.makeTranslation(x, TILE_HEIGHT / 2, z));
       tiles.setColorAt(i, color.setHex(TERRAIN_COLORS[t]));
     });
-    tiles.count = terrain.length;
+    this.commit(tiles, terrain.length);
     this.board.add(tiles);
     this.disposables.push(tileMaterial, tiles);
 
@@ -288,64 +375,91 @@ export class BoardRenderer {
     this.requestRender();
   }
 
-  /** Updates roads, buildings and the robber from engine arrays. */
-  setPieces({ buildings, roads, robber }: PieceData) {
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const s = new THREE.Vector3(1, 1, 1);
-    const p = new THREE.Vector3();
-    const up = new THREE.Vector3(0, 1, 0);
-    const color = new THREE.Color();
-
-    let n = 0;
-    const ev = this.topology.edgeVertices;
+  /**
+   * Updates roads, buildings and the robber. Pieces that were not there
+   * before drop in; a moved robber walks over. Pass `animate: false` for the
+   * first sync of a game.
+   */
+  setPieces({ buildings, roads, robber }: PieceData, animate = true) {
+    const now = animate ? performance.now() : -1e9;
+    const nextRoads = new Map<number, Piece>();
     roads.forEach((owner, e) => {
       if (owner === EMPTY) return;
-      const [ax, az] = this.vertexXZ[ev[2 * e]];
-      const [bx, bz] = this.vertexXZ[ev[2 * e + 1]];
-      q.setFromAxisAngle(up, -Math.atan2(bz - az, bx - ax));
-      this.roads.setMatrixAt(n, m.compose(p.set((ax + bx) / 2, TOP + 0.04, (az + bz) / 2), q, s));
-      this.roads.setColorAt(n++, color.setHex(PLAYER_COLORS[owner]));
+      const prev = this.roadPieces.get(e);
+      const { x, z, angle } = this.edgeXZ[e];
+      nextRoads.set(e, prev?.owner === owner ? prev : { x, z, angle, owner, born: now });
     });
-    this.commit(this.roads, n);
+    this.roadPieces = nextRoads;
 
-    let ns = 0;
-    let nc = 0;
+    const nextBuildings = new Map<number, Piece & { city: boolean }>();
     buildings.forEach((b, v) => {
       if (b === EMPTY) return;
       const owner = b & ~CITY_FLAG;
+      const city = (b & CITY_FLAG) !== 0;
+      const prev = this.buildingPieces.get(v);
       const [x, z] = this.vertexXZ[v];
-      // Face buildings towards the island centre for a little variety.
-      q.setFromAxisAngle(up, -Math.atan2(z, x));
-      m.compose(p.set(x, TOP, z), q, s);
-      color.setHex(PLAYER_COLORS[owner]);
-      if (b & CITY_FLAG) {
-        this.cities.setMatrixAt(nc, m);
-        this.cities.setColorAt(nc++, color);
-      } else {
-        this.settlements.setMatrixAt(ns, m);
-        this.settlements.setColorAt(ns++, color);
-      }
+      // Face buildings towards the island centre.
+      const angle = -Math.atan2(z, x);
+      nextBuildings.set(v, prev && prev.owner === owner && prev.city === city ? prev : { x, z, angle, owner, city, born: now });
     });
-    this.commit(this.settlements, ns);
-    this.commit(this.cities, nc);
+    this.buildingPieces = nextBuildings;
 
     const [rx, rz] = this.tileXZ[robber];
-    this.robber.position.set(rx + 0.42, TOP, rz + 0.12);
+    const to: [number, number] = [rx + 0.42, rz + 0.12];
+    if (animate && (to[0] !== this.robberTo[0] || to[1] !== this.robberTo[1]) && this.robberFrom !== null) {
+      this.robberFrom = [this.robber.position.x, this.robber.position.z];
+      this.robberStart = now;
+    } else {
+      this.robberFrom = [to[0], to[1]];
+      this.robberStart = -1e9;
+    }
+    this.robberTo = to;
+    this.updatePieces(performance.now());
     this.requestRender();
+  }
+
+  /** Keeps the island inside the screen area not covered by HUD panels. */
+  setInsets(insets: Insets) {
+    const same = (Object.keys(insets) as (keyof Insets)[]).every((k) => Math.abs(insets[k] - this.insets[k]) < 1);
+    if (same) return;
+    this.insets = { ...insets };
+    this.resize();
+  }
+
+  /** Shows clickable markers on the given spots (or clears them). */
+  setHighlights(h: Highlights | null) {
+    this.highlights = h && h.ids.length ? h : null;
+    this.hovered = -1;
+    this.container.style.cursor = '';
+    this.updateMarkers();
+    this.requestRender();
+  }
+
+  /** Screen position (CSS pixels, relative to the container) of a spot. */
+  project(kind: PickKind, id: number): { x: number; y: number } {
+    const [x, z] =
+      kind === 'tile' ? this.tileXZ[id] : kind === 'vertex' ? this.vertexXZ[id] : [this.edgeXZ[id].x, this.edgeXZ[id].z];
+    const v = new THREE.Vector3(x, TOP + 0.1, z).project(this.camera);
+    return { x: ((v.x + 1) / 2) * this.container.clientWidth, y: ((1 - v.y) / 2) * this.container.clientHeight };
   }
 
   requestRender() {
     if (this.renderQueued) return;
     this.renderQueued = true;
-    requestAnimationFrame(() => {
+    requestAnimationFrame((t) => {
       this.renderQueued = false;
+      const animating = this.updatePieces(t);
       this.controls.update(); // emits 'change' while damping, which queues the next frame
       this.renderer.render(this.scene, this.camera);
+      if (animating) this.requestRender();
     });
   }
 
   dispose() {
+    this.container.removeEventListener('pointermove', this.onPointerMove);
+    this.container.removeEventListener('pointerdown', this.onPointerDown);
+    this.container.removeEventListener('pointerup', this.onPointerUp);
+    this.container.removeEventListener('pointerleave', this.onPointerLeave);
     this.resizeObserver.disconnect();
     this.controls.dispose();
     for (const d of this.disposables) d.dispose();
@@ -353,6 +467,63 @@ export class BoardRenderer {
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
+
+  // ---- input ----
+
+  private spotUnderPointer(ev: PointerEvent): number {
+    const h = this.highlights;
+    if (!h) return -1;
+    const rect = this.container.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((ev.clientX - rect.left) / rect.width) * 2 - 1, -((ev.clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const hit = this.raycaster.ray.intersectPlane(this.plane, new THREE.Vector3());
+    if (!hit) return -1;
+    let best = -1;
+    let bestDist = PICK_RADIUS[h.kind];
+    for (const id of h.ids) {
+      const [x, z] = h.kind === 'tile' ? this.tileXZ[id] : h.kind === 'vertex' ? this.vertexXZ[id] : [this.edgeXZ[id].x, this.edgeXZ[id].z];
+      const d = Math.hypot(hit.x - x, hit.z - z);
+      if (d < bestDist) {
+        bestDist = d;
+        best = id;
+      }
+    }
+    return best;
+  }
+
+  private onPointerMove = (ev: PointerEvent) => {
+    if (!this.highlights || ev.pointerType === 'touch') return;
+    const id = this.spotUnderPointer(ev);
+    if (id !== this.hovered) {
+      this.hovered = id;
+      this.container.style.cursor = id >= 0 ? 'pointer' : '';
+      this.updateMarkers();
+      this.requestRender();
+    }
+  };
+
+  private onPointerDown = (ev: PointerEvent) => {
+    this.pointerDown = { x: ev.clientX, y: ev.clientY, t: performance.now() };
+  };
+
+  private onPointerUp = (ev: PointerEvent) => {
+    const down = this.pointerDown;
+    this.pointerDown = null;
+    if (!down || !this.highlights) return;
+    // A drag rotates the camera; only short, still presses count as clicks.
+    if (Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > 8 || performance.now() - down.t > 600) return;
+    const id = this.spotUnderPointer(ev);
+    if (id >= 0) this.onPick?.(this.highlights.kind, id);
+  };
+
+  private onPointerLeave = () => {
+    if (this.hovered !== -1) {
+      this.hovered = -1;
+      this.container.style.cursor = '';
+      this.updateMarkers();
+      this.requestRender();
+    }
+  };
 
   // ---- internals ----
 
@@ -391,6 +562,85 @@ export class BoardRenderer {
     this.resize();
   }
 
+  /** Writes piece matrices for time `now`; returns true while animating. */
+  private updatePieces(now: number): boolean {
+    let animating = false;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const s = new THREE.Vector3();
+    const p = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    const color = new THREE.Color();
+
+    const place = (mesh: THREE.InstancedMesh, i: number, piece: Piece, y: number) => {
+      const t = Math.min(1, (now - piece.born) / DROP_MS);
+      if (t < 1) animating = true;
+      const k = Math.max(0.001, easeOutBack(t));
+      q.setFromAxisAngle(up, piece.angle);
+      s.set(k, k, k);
+      p.set(piece.x, y + (1 - Math.min(1, t * 1.4)) * 1.2, piece.z);
+      mesh.setMatrixAt(i, m.compose(p, q, s));
+      mesh.setColorAt(i, color.setHex(PLAYER_COLORS[piece.owner]));
+    };
+
+    let n = 0;
+    for (const piece of this.roadPieces.values()) place(this.roads, n++, piece, TOP + 0.045);
+    this.commit(this.roads, n);
+    let ns = 0;
+    let nc = 0;
+    for (const piece of this.buildingPieces.values()) {
+      if (piece.city) place(this.cities, nc++, piece, TOP);
+      else place(this.settlements, ns++, piece, TOP);
+    }
+    this.commit(this.settlements, ns);
+    this.commit(this.cities, nc);
+
+    const t = Math.min(1, (now - this.robberStart) / ROBBER_MS);
+    const from = this.robberFrom ?? this.robberTo;
+    const e = easeInOut(t);
+    this.robber.position.set(
+      from[0] + (this.robberTo[0] - from[0]) * e,
+      TOP + Math.sin(Math.PI * t) * 0.9,
+      from[1] + (this.robberTo[1] - from[1]) * e,
+    );
+    if (t < 1) animating = true;
+    return animating;
+  }
+
+  private updateMarkers() {
+    for (const mesh of Object.values(this.markers)) mesh.count = 0;
+    const h = this.highlights;
+    if (!h) return;
+    const mesh = this.markers[h.kind];
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const s = new THREE.Vector3();
+    const p = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    const color = new THREE.Color();
+    h.ids.forEach((id, i) => {
+      const hover = id === this.hovered;
+      const k = hover ? 1.35 : 1;
+      if (h.kind === 'vertex') {
+        const [x, z] = this.vertexXZ[id];
+        p.set(x, TOP + 0.03, z);
+        q.identity();
+      } else if (h.kind === 'edge') {
+        const { x, z, angle } = this.edgeXZ[id];
+        p.set(x, TOP + 0.03, z);
+        q.setFromAxisAngle(up, angle);
+      } else {
+        const [x, z] = this.tileXZ[id];
+        p.set(x, TOP + 0.02, z);
+        q.identity();
+      }
+      s.set(k, 1, k);
+      mesh.setMatrixAt(i, m.compose(p, q, s));
+      mesh.setColorAt(i, color.setHex(hover ? ACCENT : 0xffffff));
+    });
+    this.commit(mesh, h.ids.length);
+  }
+
   /**
    * `colored` allocates per-instance colors up front: the WebGPU renderer
    * builds the material program on first use, so the attribute has to exist
@@ -412,7 +662,7 @@ export class BoardRenderer {
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
 
-  private addDecorations(terrain: Uint8Array) {
+  private addDecorations(terrain: number[]) {
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const s = new THREE.Vector3();
@@ -453,7 +703,7 @@ export class BoardRenderer {
     }
   }
 
-  private addTokens(numbers: Uint8Array) {
+  private addTokens(numbers: number[]) {
     const discMaterial = std(0xf3ead2, { roughness: 0.7 });
     this.disposables.push(discMaterial);
     numbers.forEach((n, i) => {
@@ -472,7 +722,7 @@ export class BoardRenderer {
     });
   }
 
-  private addHarbors(harbors: Uint8Array) {
+  private addHarbors(harbors: number[]) {
     const plankMaterial = std(0x8a5a35);
     const planks = this.instanced(new THREE.BoxGeometry(1, 0.05, 0.09), plankMaterial, harbors.length * 2);
     const docks = this.instanced(new THREE.BoxGeometry(0.34, 0.08, 0.34), plankMaterial, harbors.length);
@@ -518,11 +768,23 @@ export class BoardRenderer {
     const h = Math.max(1, this.container.clientHeight);
     this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
-    // Keep the whole island in view on narrow (portrait) screens.
-    const halfV = THREE.MathUtils.degToRad(this.camera.fov / 2);
-    const halfH = Math.atan(Math.tan(halfV) * this.camera.aspect);
-    const distance = Math.max(BASE_CAMERA_DISTANCE, 5.8 / Math.tan(halfH));
-    this.camera.position.copy(CAMERA_DIR).multiplyScalar(distance);
+    // Fit the island into the free area (at least 45% of the screen each way)
+    // and shift the projection centre into the middle of that area.
+    const { top, right, bottom, left } = this.insets;
+    const safeW = Math.max(w * 0.45, w - left - right);
+    const safeH = Math.max(h * 0.45, h - top - bottom);
+    const tanV = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+    const tanH = tanV * this.camera.aspect;
+    const distance = Math.max(ISLAND_RADIUS / (tanH * (safeW / w)), (ISLAND_RADIUS * 0.85) / (tanV * (safeH / h)));
+    const shiftX = Math.min(left, w - safeW) + safeW / 2 - w / 2;
+    const shiftY = Math.min(top, h - safeH) + safeH / 2 - h / 2;
+    this.camera.setViewOffset(w, h, -shiftX, -shiftY, w, h);
+    // Keep the user's viewing angle and relative zoom across refits.
+    const current = this.camera.position.length();
+    const zoom = this.fitDistance > 0 && current > 0 ? current / this.fitDistance : 1;
+    const dir = current > 0 && this.fitDistance > 0 ? this.camera.position.clone().normalize() : CAMERA_DIR;
+    this.fitDistance = distance;
+    this.camera.position.copy(dir).multiplyScalar(distance * zoom);
     this.controls.minDistance = distance * 0.45;
     this.controls.maxDistance = distance * 1.6;
     this.camera.updateProjectionMatrix();

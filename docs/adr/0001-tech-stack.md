@@ -59,12 +59,12 @@ Isle Settlers 是一款六边形岛屿上"开拓、交易、建造"的回合制�
 ```
 crates/
   isle-core/     规则引擎：拓扑常量表、状态、规则、合法走法、事件      ✅
-  isle-ai/       AI：Bot trait、基线 bot；后续加 Expectimax / ISMCTS    ✅（基线）
+  isle-ai/       AI：Bot trait、GreedyBot、基线 bot；后续加 ISMCTS     ✅（普通难度）
   isle-sim/      CLI：自对弈、基准测试、不变量检查                      ✅
-  isle-wasm/     wasm-bindgen 绑定（TypedArray 直传，无序列化）         ✅
-  isle-proto/    网络协议和序列化                                       ⏳
+  isle-wasm/     浏览器内对局托管（MatchHost / LocalMatch）             ✅
+  isle-proto/    按玩家投影的视图、线上类型、生成 TS 类型                ✅
   isle-server/   axum：房间、邀请链接、重连、权威判定                    ⏳
-web/             Vite + SolidJS + Three.js                               ✅（骨架）
+web/             Vite + SolidJS + Three.js                               ✅（人机对局）
 ```
 
 ## 规则引擎设计
@@ -77,10 +77,21 @@ web/             Vite + SolidJS + Three.js                               ✅（�
 - **测试**：每条规则都有场景测试。随机自对弈模糊测试每一步都会检查资源守恒、发展卡守恒、棋子数量、距离规则和最长道路缓存，并交叉验证 `legal_actions` 与 `check` 判断完全一致，以及非法动作不会修改状态。
 - 规则细节和取舍见 [`docs/rules.md`](../rules.md)。
 
+## 隐藏信息与 JS 边界（P1 补充）
+
+- **按玩家投影**：服务器（以及浏览器内的对局托管）从不发送原始 `GameState`，只发送 `isle_proto::player_view(state, viewer)` 投影出的 `PlayerView`，以及经过 `Event::redacted_for(viewer)` 隐去私密信息的事件。隐藏信息包括：对手手牌构成、对手发展卡、牌堆顺序、随机数状态；牌的**数量**是公开的。测试会打乱所有隐藏信息，然后断言每个座位看到的视图完全不变。
+- **浏览器内对局**：`MatchHost`（纯 Rust，可原生测试）托管人类座位加 bot 座位；JS 只拿得到人类座位的视图。P2 联机时，服务器使用同样的投影。
+- **JS 边界用 JSON 文本**：`serde_json` 序列化，浏览器端用原生 `JSON.parse` 解析。
+- **人类操作按序号提交**：UI 从带版本号的 `legalActions()` 列表里选一个序号，WASM 端不需要反序列化 Action。实测仅 Action 反序列化一项就会让 WASM 增加约 38 KB（gzip）；交易报价不在列表里，单独走 `proposeTrade(give, get)`。版本号用于拒绝过期的序号。
+- **TS 类型由 Rust 生成**（ts-rs）：`web/src/generated/proto.ts`。枚举采用 `{ type, value }` 判别联合，前端可以做穷尽匹配；生成文件与 Rust 不同步时测试会失败。
+
 ## 渲染设计
 
 - **按需渲染**：只有相机移动或状态变化时才绘制，回合制大部分时间画面静止，此时 GPU 占用为零。
-- **InstancedMesh**：地块、装饰、道路、村庄和城市各一个批次，整个场景（含阴影 pass）约 95 次绘制调用。
+- **InstancedMesh**：地块、装饰、道路、村庄、城市和可落子标记各一个批次，整个场景（含阴影 pass）约 95 次绘制调用。
+- **点击拾取不做网格射线检测**：指针射线与桌面平面求交，再吸附到最近的高亮位置；拖拽和点击按位移与时长区分。
+- **避让 HUD**：App 测量带 `data-inset` 标记的面板，渲染器用 `setViewOffset` 把岛屿放进剩余的空白区域，并保留玩家当前的视角和缩放。
+- **动画**：新棋子落下、强盗移动、骰子、资源从地块飞到对应玩家，均在动画期间才持续渲染。
 - **WebGPU 设备丢失时自动重建为 WebGL2**；也可以用 `?renderer=webgl` 强制使用 WebGL2。
 - Three.js 单独一个 chunk，懒加载：HUD 先渲染，3D 场景随后加载。
 - 原创 low-poly 风格，模型用代码生成（尚无贴图），后续换成 Blender 模型。
@@ -95,8 +106,9 @@ web/             Vite + SolidJS + Three.js                               ✅（�
 | 原生 4 线程 | 约 37,700 局/秒（约 2,470 万动作/秒） |
 | 开启每步不变量检查 | 5,000 局全部通过 |
 | 浏览器 WASM（无头 Chromium 主线程） | 约 6,500–8,100 局/秒 |
-| `isle_wasm_bg.wasm`（引擎 + bot） | 59.7 KB，gzip 后 26.8 KB |
-| 首屏 JS（SolidJS + HUD） | gzip 后 9.8 KB |
+| `isle_wasm_bg.wasm`（v0.1：引擎 + bot） | 59.7 KB，gzip 后 26.8 KB |
+| `isle_wasm_bg.wasm`（P1：+ 视图投影、JSON、GreedyBot、对局托管） | 107.8 KB，gzip 后 46.5 KB |
+| 首屏 JS（v0.1 / P1 完整对局界面） | gzip 后 9.8 KB / 20.6 KB |
 | Three.js chunk（懒加载） | gzip 后 240 KB |
 
 > Three.js 的 WebGPU 构建比纯 WebGL 构建大 70 KB 左右（gzip）。如果以后首屏体积比 WebGPU 收益更重要，可以换回 `WebGLRenderer`，只需改一处。
@@ -105,8 +117,9 @@ web/             Vite + SolidJS + Three.js                               ✅（�
 
 | 难度 | 方法 |
 |---|---|
-| 简单 | 加权随机 / 贪心价值函数 |
-| 中等 | Expectimax / Alpha-Beta + 手工价值函数 |
+| 简单 | 加权随机（`WeightedRandomBot`），已实现 |
+| 普通 | `GreedyBot`：目标驱动的启发式（开局按点数、稀缺度、多样性和港口选点；围绕目标建筑做海上贸易；强盗打领先者；弃牌保目标），只用公开信息和自己的手牌。已实现：对 3 个加权随机 bot 胜率 99.5%（4000 局） |
+| 中等+ | Expectimax / Alpha-Beta + 手工价值函数 |
 | 困难 | ISMCTS（信息集 MCTS），处理骰子随机性和隐藏手牌 |
 | 专家（可选） | 自对弈训练价值/策略网络，导出 ONNX 推理 |
 
@@ -125,7 +138,7 @@ web/             Vite + SolidJS + Three.js                               ✅（�
 ## 路线图
 
 1. **P0（已完成）**：规则引擎、基线 bot、自对弈基准、WASM 绑定、3D 棋盘骨架。
-2. **P1**：浏览器内人机对局：点击建造、交易面板、骰子与资源动画、按玩家投影的视图。
+2. **P1（已完成）**：浏览器内人机对局：大厅、点击建造、交易（银行与玩家）、发展卡、弃牌与强盗、动画、观战模式；按玩家投影的视图；GreedyBot；端到端测试。
 3. **P2**：`isle-proto` + `isle-server`：WebSocket、房间 Actor、邀请链接、重连 token、事件日志持久化。
 4. **P3**：AI 分层：价值函数 → Expectimax → ISMCTS（Web Worker / 服务端）。
 5. **P4**：5–6 人扩展、扩展包、账号与排位、观战与回放。
