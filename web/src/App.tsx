@@ -141,7 +141,10 @@ export default function App() {
     setConn(null);
     setJoinRoom(null);
     setTradeOpen(false);
-    setGame(createGame(createReplaySource(replay, link), r));
+    // Unmount the current game's HUD first: its components hold on to the
+    // game object they were created with.
+    setGame(null);
+    queueMicrotask(() => setGame(createGame(createReplaySource(replay, link), r)));
     return true;
   }
 
