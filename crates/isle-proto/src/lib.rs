@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 pub use isle_core::{Action, DevCard, Event, RuleError, TradeResponse};
 
+pub mod net;
+
 /// Owner value meaning "nobody" in per-spot arrays.
 pub const EMPTY: u8 = u8::MAX;
 /// Flag OR-ed into a building owner when the building is a city.

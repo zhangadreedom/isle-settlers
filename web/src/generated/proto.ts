@@ -113,3 +113,45 @@ pendingDiscard: Array<number>, trade: TradeOffer | null, longestRoadOwner: numbe
  */
 finalPoints: Array<number> | null, };
 
+export type BotLevel = "Easy" | "Normal";
+
+export type SeatView = { "type": "Open" } | { "type": "Human", "value": { name: string, connected: boolean, 
+/**
+ * A bot is playing for this player while they are disconnected.
+ */
+autopilot: boolean, } } | { "type": "Bot", "value": { level: BotLevel, } };
+
+export type RoomInfo = { id: string, 
+/**
+ * Seat of the player who created the room and may change seats / start.
+ */
+host: number, 
+/**
+ * The receiving connection's seat; `None` for spectators.
+ */
+you: number | null, started: boolean, seats: Array<SeatView>, spectators: number, };
+
+export type LegalActions = { version: number, actions: Array<Action>, };
+
+export type Snapshot = { board: BoardInfo, view: PlayerView, legal: LegalActions, 
+/**
+ * Recent events (redacted for this seat), oldest first.
+ */
+log: Array<Event>, };
+
+export type Update = { view: PlayerView, legal: LegalActions, 
+/**
+ * What happened (redacted for this seat).
+ */
+events: Array<Event>, };
+
+export type ChatLine = { 
+/**
+ * Sender's seat; `None` for spectators.
+ */
+seat: number | null, name: string, text: string, };
+
+export type ClientMsg = { "type": "Create", "value": { players: number, bots: BotLevel, name: string, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
+
+export type ServerMsg = { "type": "Joined", "value": { room: string, seat: number | null, token: string | null, } } | { "type": "Room", "value": RoomInfo } | { "type": "Snapshot", "value": Snapshot } | { "type": "Update", "value": Update } | { "type": "Chat", "value": ChatLine } | { "type": "Error", "value": { code: string, } };
+

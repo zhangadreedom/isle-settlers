@@ -94,7 +94,7 @@ impl Bot for WeightedRandomBot {
 pub const BOT_NAMES: [&str; 3] = ["random", "weighted", "greedy"];
 
 /// Creates a bot from its name (`random`, `weighted` or `greedy`).
-pub fn bot_by_name(name: &str, seed: u64) -> Option<Box<dyn Bot>> {
+pub fn bot_by_name(name: &str, seed: u64) -> Option<Box<dyn Bot + Send>> {
     Some(match name {
         "random" => Box::new(RandomBot::new(seed)),
         "weighted" => Box::new(WeightedRandomBot::new(seed)),

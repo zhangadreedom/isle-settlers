@@ -17,6 +17,7 @@ ts-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
 isle-ai.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

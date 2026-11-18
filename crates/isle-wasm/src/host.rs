@@ -65,7 +65,7 @@ impl MatchHost {
                     Ok(None)
                 } else {
                     bot_by_name(bot, (seed << 8) | p as u64)
-                        .map(Some)
+                        .map(|b| Some(b as Box<dyn Bot>))
                         .ok_or_else(|| HostError::Config(format!("unknown bot {bot}")))
                 }
             })

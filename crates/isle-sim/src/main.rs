@@ -107,7 +107,7 @@ fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
             .wrapping_mul(0x9E37_79B9)
             .wrapping_add(shard << 40 | i);
         let mut g = GameState::new(config, game_seed).expect("valid config");
-        let mut b: Vec<Box<dyn Bot>> = (0..args.players as u64)
+        let mut b: Vec<Box<dyn Bot + Send>> = (0..args.players as u64)
             .map(|k| bot_by_name(&args.bots[k as usize], game_seed ^ (k + 1)).expect("validated"))
             .collect();
         let mut bots: Vec<&mut dyn Bot> = b.iter_mut().map(|b| &mut **b as &mut dyn Bot).collect();
