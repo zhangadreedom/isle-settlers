@@ -1017,6 +1017,82 @@ input {
   margin: 0;
 }
 
+/* ---------- five and six seats ---------- */
+
+.seat.building {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+.players-panel.many {
+  gap: 3px;
+}
+
+.players-panel.many .seat {
+  padding: 5px 8px;
+}
+
+/* ---------- replays ---------- */
+
+.replay-bar {
+  width: min(100%, 640px);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.replay-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.replay-seek {
+  flex: 1;
+  min-width: 120px;
+  accent-color: var(--accent);
+}
+
+.replay-pos {
+  min-width: 70px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.replay-play {
+  min-width: 64px;
+}
+
+.replay-bar select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--button);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 5px 8px;
+}
+
+.replay-actions {
+  justify-content: center;
+  margin: 4px 0 10px;
+}
+
+.file-link {
+  display: block;
+  margin-top: 12px;
+  text-align: center;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.file-link input {
+  display: none;
+}
+
 /* ---------- small screens ---------- */
 
 @media (max-width: 860px) {
@@ -1050,6 +1126,19 @@ input {
   .seat {
     flex: 1 1 calc(50% - 4px);
     padding: 5px 7px;
+  }
+
+  .players-panel.many .seat {
+    flex-basis: calc(33.3% - 4px);
+    padding: 4px 6px;
+  }
+
+  .players-panel.many .seat-stats {
+    display: none;
+  }
+
+  .replay-bar {
+    padding: 6px 8px;
   }
 
   .seat-stats,

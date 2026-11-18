@@ -60,7 +60,7 @@ fn parse_args() -> Args {
         }
     }
     if !(2..=MAX_PLAYERS as u8).contains(&a.players) {
-        usage("--players must be 2-4");
+        usage("--players must be 2-6");
     }
     if a.bots.is_empty() {
         a.bots = vec![bot; a.players as usize];
@@ -80,7 +80,7 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: isle-sim [--games N] [--players 2-4] [--seed S] [--threads T]\n\
+        "usage: isle-sim [--games N] [--players 2-6] [--seed S] [--threads T]\n\
          \x20               [--bot NAME | --bots NAME,NAME,...] [--rotate] [--max-turns N] [--check]\n\
          bots: random, weighted, greedy, mcts, mcts:N (N iterations), mcts:N/key=value/..."
     );

@@ -3,6 +3,8 @@
 
 use isle_ai::{Bot, bot_by_name};
 use isle_core::{Action, Event, GameConfig, GameState, Phase, ResourceSet, TradeResponse};
+use isle_proto::net::BotLevel;
+use isle_proto::{ReplayPlayer, ReplayRecord};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HostError {
@@ -43,6 +45,10 @@ pub struct MatchHost {
     events: Vec<Event>,
     /// Incremented on every state change; guards against stale action indices.
     pub(crate) version: u32,
+    seed: u64,
+    bot_level: BotLevel,
+    /// Every action applied, for replays.
+    log: Vec<(u8, Action)>,
 }
 
 impl MatchHost {
@@ -77,7 +83,36 @@ impl MatchHost {
             legal: Vec::with_capacity(128),
             events: Vec::new(),
             version: 0,
+            seed,
+            bot_level: BotLevel::of_bot_name(bot),
+            log: Vec::new(),
         })
+    }
+
+    /// The game so far as a replay; the human seat is called `human_name`.
+    pub fn replay(&self, human_name: &str) -> ReplayRecord {
+        let players = (0..self.state.config.num_players)
+            .map(|p| {
+                if Some(p) == self.human {
+                    ReplayPlayer {
+                        name: human_name.into(),
+                        bot: None,
+                    }
+                } else {
+                    ReplayPlayer {
+                        name: String::new(),
+                        bot: Some(self.bot_level),
+                    }
+                }
+            })
+            .collect();
+        ReplayRecord::new(
+            self.state.config,
+            self.seed,
+            players,
+            &self.log,
+            self.state.winner,
+        )
     }
 
     /// Recomputes and returns the human's legal actions.
@@ -115,6 +150,7 @@ impl MatchHost {
         self.state
             .apply_with(human, action, &mut self.events)
             .map_err(|e| HostError::Rule(format!("{e:?}")))?;
+        self.log.push((human, action));
         self.version += 1;
         Ok(&self.events)
     }
@@ -153,6 +189,7 @@ impl MatchHost {
         self.state
             .apply_with(p, action, &mut self.events)
             .expect("bots play legal actions");
+        self.log.push((p, action));
         self.version += 1;
         let viewer = self.human;
         Some(BotStep {
@@ -220,6 +257,10 @@ mod tests {
                 "seed {seed} did not finish"
             );
             host.state.check_invariants().unwrap();
+            // The recorded log replays to the same final state.
+            let replay = host.replay("Me");
+            assert_eq!(replay.players[(seed % 4) as usize].name, "Me");
+            assert_eq!(replay.play(|_, _, _, _| {}).unwrap(), host.state);
         }
     }
 

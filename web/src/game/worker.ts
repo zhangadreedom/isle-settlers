@@ -3,7 +3,7 @@
 // Requests are handled strictly in order; every reply carries the full state.
 
 import init, { LocalMatch } from '../wasm/isle_wasm.js';
-import type { BoardInfo, Event, LegalActions, PlayerView } from '../generated/proto';
+import type { BoardInfo, Event, LegalActions, PlayerView, ReplayRecord } from '../generated/proto';
 
 export type WorkerRequest =
   | { id: number; op: 'create'; players: number; seed: number; humanSeat: number | null; bot: string }
@@ -18,6 +18,8 @@ export interface MatchState {
   nextBot: number;
   events: Event[];
   board?: BoardInfo;
+  /** The whole game, once it is over. */
+  replay?: ReplayRecord;
 }
 
 export type WorkerReply = { id: number; ok: true; state: MatchState } | { id: number; ok: false; error: string };
@@ -33,7 +35,10 @@ let queue: Promise<void> = init().then(() => undefined);
 
 function snapshot(events: Event[]): MatchState {
   const m = match!;
-  return { view: JSON.parse(m.view()), legal: JSON.parse(m.legalActions()), nextBot: m.nextBot(), events };
+  const view = JSON.parse(m.view()) as PlayerView;
+  const state: MatchState = { view, legal: JSON.parse(m.legalActions()), nextBot: m.nextBot(), events };
+  if (view.winner !== null) state.replay = JSON.parse(m.replay(''));
+  return state;
 }
 
 function handle(r: WorkerRequest): MatchState {

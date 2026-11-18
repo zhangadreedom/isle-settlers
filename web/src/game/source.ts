@@ -1,10 +1,10 @@
 // Where game state comes from. The presentation layer (controller.ts) only
 // talks to this interface, so local and online games share all UI code.
 
-import { createSignal } from 'solid-js';
-import { EngineError, WorkerMatch, type BotKind } from '../engine';
+import { createSignal, type Accessor } from 'solid-js';
+import { EngineError, WorkerMatch, type BotKind, type Replay } from '../engine';
 import type { MatchState } from './worker';
-import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, Snapshot } from '../generated/proto';
+import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, ReplayPlayer, ReplayRecord, Snapshot } from '../generated/proto';
 import type { Connection } from '../net/connection';
 
 export interface SeatMeta {
@@ -30,10 +30,36 @@ export interface SourceHandlers {
   chat: (line: ChatLine) => void;
 }
 
+/** Playback of a recorded game. */
+export interface ReplayControls {
+  readonly length: number;
+  readonly players: ReplayPlayer[];
+  readonly record: ReplayRecord;
+  /** Actions applied so far. */
+  position: Accessor<number>;
+  playing: Accessor<boolean>;
+  /** Playback speed multiplier. */
+  speed: Accessor<number>;
+  /** Seat whose private view is shown, or null for the public view. */
+  viewer: Accessor<number | null>;
+  toggle(): void;
+  seek(position: number): void;
+  /** One action forwards (+1) or backwards (-1); pauses playback. */
+  step(delta: 1 | -1): void;
+  setSpeed(speed: number): void;
+  setViewer(seat: number | null): void;
+}
+
 export interface GameSource {
   readonly board: BoardInfo;
   readonly me: number | null;
   readonly online: boolean;
+  /** Present when watching a replay. */
+  readonly replay?: ReplayControls;
+  /** The finished game as a replay, if available. */
+  exportReplay?(): Promise<ReplayRecord | null>;
+  /** Shareable link to the finished game's replay. */
+  replayLink?(): string | null;
   seat(seat: number): SeatMeta;
   /** Seat expected to act next (a bot or another player), -1 for none. */
   thinking(): number;
@@ -84,6 +110,8 @@ export async function createLocalSource(opts: LocalOptions): Promise<GameSource>
     if (v.phase.type === 'SetupSettlement' || v.phase.type === 'SetupRoad') ms = 450;
     else if (v.phase.type === 'PreRoll') ms = 750;
     else if (v.phase.type === 'Discard') ms = 350;
+    // Five bots pass or build after every turn on the extended island.
+    else if (v.phase.type === 'SpecialBuild') ms = 260;
     else if (v.trade && v.current === opts.humanSeat) ms = 700;
     return opts.fast ? ms * 0.3 : ms;
   }
@@ -143,6 +171,11 @@ export async function createLocalSource(opts: LocalOptions): Promise<GameSource>
       }
       void run(worker.apply(legal.version, index));
       return true;
+    },
+    async exportReplay() {
+      const record = current.replay;
+      if (!record) return null;
+      return { ...record, players: record.players.map((p) => (p.bot ? p : { ...p, name: '玩家' })) };
     },
     dispose() {
       disposed = true;
@@ -215,8 +248,148 @@ export function createOnlineSource(conn: Connection, first: Snapshot): GameSourc
     chat(text) {
       conn.send({ type: 'Chat', value: { text } });
     },
+    async exportReplay() {
+      const id = conn.room()?.replay;
+      if (!id) return null;
+      const res = await fetch(`/api/replays/${id}`);
+      return res.ok ? ((await res.json()) as ReplayRecord) : null;
+    },
+    replayLink() {
+      const id = conn.room()?.replay;
+      return id ? replayUrl(id) : null;
+    },
     dispose() {
       unsubscribe.forEach((f) => f());
+    },
+  };
+}
+
+/** Link that opens a stored replay. */
+export const replayUrl = (id: string) => `${location.origin}${location.pathname}#/replay/${id}`;
+
+// ------------------------------------------------------------------ replay
+
+/** Events shown in the log after a jump: those of the last few actions. */
+const LOG_BACK = 40;
+
+/** Watches a recorded game. Every state is recomputed by the engine. */
+export function createReplaySource(replay: Replay, link: string | null = null): GameSource {
+  const [position, setPosition] = createSignal(0);
+  const [playing, setPlaying] = createSignal(false);
+  const [speed, setSpeedSignal] = createSignal(1);
+  const [viewer, setViewerSignal] = createSignal<number | null>(null);
+  const players = replay.record.players;
+  let handlers: SourceHandlers | null = null;
+  let timer: number | undefined;
+  let lastPhase = 'SetupSettlement';
+
+  const legal = (): LegalActions => ({ version: replay.position, actions: [] });
+
+  function emit(view: PlayerView, events: Event[], resync: boolean, log?: Event[]) {
+    lastPhase = view.phase.type;
+    setPosition(replay.position);
+    handlers?.state({ view, legal: legal(), events, resync, log });
+  }
+
+  /** Shows the current position from scratch, with recent events in the log. */
+  function resync() {
+    const target = replay.position;
+    replay.seek(Math.max(0, target - LOG_BACK));
+    const log: Event[] = [];
+    while (replay.position < target) log.push(...(replay.step(viewer())?.events ?? []));
+    emit(replay.view(viewer()), [], true, log);
+  }
+
+  function stepOnce(): boolean {
+    const step = replay.step(viewer());
+    if (!step) return false;
+    emit(replay.view(viewer()), step.events, false);
+    return true;
+  }
+
+  function delay(): number {
+    let ms = 650;
+    if (lastPhase === 'SetupSettlement' || lastPhase === 'SetupRoad') ms = 450;
+    else if (lastPhase === 'PreRoll') ms = 800;
+    else if (lastPhase === 'Discard' || lastPhase === 'SpecialBuild') ms = 350;
+    return ms / speed();
+  }
+
+  function schedule() {
+    window.clearTimeout(timer);
+    timer = undefined;
+    if (!playing()) return;
+    timer = window.setTimeout(() => {
+      if (!stepOnce()) setPlaying(false);
+      else schedule();
+    }, delay());
+  }
+
+  const controls: ReplayControls = {
+    length: replay.length,
+    players,
+    record: replay.record,
+    position,
+    playing,
+    speed,
+    viewer,
+    toggle() {
+      if (!playing() && replay.position >= replay.length) {
+        replay.seek(0);
+        resync();
+      }
+      setPlaying(!playing());
+      schedule();
+    },
+    seek(p) {
+      replay.seek(Math.max(0, Math.min(replay.length, Math.round(p))));
+      resync();
+      schedule();
+    },
+    step(delta) {
+      setPlaying(false);
+      schedule();
+      if (delta > 0) stepOnce();
+      else if (replay.position > 0) {
+        replay.seek(replay.position - 1);
+        resync();
+      }
+    },
+    setSpeed(x) {
+      setSpeedSignal(x);
+      schedule();
+    },
+    setViewer(seat) {
+      setViewerSignal(seat);
+      resync();
+    },
+  };
+
+  return {
+    board: replay.board,
+    get me() {
+      return viewer();
+    },
+    online: false,
+    replay: controls,
+    seat(s) {
+      const p = players[s];
+      return { name: p?.name || `AI ${s + 1}`, bot: !!p?.bot, connected: true, autopilot: false };
+    },
+    thinking: () => -1,
+    start(h) {
+      handlers = h;
+      resync();
+    },
+    play: () => false,
+    async exportReplay() {
+      return replay.record;
+    },
+    replayLink: () => link,
+    dispose() {
+      window.clearTimeout(timer);
+      handlers = null;
+      replay.free();
     },
   };
 }

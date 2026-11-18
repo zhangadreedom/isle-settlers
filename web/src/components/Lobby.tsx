@@ -15,13 +15,17 @@ export interface CreateRoom {
 export function Lobby(props: {
   ready: boolean;
   seed: number;
+  players: number;
+  onPlayers: (players: number) => void;
   onSeed: (seed: number) => void;
+  onOpenReplay: (json: string) => void;
   onStartLocal: (o: LocalOptions) => void;
   onCreateRoom: (o: CreateRoom) => void;
   onJoinRoom: (room: string) => void;
 }) {
   const [tab, setTab] = createSignal<'local' | 'online'>('local');
-  const [players, setPlayers] = createSignal(4);
+  const players = () => props.players;
+  const setPlayers = (n: number) => props.onPlayers(n);
   const [bot, setBot] = createSignal<BotKind>('greedy');
   const [seat, setSeat] = createSignal<'random' | number>('random');
   const [fast, setFast] = createSignal(false);
@@ -49,7 +53,7 @@ export function Lobby(props: {
     <div class="lobby-wrap">
       <div class="panel lobby">
         <h1>Isle Settlers</h1>
-        <p class="muted">在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。</p>
+        <p class="muted">在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，每回合结束后其他人可以特殊建造。</p>
 
         <div class="tabs">
           <button classList={{ on: tab() === 'local' }} onClick={() => setTab('local')}>
@@ -63,7 +67,7 @@ export function Lobby(props: {
         <div class="field">
           <span>人数</span>
           <div class="seg">
-            <For each={[2, 3, 4]}>
+            <For each={[2, 3, 4, 5, 6]}>
               {(n) => (
                 <button classList={{ on: players() === n }} onClick={() => setPlayers(n)}>
                   {n} 人
@@ -129,6 +133,19 @@ export function Lobby(props: {
               观战 AI 对局
             </button>
           </div>
+          <label class="file-link muted small">
+            <input
+              type="file"
+              accept=".json,application/json"
+              disabled={!props.ready}
+              onChange={async (e) => {
+                const file = e.currentTarget.files?.[0];
+                e.currentTarget.value = '';
+                if (file) props.onOpenReplay(await file.text());
+              }}
+            />
+            打开回放文件…
+          </label>
         </Show>
 
         <Show when={tab() === 'online'}>

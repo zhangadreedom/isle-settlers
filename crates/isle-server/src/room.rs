@@ -13,12 +13,12 @@ use isle_proto::net::{
     BotLevel, ChatLine, ClientMsg, LegalActions, RoomInfo, SeatView, ServerMsg, Snapshot, Update,
     clean_chat, clean_name,
 };
-use isle_proto::{board_info, player_view};
+use isle_proto::{ReplayPlayer, ReplayRecord, board_info, player_view};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
 use crate::registry::Registry;
-use crate::store::{RoomRecord, SeatRecord, Store};
+use crate::store::{ReplayArchive, RoomRecord, SeatRecord, Store};
 use crate::{ServerConfig, ids};
 
 pub type ConnId = u64;
@@ -140,6 +140,9 @@ pub struct Room {
     id: String,
     config: ServerConfig,
     store: Option<Store>,
+    replays: Arc<ReplayArchive>,
+    /// Set once the game is over and archived.
+    replay_id: Option<String>,
     seed: u64,
     bot_level: BotLevel,
     host: u8,
@@ -181,6 +184,8 @@ impl Room {
             id,
             config: registry.config().clone(),
             store: registry.store().cloned(),
+            replays: registry.replays().clone(),
+            replay_id: None,
             seed: ids::seed(),
             bot_level: bots,
             host: 0,
@@ -243,10 +248,12 @@ impl Room {
         } else {
             None
         };
-        Ok(Room {
+        let mut room = Room {
             id: record.id,
             config: registry.config().clone(),
             store: registry.store().cloned(),
+            replays: registry.replays().clone(),
+            replay_id: record.replay,
             seed: record.seed,
             bot_level: record.bot_level,
             host: record.host,
@@ -258,7 +265,9 @@ impl Room {
             bot_due: None,
             save_due: None,
             idle_since: Some(now),
-        })
+        };
+        room.archive_if_finished();
+        Ok(room)
     }
 
     pub async fn run(mut self, mut rx: mpsc::Receiver<RoomCmd>) {
@@ -696,8 +705,52 @@ impl Room {
             tracing::info!(room = %self.id, winner = w, actions = game.actions.len(), "game over");
         }
         self.broadcast_update(&events);
+        if self.archive_if_finished() {
+            self.broadcast_room(now);
+        }
         self.mark_dirty(now);
         self.reschedule(now);
+    }
+
+    /// Archives a finished game as a replay (once). Returns whether it did.
+    fn archive_if_finished(&mut self) -> bool {
+        let Some(game) = self.game.as_ref() else {
+            return false;
+        };
+        if game.state.winner.is_none() || self.replay_id.is_some() {
+            return false;
+        }
+        let players = self
+            .seats
+            .iter()
+            .map(|s| match &s.kind {
+                SeatKind::Human { name, .. } => ReplayPlayer {
+                    name: name.clone(),
+                    bot: None,
+                },
+                SeatKind::Bot(level) => ReplayPlayer {
+                    name: String::new(),
+                    bot: Some(*level),
+                },
+                SeatKind::Open => ReplayPlayer {
+                    name: String::new(),
+                    bot: Some(self.bot_level),
+                },
+            })
+            .collect();
+        let record = ReplayRecord::new(
+            game.state.config,
+            self.seed,
+            players,
+            &game.actions,
+            game.state.winner,
+        );
+        let id = ids::room_id();
+        self.replays.put(&id, &record);
+        tracing::info!(room = %self.id, replay = %id, "replay archived");
+        self.replay_id = Some(id);
+        self.save_due.get_or_insert(Instant::now());
+        true
     }
 
     // ------------------------------------------------------------- messages
@@ -724,6 +777,7 @@ impl Room {
             started: self.game.is_some(),
             seats,
             spectators: self.conns.values().filter(|c| c.seat.is_none()).count() as u32,
+            replay: self.replay_id.clone(),
         }
     }
 
@@ -831,6 +885,7 @@ impl Room {
                 .as_ref()
                 .map(|g| g.actions.clone())
                 .unwrap_or_default(),
+            replay: self.replay_id.clone(),
         }
     }
 

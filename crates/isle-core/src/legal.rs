@@ -20,7 +20,7 @@ impl GameState {
         }
         let ps = &self.players[player as usize];
 
-        if player != self.current {
+        if player != self.active_player() {
             match self.phase {
                 Phase::Discard if self.pending_discard[player as usize] > 0 => {
                     push_discards(ps.hand, self.pending_discard[player as usize], out);
@@ -45,7 +45,9 @@ impl GameState {
                 }
             }
             Phase::SetupRoad { vertex } => {
-                for e in edges_in(VERTEX_EDGE_MASK[vertex as usize] & !self.occupied_edges()) {
+                for e in
+                    edges_in(self.topo().vertex_edge_mask[vertex as usize] & !self.occupied_edges())
+                {
                     out.push(Action::BuildRoad(e));
                 }
             }
@@ -59,7 +61,7 @@ impl GameState {
                 }
             }
             Phase::MoveRobber => {
-                for tile in 0..NUM_TILES as u8 {
+                for tile in 0..self.topo().num_tiles as u8 {
                     if tile == self.robber {
                         continue;
                     }
@@ -79,25 +81,7 @@ impl GameState {
                 }
             }
             Phase::Main => {
-                out.push(Action::EndTurn);
-                if ps.roads_left > 0 && ps.hand.contains(&cost::ROAD) {
-                    for e in edges_in(self.road_spots(player)) {
-                        out.push(Action::BuildRoad(e));
-                    }
-                }
-                if ps.settlements_left > 0 && ps.hand.contains(&cost::SETTLEMENT) {
-                    for v in vertices_in(self.settlement_spots(player, true)) {
-                        out.push(Action::BuildSettlement(v));
-                    }
-                }
-                if ps.cities_left > 0 && ps.hand.contains(&cost::CITY) {
-                    for v in vertices_in(self.settlements[player as usize]) {
-                        out.push(Action::BuildCity(v));
-                    }
-                }
-                if self.dev_deck_len > 0 && ps.hand.contains(&cost::DEV_CARD) {
-                    out.push(Action::BuyDevCard);
-                }
+                self.push_builds(player, out);
                 self.push_dev_card_plays(player, out);
                 for give in Resource::ALL {
                     if ps.hand[give] >= self.trade_ratio(player, give) {
@@ -125,7 +109,32 @@ impl GameState {
                     out.push(Action::BuildRoad(e));
                 }
             }
+            Phase::SpecialBuild { .. } => self.push_builds(player, out),
             Phase::GameOver => {}
+        }
+    }
+
+    /// `EndTurn` plus every affordable build and development card purchase.
+    fn push_builds(&self, player: u8, out: &mut Vec<Action>) {
+        let ps = &self.players[player as usize];
+        out.push(Action::EndTurn);
+        if ps.roads_left > 0 && ps.hand.contains(&cost::ROAD) {
+            for e in edges_in(self.road_spots(player)) {
+                out.push(Action::BuildRoad(e));
+            }
+        }
+        if ps.settlements_left > 0 && ps.hand.contains(&cost::SETTLEMENT) {
+            for v in vertices_in(self.settlement_spots(player, true)) {
+                out.push(Action::BuildSettlement(v));
+            }
+        }
+        if ps.cities_left > 0 && ps.hand.contains(&cost::CITY) {
+            for v in vertices_in(self.settlements[player as usize]) {
+                out.push(Action::BuildCity(v));
+            }
+        }
+        if self.dev_deck_len > 0 && ps.hand.contains(&cost::DEV_CARD) {
+            out.push(Action::BuyDevCard);
         }
     }
 

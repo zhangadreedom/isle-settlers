@@ -3,7 +3,7 @@
 
 import { batch, createSignal } from 'solid-js';
 import type { BoardRenderer, BoardData, Highlights, PickKind } from '../board/BoardRenderer';
-import type { Topology } from '../engine';
+import { topology as topologyOf } from '../engine';
 import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, ResourceSet } from '../generated/proto';
 import type { GameSource, SourceState } from './source';
 import { RESOURCES, describe, errorText } from './text';
@@ -39,9 +39,11 @@ export function boardData(info: BoardInfo): BoardData {
 
 const sameSet = (a: ResourceSet, b: ResourceSet) => a.every((x, i) => x === b[i]);
 
-export function createGame(source: GameSource, renderer: BoardRenderer, topology: Topology) {
+export function createGame(source: GameSource, renderer: BoardRenderer) {
   const board = boardData(source.board);
-  const me = source.me;
+  const topology = topologyOf(source.board.layout);
+  /** The seat this client plays (or, in a replay, watches as). */
+  const me = () => source.me;
 
   const [view, setView] = createSignal<PlayerView | null>(null);
   const [legal, setLegal] = createSignal<LegalActions>({ version: 0, actions: [] });
@@ -57,11 +59,11 @@ export function createGame(source: GameSource, renderer: BoardRenderer, topology
   let toastTimer: number | undefined;
   let disposed = false;
 
-  const name = (seat: number) => (seat === me ? '你' : source.seat(seat).name);
+  const name = (seat: number) => (seat === me() && !source.replay ? '你' : source.seat(seat).name);
   const actions = () => legal().actions;
   const has = (type: Action['type']) => actions().some((a) => a.type === type);
 
-  renderer.setBoard(board);
+  renderer.setBoard(board, topology);
   renderer.onPick = onPick;
 
   // ---- state sync ----
@@ -104,7 +106,8 @@ export function createGame(source: GameSource, renderer: BoardRenderer, topology
       case 'MoveRobber':
         return { kind: 'tile', ids: [...new Set(list.flatMap((a) => (a.type === 'MoveRobber' ? [a.value.tile] : [])))] };
       case 'Main':
-        if (v.current !== me) return null;
+      case 'SpecialBuild':
+        if (v.toMove !== me() || (v.phase.type === 'Main' && v.current !== me())) return null;
         if (mode() === 'road') return { kind: 'edge', ids: ids('BuildRoad') };
         if (mode() === 'settlement') return { kind: 'vertex', ids: ids('BuildSettlement') };
         if (mode() === 'city') return { kind: 'vertex', ids: ids('BuildCity') };
@@ -144,7 +147,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer, topology
       act((a) => a.type === 'BuildRoad' && a.value === id);
       return;
     }
-    if (v.phase.type === 'Main' && mode() === 'city') act((a) => a.type === 'BuildCity' && a.value === id);
+    if ((v.phase.type === 'Main' || v.phase.type === 'SpecialBuild') && mode() === 'city') act((a) => a.type === 'BuildCity' && a.value === id);
     else act((a) => a.type === 'BuildSettlement' && a.value === id);
   }
 
@@ -184,7 +187,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer, topology
   }
 
   function onChat(line: ChatLine) {
-    const who = line.seat === me && me !== null ? '你' : line.name;
+    const who = line.seat === me() && me() !== null ? '你' : line.name;
     setLog((old) => [...old, { id: ++logId, text: line.text, seat: line.seat, chat: { name: who } }].slice(-100));
   }
 
@@ -244,8 +247,17 @@ export function createGame(source: GameSource, renderer: BoardRenderer, topology
 
   return {
     board,
-    me,
+    topology,
+    get me() {
+      return me();
+    },
     online: source.online,
+    /** Playback controls when watching a replay. */
+    replay: source.replay,
+    /** The finished game as a replay record (local games and online rooms). */
+    exportReplay: source.exportReplay ? () => source.exportReplay!() : undefined,
+    /** Shareable link to the finished game's replay (online rooms). */
+    replayLink: source.replayLink ? () => source.replayLink!() : undefined,
     /** Current view (always set once the source has started). */
     view: () => view()!,
     legal,

@@ -5,12 +5,10 @@ use crate::resources::ResourceSet;
 use crate::rng::Rng;
 use crate::topology::*;
 
-/// Maximum number of seats in the base game.
-pub const MAX_PLAYERS: usize = 4;
-/// Cards of each resource in the bank at the start.
-pub const BANK_PER_RESOURCE: u8 = 19;
-/// Total development cards.
-pub const DEV_DECK_SIZE: usize = 25;
+/// Maximum number of seats (the extended board seats six).
+pub const MAX_PLAYERS: usize = 6;
+/// Size of the largest development deck.
+pub const MAX_DEV_DECK: usize = 34;
 pub const MAX_ROADS: u8 = 15;
 pub const MAX_SETTLEMENTS: u8 = 5;
 pub const MAX_CITIES: u8 = 4;
@@ -41,12 +39,14 @@ impl DevCard {
         DevCard::Monopoly,
     ];
 
-    /// Copies of each card in the deck.
-    pub const fn count_in_deck(self) -> u8 {
-        match self {
-            DevCard::Knight => 14,
-            DevCard::VictoryPoint => 5,
-            DevCard::RoadBuilding | DevCard::YearOfPlenty | DevCard::Monopoly => 2,
+    /// Copies of each card in the deck of a board.
+    pub const fn count_in_deck(self, layout: BoardLayout) -> u8 {
+        match (self, layout) {
+            (DevCard::Knight, BoardLayout::Base) => 14,
+            (DevCard::Knight, BoardLayout::Extended) => 20,
+            (DevCard::VictoryPoint, _) => 5,
+            (_, BoardLayout::Base) => 2,
+            (_, BoardLayout::Extended) => 3,
         }
     }
 
@@ -59,6 +59,38 @@ impl DevCard {
 /// Counts of development cards indexed by `DevCard`.
 pub type DevCounts = [u8; 5];
 
+/// Rule parameters that depend on the board.
+impl BoardLayout {
+    /// Cards of each resource in the bank at the start.
+    pub const fn bank_per_resource(self) -> u8 {
+        match self {
+            BoardLayout::Base => 19,
+            BoardLayout::Extended => 24,
+        }
+    }
+
+    /// Development cards in the deck.
+    pub const fn dev_deck_size(self) -> usize {
+        match self {
+            BoardLayout::Base => 25,
+            BoardLayout::Extended => 34,
+        }
+    }
+
+    /// After each turn, the other players may build in turn order.
+    pub const fn has_special_build(self) -> bool {
+        matches!(self, BoardLayout::Extended)
+    }
+
+    /// Seats the board is designed for.
+    pub const fn max_players(self) -> u8 {
+        match self {
+            BoardLayout::Base => 4,
+            BoardLayout::Extended => 6,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -68,6 +100,22 @@ pub struct GameConfig {
     pub victory_points: u8,
     /// Keep 6 and 8 tokens off adjacent tiles when generating the board.
     pub balanced_board: bool,
+}
+
+impl GameConfig {
+    /// Standard rules for `num_players` seats.
+    pub fn new(num_players: u8) -> Self {
+        GameConfig {
+            num_players,
+            ..Self::default()
+        }
+    }
+
+    /// Board used by this configuration: the extended island seats 5–6.
+    #[inline]
+    pub fn layout(&self) -> BoardLayout {
+        BoardLayout::for_players(self.num_players)
+    }
 }
 
 impl Default for GameConfig {
@@ -84,6 +132,8 @@ impl Default for GameConfig {
 pub enum ConfigError {
     PlayerCount,
     VictoryPoints,
+    /// The board does not match the player count.
+    BoardLayout,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -108,6 +158,12 @@ pub enum Phase {
     /// Placing free roads from a Road Building card.
     RoadBuilding {
         remaining: u8,
+    },
+    /// Extended board: after the current player ends their turn, each other
+    /// player in turn order may build or buy development cards (no trading,
+    /// no card plays), then pass with `EndTurn`.
+    SpecialBuild {
+        builder: u8,
     },
     GameOver,
 }
@@ -192,12 +248,12 @@ pub struct GameState {
     pub config: GameConfig,
     pub board: Board,
     pub players: [PlayerState; MAX_PLAYERS],
-    pub settlements: [u64; MAX_PLAYERS],
-    pub cities: [u64; MAX_PLAYERS],
+    pub settlements: [u128; MAX_PLAYERS],
+    pub cities: [u128; MAX_PLAYERS],
     pub roads: [u128; MAX_PLAYERS],
     pub bank: ResourceSet,
-    /// Shuffled deck; cards are drawn from the end.
-    pub dev_deck: [DevCard; DEV_DECK_SIZE],
+    /// Shuffled deck; cards are drawn from the end of `dev_deck[..dev_deck_len]`.
+    pub dev_deck: [DevCard; MAX_DEV_DECK],
     pub dev_deck_len: u8,
     pub robber: u8,
     pub phase: Phase,
@@ -221,7 +277,7 @@ impl GameState {
     /// New game with a random board derived from `seed`.
     pub fn new(config: GameConfig, seed: u64) -> Result<GameState, ConfigError> {
         let mut rng = Rng::new(seed);
-        let board = Board::generate(&mut rng, config.balanced_board);
+        let board = Board::generate(&mut rng, config.layout(), config.balanced_board);
         Self::with_board(config, board, rng.next_u64())
     }
 
@@ -237,16 +293,22 @@ impl GameState {
         if config.victory_points < 3 {
             return Err(ConfigError::VictoryPoints);
         }
+        let layout = config.layout();
+        if board.layout != layout {
+            return Err(ConfigError::BoardLayout);
+        }
         let mut rng = Rng::new(seed);
-        let mut dev_deck = [DevCard::Knight; DEV_DECK_SIZE];
+        let mut dev_deck = [DevCard::Knight; MAX_DEV_DECK];
         let mut i = 0;
         for card in DevCard::ALL {
-            for _ in 0..card.count_in_deck() {
+            for _ in 0..card.count_in_deck(layout) {
                 dev_deck[i] = card;
                 i += 1;
             }
         }
-        rng.shuffle(&mut dev_deck);
+        let deck_len = layout.dev_deck_size();
+        debug_assert_eq!(i, deck_len);
+        rng.shuffle(&mut dev_deck[..deck_len]);
         Ok(GameState {
             config,
             board,
@@ -254,9 +316,9 @@ impl GameState {
             settlements: [0; MAX_PLAYERS],
             cities: [0; MAX_PLAYERS],
             roads: [0; MAX_PLAYERS],
-            bank: ResourceSet([BANK_PER_RESOURCE; 5]),
+            bank: ResourceSet([layout.bank_per_resource(); 5]),
             dev_deck,
-            dev_deck_len: DEV_DECK_SIZE as u8,
+            dev_deck_len: deck_len as u8,
             robber: board.desert,
             phase: Phase::SetupSettlement,
             current: 0,
@@ -276,6 +338,23 @@ impl GameState {
     #[inline]
     pub fn num_players(&self) -> usize {
         self.config.num_players as usize
+    }
+
+    /// Adjacency tables of the board being played.
+    #[inline]
+    pub fn topo(&self) -> &'static Topology {
+        self.board.layout.topology()
+    }
+
+    /// The seat whose decisions drive the game outside discards and trade
+    /// responses: the builder during a special building phase, otherwise
+    /// the player whose turn it is.
+    #[inline]
+    pub fn active_player(&self) -> u8 {
+        match self.phase {
+            Phase::SpecialBuild { builder } => builder,
+            _ => self.current,
+        }
     }
 
     /// Seat placing at a given step of the snake setup order (0,1,..,n-1,n-1,..,0).
@@ -302,17 +381,17 @@ impl GameState {
                 .iter()
                 .position(|&d| d > 0)
                 .map(|p| p as u8),
-            _ => Some(self.current),
+            _ => Some(self.active_player()),
         }
     }
 
     #[inline]
-    pub fn buildings_of(&self, p: u8) -> u64 {
+    pub fn buildings_of(&self, p: u8) -> u128 {
         self.settlements[p as usize] | self.cities[p as usize]
     }
 
     #[inline]
-    pub fn occupied_vertices(&self) -> u64 {
+    pub fn occupied_vertices(&self) -> u128 {
         (0..self.num_players()).fold(0, |m, p| m | self.settlements[p] | self.cities[p])
     }
 
@@ -322,7 +401,7 @@ impl GameState {
     }
 
     pub fn vertex_owner(&self, v: u8) -> Option<u8> {
-        let bit = 1u64 << v;
+        let bit = 1u128 << v;
         (0..self.num_players() as u8).find(|&p| self.buildings_of(p) & bit != 0)
     }
 
@@ -363,11 +442,12 @@ impl GameState {
     }
 
     /// Vertices where `p` may place a settlement. During setup no road is required.
-    pub fn settlement_spots(&self, p: u8, require_road: bool) -> u64 {
+    pub fn settlement_spots(&self, p: u8, require_road: bool) -> u128 {
+        let topo = self.topo();
         let occ = self.occupied_vertices();
-        let free = ALL_VERTICES & !(occ | neighbors_of(occ));
+        let free = topo.all_vertices & !(occ | topo.neighbors_of(occ));
         if require_road {
-            free & endpoints_of(self.roads[p as usize])
+            free & topo.endpoints_of(self.roads[p as usize])
         } else {
             free
         }
@@ -376,16 +456,17 @@ impl GameState {
     /// Edges where `p` may place a road connected to their network. A road
     /// cannot continue through an intersection occupied by an opponent.
     pub fn road_spots(&self, p: u8) -> u128 {
+        let topo = self.topo();
         let own = self.buildings_of(p);
         let opponents = self.occupied_vertices() & !own;
-        let reach = own | (endpoints_of(self.roads[p as usize]) & !opponents);
-        edges_touching(reach) & !self.occupied_edges()
+        let reach = own | (topo.endpoints_of(self.roads[p as usize]) & !opponents);
+        topo.edges_touching(reach) & !self.occupied_edges()
     }
 
     /// Bitmask of players `thief` may rob after moving the robber to `tile`:
     /// opponents with a building on the tile who hold at least one card.
     pub fn robber_victims(&self, tile: u8, thief: u8) -> u8 {
-        let tv = TILE_VERTEX_MASK[tile as usize];
+        let tv = self.topo().tile_vertex_mask[tile as usize];
         (0..self.num_players() as u8)
             .filter(|&q| {
                 q != thief
@@ -401,9 +482,10 @@ impl GameState {
         if roads == 0 {
             return 0;
         }
+        let topo = self.topo();
         let blocked = self.occupied_vertices() & !self.buildings_of(p);
-        vertices_in(endpoints_of(roads))
-            .map(|v| longest_from(v, roads, 0, blocked))
+        vertices_in(topo.endpoints_of(roads))
+            .map(|v| longest_from(topo, v, roads, 0, blocked))
             .max()
             .unwrap_or(0)
     }
@@ -412,12 +494,14 @@ impl GameState {
     /// tests, fuzzing and debug tooling.
     pub fn check_invariants(&self) -> Result<(), String> {
         let n = self.num_players();
+        let layout = self.board.layout;
+        let topo = self.topo();
         for r in 0..5 {
             let total: u32 = self.bank.0[r] as u32
                 + (0..n)
                     .map(|p| self.players[p].hand.0[r] as u32)
                     .sum::<u32>();
-            if total != BANK_PER_RESOURCE as u32 {
+            if total != layout.bank_per_resource() as u32 {
                 return Err(format!("resource {r} not conserved: {total}"));
             }
         }
@@ -433,11 +517,11 @@ impl GameState {
                     (ps.dev_cards[c] + ps.new_dev_cards[c] + ps.played_dev_cards[c]) as usize
                 })
                 .sum();
-            if in_deck + held != card.count_in_deck() as usize {
+            if in_deck + held != card.count_in_deck(layout) as usize {
                 return Err(format!("dev card {card:?} not conserved"));
             }
         }
-        let mut seen_v = 0u64;
+        let mut seen_v = 0u128;
         let mut seen_e = 0u128;
         for p in 0..n {
             let ps = &self.players[p];
@@ -466,7 +550,7 @@ impl GameState {
             }
         }
         for v in vertices_in(seen_v) {
-            if VERTEX_ADJ_MASK[v as usize] & seen_v != 0 {
+            if topo.vertex_adj_mask[v as usize] & seen_v != 0 {
                 return Err(format!("distance rule violated at vertex {v}"));
             }
         }
@@ -482,8 +566,16 @@ impl GameState {
                 return Err("largest army owner is not the largest".into());
             }
         }
-        if self.robber as usize >= NUM_TILES {
+        if self.robber as usize >= topo.num_tiles {
             return Err("robber off board".into());
+        }
+        if (seen_v & !topo.all_vertices) != 0 || (seen_e & !topo.all_edges) != 0 {
+            return Err("piece off board".into());
+        }
+        if let Phase::SpecialBuild { builder } = self.phase
+            && (!layout.has_special_build() || builder == self.current || builder as usize >= n)
+        {
+            return Err("invalid special building phase".into());
         }
         if (self.phase == Phase::GameOver) != self.winner.is_some() {
             return Err("winner and phase disagree".into());
@@ -494,9 +586,9 @@ impl GameState {
 
 /// Longest trail (no edge reused) starting at `v` within `roads`, never
 /// passing through a `blocked` vertex.
-fn longest_from(v: u8, roads: u128, used: u128, blocked: u64) -> u8 {
+fn longest_from(topo: &Topology, v: u8, roads: u128, used: u128, blocked: u128) -> u8 {
     let mut best = 0;
-    let links = &VERTEX_EDGES[v as usize];
+    let links = &topo.vertex_edges[v as usize];
     for k in 0..3 {
         let e = links[k];
         if e == NONE {
@@ -506,11 +598,11 @@ fn longest_from(v: u8, roads: u128, used: u128, blocked: u64) -> u8 {
         if roads & bit == 0 || used & bit != 0 {
             continue;
         }
-        let u = VERTEX_VERTICES[v as usize][k];
-        let len = if blocked & (1u64 << u) != 0 {
+        let u = topo.vertex_vertices[v as usize][k];
+        let len = if blocked & (1u128 << u) != 0 {
             1
         } else {
-            1 + longest_from(u, roads, used | bit, blocked)
+            1 + longest_from(topo, u, roads, used | bit, blocked)
         };
         best = best.max(len);
     }

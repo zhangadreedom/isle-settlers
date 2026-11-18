@@ -9,8 +9,9 @@ mod host;
 
 pub use host::{BotStep, HostError, MatchHost};
 use isle_ai::{Bot, WeightedRandomBot};
-use isle_core::topology::*;
-use isle_core::{Action, GameConfig, GameState, MAX_PLAYERS, ResourceSet};
+use isle_core::{Action, BoardLayout, Event, GameConfig, GameState, MAX_PLAYERS, ResourceSet};
+use isle_proto::ReplayError;
+use isle_proto::replay::decode_actions;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -116,6 +117,136 @@ impl LocalMatch {
             None => Ok("null".into()),
         }
     }
+
+    /// The game so far as a `ReplayRecord` (JSON).
+    pub fn replay(&self, human_name: &str) -> Result<String, JsError> {
+        to_js(&self.host.replay(human_name))
+    }
+}
+
+/// Steps through a recorded game. Every state is rebuilt by the engine, so
+/// any seat's private view can be shown; checkpoints make seeking cheap.
+///
+/// JavaScript parses the `ReplayRecord` file itself and passes its fields,
+/// which keeps a JSON parser out of the WebAssembly binary.
+#[wasm_bindgen]
+pub struct Replay {
+    actions: Vec<(u8, Action)>,
+    /// State before action `i * CHECKPOINT_EVERY`.
+    checkpoints: Vec<GameState>,
+    state: GameState,
+    position: usize,
+    events: Vec<Event>,
+}
+
+const CHECKPOINT_EVERY: usize = 32;
+
+/// One replayed action.
+#[derive(Serialize)]
+struct ReplayStep<'a> {
+    player: u8,
+    action: Action,
+    events: &'a [Event],
+}
+
+#[wasm_bindgen]
+impl Replay {
+    /// Loads a game from its config, seed (decimal) and encoded action log
+    /// (`ReplayRecord.actions`), checking it by playing it through. Throws
+    /// with `BadReplaySeed`, `BadReplayConfig` or `BadReplayAction<i>`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        num_players: u8,
+        victory_points: u8,
+        balanced_board: bool,
+        seed: &str,
+        actions: &[u8],
+    ) -> Result<Replay, JsError> {
+        let fail = |e: ReplayError| JsError::new(&e.to_string());
+        let seed: u64 = seed.parse().map_err(|_| fail(ReplayError::Seed))?;
+        let config = GameConfig {
+            num_players,
+            victory_points,
+            balanced_board,
+        };
+        let start = GameState::new(config, seed).map_err(|_| fail(ReplayError::Config))?;
+        let actions = decode_actions(actions).map_err(fail)?;
+        let mut checkpoints = vec![start];
+        let mut state = start;
+        for (i, &(seat, action)) in actions.iter().enumerate() {
+            state
+                .apply(seat, action)
+                .map_err(|_| fail(ReplayError::Action(i)))?;
+            if (i + 1) % CHECKPOINT_EVERY == 0 {
+                checkpoints.push(state);
+            }
+        }
+        Ok(Replay {
+            actions,
+            checkpoints,
+            state: start,
+            position: 0,
+            events: Vec::new(),
+        })
+    }
+
+    /// Number of actions in the game.
+    pub fn length(&self) -> u32 {
+        self.actions.len() as u32
+    }
+
+    /// Actions applied so far.
+    pub fn position(&self) -> u32 {
+        self.position as u32
+    }
+
+    /// Static board layout (`BoardInfo` JSON).
+    pub fn board(&self) -> Result<String, JsError> {
+        to_js(&isle_proto::board_info(&self.state))
+    }
+
+    /// The current state as seen by `viewer` (-1 for a spectator).
+    pub fn view(&self, viewer: i32) -> Result<String, JsError> {
+        to_js(&isle_proto::player_view(
+            &self.state,
+            u8::try_from(viewer).ok(),
+        ))
+    }
+
+    /// Jumps to the state after `position` actions.
+    pub fn seek(&mut self, position: u32) {
+        let target = (position as usize).min(self.actions.len());
+        let k = (target / CHECKPOINT_EVERY).min(self.checkpoints.len() - 1);
+        self.state = self.checkpoints[k];
+        self.position = k * CHECKPOINT_EVERY;
+        while self.position < target {
+            let (seat, action) = self.actions[self.position];
+            self.state.apply(seat, action).expect("checked on load");
+            self.position += 1;
+        }
+        self.events.clear();
+    }
+
+    /// Applies the next action. Returns `{ player, action, events }` JSON
+    /// with events redacted for `viewer` (-1 for a spectator), or `null` at
+    /// the end.
+    pub fn step(&mut self, viewer: i32) -> Result<String, JsError> {
+        let Some(&(seat, action)) = self.actions.get(self.position) else {
+            return Ok("null".into());
+        };
+        self.events.clear();
+        self.state
+            .apply_with(seat, action, &mut self.events)
+            .expect("checked on load");
+        self.position += 1;
+        let viewer = u8::try_from(viewer).ok();
+        let events: Vec<Event> = self.events.iter().map(|e| e.redacted_for(viewer)).collect();
+        to_js(&ReplayStep {
+            player: seat,
+            action,
+            events: &events,
+        })
+    }
 }
 
 /// Plays `games` complete bot-vs-bot games and returns the number of actions
@@ -135,32 +266,72 @@ pub fn run_benchmark(games: u32, seed: u32) -> f64 {
     actions as f64
 }
 
-/// Lattice position `(x, y)` of each tile centre, interleaved.
-#[wasm_bindgen(js_name = tilePositions)]
-pub fn tile_positions() -> Vec<i16> {
-    TILE_POS.iter().flat_map(|&(x, y)| [x, y]).collect()
+/// Flattened topology tables of one island, for the renderer.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TopologyInfo {
+    /// Lattice position `(x, y)` of each tile centre, interleaved.
+    tile_pos: Vec<i16>,
+    /// Lattice position `(x, y)` of each vertex, interleaved.
+    vertex_pos: Vec<i16>,
+    /// Endpoints of each edge, interleaved.
+    edge_vertices: Vec<u8>,
+    /// Corners of each tile (6 per tile, clockwise from the top), flattened.
+    tile_vertices: Vec<u8>,
+    /// Coastal edge of each harbor slot.
+    harbor_edges: Vec<u8>,
 }
 
-/// Lattice position `(x, y)` of each vertex, interleaved.
-#[wasm_bindgen(js_name = vertexPositions)]
-pub fn vertex_positions() -> Vec<i16> {
-    VERTEX_POS.iter().flat_map(|&(x, y)| [x, y]).collect()
+/// Topology tables of `layout` (`"Base"` or `"Extended"`) as JSON.
+#[wasm_bindgen]
+pub fn topology(layout: &str) -> Result<String, JsError> {
+    let layout = match layout {
+        "Base" => BoardLayout::Base,
+        "Extended" => BoardLayout::Extended,
+        _ => return Err(JsError::new("UnknownLayout")),
+    };
+    let t = layout.topology();
+    to_js(&TopologyInfo {
+        tile_pos: t.tile_pos.iter().flat_map(|&(x, y)| [x, y]).collect(),
+        vertex_pos: t.vertex_pos.iter().flat_map(|&(x, y)| [x, y]).collect(),
+        edge_vertices: t.edge_vertices.iter().flatten().copied().collect(),
+        tile_vertices: t.tile_vertices.iter().flatten().copied().collect(),
+        harbor_edges: t.harbor_edges.to_vec(),
+    })
 }
 
-/// Endpoints of each edge, interleaved.
-#[wasm_bindgen(js_name = edgeVertices)]
-pub fn edge_vertices() -> Vec<u8> {
-    EDGE_VERTICES.iter().flatten().copied().collect()
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Corners of each tile (6 per tile, clockwise from the top), flattened.
-#[wasm_bindgen(js_name = tileVertices)]
-pub fn tile_vertices() -> Vec<u8> {
-    TILE_VERTICES.iter().flatten().copied().collect()
-}
-
-/// Coastal edge of each harbor slot.
-#[wasm_bindgen(js_name = harborEdges)]
-pub fn harbor_edges() -> Vec<u8> {
-    HARBOR_EDGES.to_vec()
+    #[test]
+    fn replay_seeking_matches_stepping() {
+        let mut host = MatchHost::new(5, 21, None, "greedy").unwrap();
+        while host.step_bot().is_some() {}
+        let record = host.replay("");
+        let c = record.config;
+        let mut replay = Replay::new(
+            c.num_players,
+            c.victory_points,
+            c.balanced_board,
+            &record.seed,
+            &record.actions,
+        )
+        .unwrap();
+        let len = replay.length() as usize;
+        assert!(len > 2 * CHECKPOINT_EVERY);
+        let mut states = vec![replay.state];
+        while replay.step(-1).unwrap() != "null" {
+            states.push(replay.state);
+        }
+        assert_eq!(states.len(), len + 1);
+        assert_eq!(replay.state, host.state);
+        for pos in [len, 0, 31, 32, 33, len / 2, 1, len - 1, 64] {
+            replay.seek(pos as u32);
+            assert_eq!(replay.position() as usize, pos);
+            assert_eq!(replay.state, states[pos], "seek to {pos}");
+        }
+        replay.seek(u32::MAX);
+        assert_eq!(replay.position() as usize, len);
+    }
 }

@@ -7,7 +7,6 @@
 //! own cards and the random generator — never on the true hidden values — so
 //! a bot that searches determinized states cannot cheat.
 
-use isle_core::state::{BANK_PER_RESOURCE, DEV_DECK_SIZE};
 use isle_core::{DevCard, GameState, Resource, ResourceSet, Rng};
 
 /// A random full state consistent with `me`'s knowledge of `s`.
@@ -15,13 +14,14 @@ pub fn determinize(s: &GameState, me: u8, rng: &mut Rng) -> GameState {
     let mut d = *s;
     let n = s.num_players();
     let me = me as usize;
+    let layout = s.board.layout;
 
     // Resources. The cards held by opponents, taken together, are public:
     // whatever is neither in the bank nor in my hand. Only who holds which
     // card is unknown, so deal that multiset out by the public hand sizes.
-    let mut pool: Vec<Resource> = Vec::with_capacity(95);
+    let mut pool: Vec<Resource> = Vec::with_capacity(5 * layout.bank_per_resource() as usize);
     for r in Resource::ALL {
-        let elsewhere = BANK_PER_RESOURCE - s.bank[r] - s.players[me].hand[r];
+        let elsewhere = layout.bank_per_resource() - s.bank[r] - s.players[me].hand[r];
         pool.extend(std::iter::repeat_n(r, elsewhere as usize));
     }
     rng.shuffle(&mut pool);
@@ -42,12 +42,12 @@ pub fn determinize(s: &GameState, me: u8, rng: &mut Rng) -> GameState {
     // played face up. Opponents keep their public card counts; the deck keeps
     // its length. (Cards an opponent bought this turn are treated as
     // playable: which of their cards are new is not tracked publicly.)
-    let mut unseen: Vec<DevCard> = Vec::with_capacity(DEV_DECK_SIZE);
+    let mut unseen: Vec<DevCard> = Vec::with_capacity(layout.dev_deck_size());
     for card in DevCard::ALL {
         let c = card.index();
         let mine = s.players[me].dev_cards[c] + s.players[me].new_dev_cards[c];
         let played: u8 = (0..n).map(|q| s.players[q].played_dev_cards[c]).sum();
-        let left = card.count_in_deck() - mine - played;
+        let left = card.count_in_deck(layout) - mine - played;
         unseen.extend(std::iter::repeat_n(card, left as usize));
     }
     rng.shuffle(&mut unseen);

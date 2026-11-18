@@ -554,3 +554,122 @@ async fn hard_bots_play_on_the_blocking_pool() {
     assert!(host.game_over());
     server.stop().await;
 }
+
+#[tokio::test]
+async fn six_seat_rooms_play_on_the_extended_island() {
+    let server = Server::start(fast_config()).await;
+    let host = Client::create(server.addr, 6, "Alice").await;
+    assert_eq!(host.room.as_ref().unwrap().seats.len(), 6);
+    let mut guest = Client::join(server.addr, &host.room_id, "Bob", None).await;
+    assert_eq!(guest.seat, Some(1));
+    let mut host = host;
+    host.until(|c| matches!(c.room.as_ref().unwrap().seats[1], SeatView::Human { .. }))
+        .await;
+    host.send(&ClientMsg::Start).await;
+    host.until(|c| c.view.is_some()).await;
+    guest.until(|c| c.view.is_some()).await;
+    let view = host.view.as_ref().unwrap();
+    assert_eq!(
+        (view.players.len(), view.buildings.len(), view.roads.len()),
+        (6, 80, 109)
+    );
+
+    let (host, guest) = tokio::join!(
+        timeout(Duration::from_secs(90), play_to_end(host)),
+        timeout(Duration::from_secs(90), play_to_end(guest))
+    );
+    let (host, guest) = (
+        host.expect("host timed out"),
+        guest.expect("guest timed out"),
+    );
+    assert_eq!(
+        host.view.as_ref().unwrap().winner,
+        guest.view.as_ref().unwrap().winner
+    );
+    assert_eq!(
+        host.view
+            .as_ref()
+            .unwrap()
+            .final_points
+            .as_ref()
+            .unwrap()
+            .len(),
+        6
+    );
+    // Every turn ends with the other five seats passing or building.
+    let passes = host
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::SpecialBuildPassed { .. }))
+        .count();
+    let turns = host
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::TurnEnded { .. }))
+        .count();
+    assert!(
+        turns > 0 && passes >= 5 * (turns - 1),
+        "{passes} passes over {turns} turns"
+    );
+    server.stop().await;
+}
+
+/// `GET path` over plain HTTP; returns the status line and the body.
+async fn http_get(addr: SocketAddr, path: &str) -> (String, String) {
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut raw = String::new();
+    tcp.read_to_string(&mut raw).await.unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    (head.lines().next().unwrap().to_owned(), body.to_owned())
+}
+
+#[tokio::test]
+async fn finished_games_are_archived_as_replays() {
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("isle-server-replays-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = ServerConfig {
+        data_dir: Some(dir.clone()),
+        ..fast_config()
+    };
+    let server = Server::start(config.clone()).await;
+    let mut host = Client::create(server.addr, 3, "Alice").await;
+    assert_eq!(host.room.as_ref().unwrap().replay, None);
+    host.send(&ClientMsg::Start).await;
+    host.until(|c| c.view.is_some()).await;
+    let mut host = timeout(Duration::from_secs(60), play_to_end(host))
+        .await
+        .expect("game did not finish");
+    host.until(|c| c.room.as_ref().unwrap().replay.is_some())
+        .await;
+    let id = host.room.as_ref().unwrap().replay.clone().unwrap();
+    let winner = host.view.as_ref().unwrap().winner;
+
+    let (status, body) =
+        http_get(server.addr, &format!("/api/replays/{}", id.to_lowercase())).await;
+    assert!(status.contains("200"), "{status}");
+    assert!(!body.contains("token"), "seat tokens must not leak");
+    let record: isle_proto::ReplayRecord = serde_json::from_str(&body).unwrap();
+    assert_eq!(record.players[0].name, "Alice");
+    assert_eq!(record.players[1].bot, Some(BotLevel::Normal));
+    assert_eq!(record.winner, winner);
+    let end = record.play(|_, _, _, _| {}).unwrap();
+    assert_eq!(end.winner, winner);
+    let (status, _) = http_get(server.addr, "/api/replays/NOPE2345").await;
+    assert!(status.contains("404"), "{status}");
+    drop(host);
+    server.stop().await;
+
+    // Replays outlive the server (read back from disk).
+    let server = Server::start(config).await;
+    let (status, again) = http_get(server.addr, &format!("/api/replays/{id}")).await;
+    assert!(status.contains("200"), "{status}");
+    assert_eq!(again, body);
+    server.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

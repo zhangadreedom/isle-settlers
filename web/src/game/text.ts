@@ -1,5 +1,7 @@
 // Labels and event descriptions (zh-CN).
-import type { DevCard, Event, Resource, ResourceSet, RuleError } from '../generated/proto';
+import type { BotLevel, DevCard, Event, Resource, ResourceSet, RuleError } from '../generated/proto';
+
+export const BOT_LEVEL_NAME: Record<BotLevel, string> = { Easy: '简单', Normal: '普通', Hard: '困难' };
 
 export const RESOURCES: Resource[] = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'];
 export const RESOURCE_NAME: Record<Resource, string> = { Brick: '砖', Lumber: '木', Wool: '羊毛', Grain: '小麦', Ore: '矿石' };
@@ -70,9 +72,15 @@ const SERVER_ERRORS: Record<string, string> = {
   Spectator: '观众不能操作',
   RateLimited: '发言太快了',
   InvalidSeat: '不能修改这个座位',
+  BadReplay: '不是有效的回放文件',
+  UnsupportedReplay: '不支持这个版本的回放文件',
+  BadReplaySeed: '回放文件已损坏',
+  BadReplayConfig: '回放文件已损坏',
+  ReplayNotFound: '回放不存在或已过期',
 };
 
 export function errorText(code: string): string {
+  if (code.startsWith('BadReplayAction')) return '回放文件已损坏（动作无法重放）';
   return ERRORS[code as RuleError] ?? SERVER_ERRORS[code] ?? code;
 }
 
@@ -133,6 +141,7 @@ export function describe(e: Event, name: (seat: number) => string): string | nul
     case 'LargestArmyChanged':
       return e.value.owner === null ? '最大骑士暂时无人持有' : `${name(e.value.owner)} 获得【最大骑士】`;
     case 'TurnEnded':
+    case 'SpecialBuildPassed':
       return null;
     case 'GameWon':
       return `${name(e.value.player)} 以 ${e.value.points} 分获胜！`;

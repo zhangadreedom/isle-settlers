@@ -9,13 +9,14 @@ use tokio::sync::{mpsc, oneshot};
 use crate::ServerConfig;
 use crate::ids;
 use crate::room::{Attached, Outbox, Room, RoomCmd};
-use crate::store::Store;
+use crate::store::{ReplayArchive, Store};
 
 pub type RoomSender = mpsc::Sender<RoomCmd>;
 
 pub struct Registry {
     config: ServerConfig,
     store: Option<Store>,
+    replays: Arc<ReplayArchive>,
     rooms: Mutex<HashMap<String, RoomSender>>,
     me: Weak<Registry>,
 }
@@ -24,9 +25,11 @@ impl Registry {
     /// Creates the registry and restores rooms from the data directory.
     pub fn new(config: ServerConfig) -> Arc<Registry> {
         let store = config.data_dir.as_ref().map(|d| Store::open(d.clone()));
+        let replays = Arc::new(ReplayArchive::new(config.data_dir.as_deref()));
         let registry = Arc::new_cyclic(|me| Registry {
             config,
             store,
+            replays,
             rooms: Mutex::new(HashMap::new()),
             me: me.clone(),
         });
@@ -55,6 +58,10 @@ impl Registry {
 
     pub(crate) fn store(&self) -> Option<&Store> {
         self.store.as_ref()
+    }
+
+    pub fn replays(&self) -> &Arc<ReplayArchive> {
+        &self.replays
     }
 
     pub fn room_count(&self) -> usize {

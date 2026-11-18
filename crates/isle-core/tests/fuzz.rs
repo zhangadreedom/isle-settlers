@@ -25,20 +25,20 @@ fn random_resource(rng: &mut Rng) -> Resource {
 fn random_action(rng: &mut Rng) -> Action {
     match rng.below(17) {
         0 => Action::RollDice,
-        1 => Action::BuildRoad(rng.below(80) as u8),
-        2 => Action::BuildSettlement(rng.below(60) as u8),
-        3 => Action::BuildCity(rng.below(60) as u8),
+        1 => Action::BuildRoad(rng.below(115) as u8),
+        2 => Action::BuildSettlement(rng.below(85) as u8),
+        3 => Action::BuildCity(rng.below(85) as u8),
         4 => Action::BuyDevCard,
         5 => Action::PlayKnight,
         6 => Action::PlayRoadBuilding,
         7 => Action::PlayYearOfPlenty(random_set(rng, 3)),
         8 => Action::PlayMonopoly(random_resource(rng)),
         9 => Action::MoveRobber {
-            tile: rng.below(21) as u8,
+            tile: rng.below(32) as u8,
             victim: if rng.below(3) == 0 {
                 None
             } else {
-                Some(rng.below(5) as u8)
+                Some(rng.below(7) as u8)
             },
         },
         10 => Action::Discard(random_set(rng, 8)),
@@ -50,7 +50,7 @@ fn random_action(rng: &mut Rng) -> Action {
             accept: rng.below(2) == 0,
         },
         13 => Action::ConfirmTrade {
-            partner: rng.below(5) as u8,
+            partner: rng.below(7) as u8,
         },
         14 => Action::CancelTrade,
         _ => Action::EndTurn,
@@ -78,6 +78,19 @@ fn pick(rng: &mut Rng, actions: &[Action]) -> Action {
         x -= w;
     }
     unreachable!()
+}
+
+/// The compact replay encoding decodes back to the same action.
+fn assert_round_trip(a: Action) {
+    let mut bytes = vec![0xEE];
+    a.encode(&mut bytes);
+    assert_eq!(
+        Action::decode(&bytes[1..]),
+        Some((a, bytes.len() - 1)),
+        "{a:?}"
+    );
+    // A truncated encoding is rejected.
+    assert_eq!(Action::decode(&bytes[1..bytes.len() - 1]), None, "{a:?}");
 }
 
 fn play_one(seed: u64, players: u8, cross_check: bool) -> (GameState, usize) {
@@ -127,6 +140,7 @@ fn play_one(seed: u64, players: u8, cross_check: bool) -> (GameState, usize) {
             let give = random_set(&mut rng, 2);
             let get = random_set(&mut rng, 2);
             let a = Action::ProposeTrade { give, get };
+            assert_round_trip(a);
             let expected = !give.is_empty()
                 && !get.is_empty()
                 && !give.overlaps(&get)
@@ -153,6 +167,7 @@ fn play_one(seed: u64, players: u8, cross_check: bool) -> (GameState, usize) {
             g.phase
         );
         let a = pick(&mut rng, &legal);
+        assert_round_trip(a);
         events.clear();
         g.apply_with(p, a, &mut events).unwrap();
         assert!(!events.is_empty(), "every action emits at least one event");
@@ -164,8 +179,8 @@ fn play_one(seed: u64, players: u8, cross_check: bool) -> (GameState, usize) {
 
 #[test]
 fn random_games_with_cross_checking() {
-    for seed in 0..40 {
-        play_one(seed, 2 + (seed % 3) as u8, true);
+    for seed in 0..50 {
+        play_one(seed, 2 + (seed % 5) as u8, true);
     }
 }
 
@@ -183,4 +198,22 @@ fn random_games_finish_and_are_reproducible() {
         assert_eq!(steps, steps_again);
     }
     assert!(finished > 250, "only {finished}/300 random games finished");
+}
+
+#[test]
+fn five_and_six_player_games_finish() {
+    for players in [5, 6] {
+        let mut finished = 0;
+        for seed in 500..650 {
+            let (g, _) = play_one(seed, players, false);
+            if let Some(w) = g.winner {
+                finished += 1;
+                assert!(g.victory_points(w) >= g.config.victory_points);
+            }
+        }
+        assert!(
+            finished > 120,
+            "only {finished}/150 random {players}-player games finished"
+        );
+    }
 }

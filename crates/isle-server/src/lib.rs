@@ -6,7 +6,8 @@
 //! invite link (room id); a per-seat token lets a player reconnect. Bots fill
 //! empty seats and play for disconnected players ("autopilot"). With a data
 //! directory, rooms survive restarts: each is stored as its seed plus action
-//! log and rebuilt by replay.
+//! log and rebuilt by replay. Finished games are kept as replays, served at
+//! `/api/replays/{id}`.
 
 mod registry;
 mod room;
@@ -26,6 +27,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 pub use registry::Registry;
+pub use store::ReplayArchive;
 
 /// Server tuning. `Default` is production-like; tests shorten the timings.
 #[derive(Clone, Debug)]
@@ -85,6 +87,7 @@ pub fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/api/ws", get(ws::upgrade))
         .route("/api/health", get(health))
+        .route("/api/replays/{id}", get(replay))
         .with_state(state.clone());
     if let Some(dir) = &state.registry.config().static_dir {
         // Hashed assets never change; everything else is revalidated.
@@ -98,6 +101,31 @@ pub fn app(state: AppState) -> Router {
         router = router.nest("/assets", assets).fallback_service(site);
     }
     router.layer(CompressionLayer::new())
+}
+
+/// A finished game as a `ReplayRecord`. Seat tokens are never part of it.
+async fn replay(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match state.registry.replays().get(&id.to_ascii_uppercase()).await {
+        Some(json) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                ),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=86400, immutable"),
+                ),
+            ],
+            json.to_string(),
+        )
+            .into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn health(State(state): State<AppState>) -> axum::Json<serde_json::Value> {

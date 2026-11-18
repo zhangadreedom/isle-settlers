@@ -6,7 +6,11 @@
 //   node web/e2e/play-through.cjs [screenshot-dir]
 //
 // Env: E2E_URL (default http://localhost:4173/), E2E_AI=困难 (difficulty), BUILD_ONLY=1 (never trade
-// with players or buy cards; exercises building), TRACE=1.
+// with players or buy cards; exercises building), E2E_PLAYERS=2..6 (default 4; 5-6 use the
+// extended island and the special building phase), TRACE=1.
+//
+// After the game it opens the replay from the game-over dialog, scrubs and
+// switches perspective, downloads the replay file and loads it back from the lobby.
 // Requires the `playwright` package with Chromium available.
 const { chromium, devices } = require('playwright');
 const path = require('path');
@@ -15,7 +19,8 @@ const OUT = process.argv[2] || path.join(__dirname, 'out');
 fs.mkdirSync(OUT, { recursive: true });
 const URL = (process.env.E2E_URL || 'http://localhost:4173/') + '?debug&renderer=webgl';
 const BUILD_ONLY = !!process.env.BUILD_ONLY;
-const P = BUILD_ONLY ? 'b-' : '';
+const PLAYERS = Number(process.env.E2E_PLAYERS || 4);
+const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
 
 (async () => {
   const browser = await chromium.launch();
@@ -27,6 +32,8 @@ const P = BUILD_ONLY ? 'b-' : '';
   await page.goto(URL);
   await page.waitForSelector('text=开始游戏');
   await page.waitForFunction(() => !document.querySelector('.lobby button.primary')?.disabled);
+  await page.click(`.seg >> text=${PLAYERS} 人`);
+  await page.waitForTimeout(300);
   await page.screenshot({ path: `${OUT}/p1-${P}lobby.png` });
   await page.click('.seg >> text=先手');
   await page.click('text=快速');
@@ -61,13 +68,13 @@ const P = BUILD_ONLY ? 'b-' : '';
     throw new Error(`no visible ${kind} among ${ids.length}`);
   }
 
-  const stats = { settlements: 0, roads: 0, cities: 0, bankTrades: 0, offers: 0, deals: 0, discards: 0, robbers: 0, dev: 0, turns: 0 };
-  const shots = { setup: false, offer: false, robber: false, mid: false };
+  const stats = { settlements: 0, roads: 0, cities: 0, bankTrades: 0, offers: 0, deals: 0, discards: 0, robbers: 0, dev: 0, turns: 0, specialBuilds: 0, specialPasses: 0 };
+  const shots = { setup: false, offer: false, robber: false, mid: false, special: false };
   let triedOfferTurn = -1;
   // Actions are confirmed asynchronously (the match runs in a worker): after
   // acting at a version, wait for the next version before deciding again.
   let actedAt = -1;
-  const deadline = Date.now() + 420_000;
+  const deadline = Date.now() + (PLAYERS > 4 ? 900_000 : 420_000);
 
   // On failure, keep a screenshot and the state for debugging.
   const fail = async (e) => {
@@ -109,7 +116,8 @@ const P = BUILD_ONLY ? 'b-' : '';
       }
       // Prefer high-production spots (sum of pips of adjacent tiles).
       const ranked = await page.evaluate((ids) => {
-        const { game, topology } = window.__isle;
+        const { game } = window.__isle;
+        const topology = game().topology;
         const nums = game().board.numbers;
         const pips = (n) => (n === 0 ? 0 : 6 - Math.abs(7 - n));
         const score = (vtx) => {
@@ -154,6 +162,29 @@ const P = BUILD_ONLY ? 'b-' : '';
         await knight.click();
         stats.dev++;
       } else await page.click('.actions >> text=掷骰子');
+    } else if (v.phase.type === 'SpecialBuild' && v.toMove === v.me.seat) {
+      // Out-of-turn building: build what we can afford, otherwise pass.
+      if (!shots.special) {
+        await page.screenshot({ path: `${OUT}/p1-${P}special-build.png` });
+        shots.special = true;
+      }
+      if (await page.$('.actions >> text=交易')) throw new Error('trading offered during special building');
+      if (types.has('BuildCity')) {
+        await page.click('.build >> text=城市');
+        await clickSpot('vertex', acts.filter((a) => a.type === 'BuildCity').map((a) => a.value));
+        stats.specialBuilds++;
+      } else if (types.has('BuildSettlement')) {
+        await page.click('.build >> text=村庄');
+        await clickSpot('vertex', acts.filter((a) => a.type === 'BuildSettlement').map((a) => a.value));
+        stats.specialBuilds++;
+      } else if (types.has('BuildRoad') && v.players[v.me.seat].roadsLeft > 9) {
+        await page.click('.build >> text=道路');
+        await clickSpot('edge', acts.filter((a) => a.type === 'BuildRoad').map((a) => a.value));
+        stats.specialBuilds++;
+      } else {
+        await page.click('.actions >> text=跳过');
+        stats.specialPasses++;
+      }
     } else if (v.phase.type === 'Main' && v.current === v.me.seat) {
       // A pending offer of ours: confirm with an acceptor or withdraw.
       if (v.trade) {
@@ -253,6 +284,45 @@ const P = BUILD_ONLY ? 'b-' : '';
   console.log('winner:', final.view.winner, 'me:', final.view.me.seat, 'turn:', final.view.turn, 'points:', JSON.stringify(final.view.finalPoints));
   console.log('stats:', JSON.stringify(stats));
   console.log('log tail:', (await page.$$eval('.log li', (els) => els.slice(-4).map((e) => e.textContent))).join(' | '));
+  if (PLAYERS > 4 && stats.specialPasses + stats.specialBuilds === 0) errors.push('never saw a special building phase');
+
+  // ---- replay ----
+  const [download] = await Promise.all([page.waitForEvent('download'), page.click('.modal >> text=下载回放')]);
+  const file = path.join(OUT, `replay-${P}game.json`);
+  await download.saveAs(file);
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  console.log('replay file:', fs.statSync(file).size, 'bytes,', record.players.length, 'players, winner', record.winner);
+  if (record.winner !== final.view.winner) errors.push('replay winner differs');
+  await page.click('.modal >> text=观看回放');
+  await page.waitForSelector('.replay-bar');
+  const total = await page.evaluate(() => window.__isle.game().replay.length);
+  await page.evaluate((n) => window.__isle.game().replay.seek(Math.floor(n * 0.6)), total);
+  await page.selectOption('.replay-bar select', String(final.view.me.seat));
+  await page.waitForTimeout(400);
+  const mid = await page.evaluate(() => {
+    const g = window.__isle.game();
+    return { pos: g.replay.position(), me: g.me, hand: g.view().me?.hand ?? null, log: document.querySelectorAll('.log li').length };
+  });
+  if (mid.me !== final.view.me.seat || !mid.hand || mid.log === 0) errors.push(`replay perspective/log wrong: ${JSON.stringify(mid)}`);
+  await page.screenshot({ path: `${OUT}/p1-${P}replay.png` });
+  await page.click('.replay-bar >> text=4×');
+  await page.click('.replay-play');
+  await page.waitForTimeout(1500);
+  const played = await page.evaluate(() => window.__isle.game().replay.position());
+  if (played <= mid.pos) errors.push(`replay did not advance (${mid.pos} -> ${played})`);
+  await page.evaluate((n) => window.__isle.game().replay.seek(n), total);
+  await page.waitForTimeout(300);
+  const end = await page.evaluate(() => window.__isle.game().view());
+  if (end.winner !== final.view.winner || JSON.stringify(end.buildings) !== JSON.stringify(final.view.buildings)) errors.push('replay end state differs from the game');
+  console.log('replay:', total, 'actions; seek/perspective/play ok');
+
+  // Load the downloaded file from the lobby.
+  await page.click('text=← 大厅');
+  await page.setInputFiles('.file-link input', file);
+  await page.waitForSelector('.replay-bar');
+  const loaded = await page.evaluate(() => window.__isle.game().replay.length);
+  if (loaded !== total) errors.push(`loaded replay has ${loaded} actions, expected ${total}`);
+  await page.click('text=← 大厅');
 
   const mobile = await browser.newPage({ ...devices['iPhone 13'] });
   mobile.on('pageerror', (e) => errors.push(`mobile pageerror: ${e.message}`));

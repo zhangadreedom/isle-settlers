@@ -1,6 +1,6 @@
 // Typed wrapper around the WebAssembly match host.
 import init, * as wasm from './wasm/isle_wasm.js';
-import type { Action, BoardInfo, Event, PlayerView, ResourceSet } from './generated/proto';
+import type { Action, BoardInfo, BoardLayout, Event, PlayerView, ReplayRecord, ResourceSet } from './generated/proto';
 import type { MatchState, WorkerReply, WorkerRequest } from './game/worker';
 
 /** Owner value meaning "nobody" in per-spot arrays. */
@@ -9,6 +9,7 @@ export const EMPTY = 255;
 export const CITY_FLAG = 0x80;
 
 export interface Topology {
+  layout: BoardLayout;
   tilePos: Int16Array;
   vertexPos: Int16Array;
   edgeVertices: Uint8Array;
@@ -135,17 +136,86 @@ export class WorkerMatch {
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
-let ready: Promise<Topology> | undefined;
+let ready: Promise<void> | undefined;
+const topologies = new Map<BoardLayout, Topology>();
 
-export function loadEngine(): Promise<Topology> {
-  ready ??= init().then(() => ({
-    tilePos: wasm.tilePositions(),
-    vertexPos: wasm.vertexPositions(),
-    edgeVertices: wasm.edgeVertices(),
-    tileVertices: wasm.tileVertices(),
-    harborEdges: wasm.harborEdges(),
-  }));
+/** Loads the WebAssembly engine (once). */
+export function loadEngine(): Promise<void> {
+  ready ??= init().then(() => undefined);
   return ready;
+}
+
+/** Adjacency tables of an island. The engine must be loaded. */
+export function topology(layout: BoardLayout): Topology {
+  let t = topologies.get(layout);
+  if (!t) {
+    const raw = JSON.parse(wasm.topology(layout)) as Record<'tilePos' | 'vertexPos' | 'edgeVertices' | 'tileVertices' | 'harborEdges', number[]>;
+    t = {
+      layout,
+      tilePos: Int16Array.from(raw.tilePos),
+      vertexPos: Int16Array.from(raw.vertexPos),
+      edgeVertices: Uint8Array.from(raw.edgeVertices),
+      tileVertices: Uint8Array.from(raw.tileVertices),
+      harborEdges: Uint8Array.from(raw.harborEdges),
+    };
+    topologies.set(layout, t);
+  }
+  return t;
+}
+
+/**
+ * A recorded game, replayed by the engine on the main thread (no bots, so
+ * it is cheap). Throws `EngineError` for files that do not replay.
+ */
+export class Replay {
+  private readonly inner: wasm.Replay;
+  readonly board: BoardInfo;
+  readonly record: ReplayRecord;
+  readonly length: number;
+
+  constructor(json: string) {
+    let record: ReplayRecord;
+    try {
+      record = JSON.parse(json) as ReplayRecord;
+    } catch {
+      throw new EngineError('BadReplay');
+    }
+    const c = record?.config;
+    if (!c || typeof record.seed !== 'string' || !Array.isArray(record.actions) || !Array.isArray(record.players)) {
+      throw new EngineError('BadReplay');
+    }
+    if (record.format !== 1) throw new EngineError('UnsupportedReplay');
+    if (record.players.length !== c.numPlayers) throw new EngineError('BadReplayConfig');
+    try {
+      this.inner = new wasm.Replay(c.numPlayers, c.victoryPoints, c.balancedBoard, record.seed, Uint8Array.from(record.actions));
+    } catch (e) {
+      throw new EngineError(e instanceof Error ? e.message : String(e));
+    }
+    this.record = record;
+    this.board = call(() => this.inner.board());
+    this.length = this.inner.length();
+  }
+
+  get position(): number {
+    return this.inner.position();
+  }
+
+  view(viewer: number | null): PlayerView {
+    return call(() => this.inner.view(viewer ?? -1));
+  }
+
+  seek(position: number) {
+    this.inner.seek(position);
+  }
+
+  /** Applies the next action; `null` at the end. */
+  step(viewer: number | null): BotStep | null {
+    return call(() => this.inner.step(viewer ?? -1));
+  }
+
+  free() {
+    this.inner.free();
+  }
 }
 
 export const runBenchmark = (games: number, seed: number) => wasm.runBenchmark(games, seed);

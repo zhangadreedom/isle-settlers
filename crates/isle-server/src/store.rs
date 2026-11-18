@@ -19,6 +19,9 @@ pub struct RoomRecord {
     pub started: bool,
     /// Every action applied so far, with the acting seat, in order.
     pub actions: Vec<(u8, Action)>,
+    /// Replay id once the game is over.
+    #[serde(default)]
+    pub replay: Option<String>,
 }
 
 impl RoomRecord {
@@ -104,5 +107,88 @@ impl Store {
         {
             tracing::warn!("cannot delete {}: {e}", path.display());
         }
+    }
+}
+
+/// Finished games, kept so they can be watched again. Recent replays stay in
+/// memory; with a data directory every replay is also written to
+/// `<data dir>/replays/<id>.json`.
+pub struct ReplayArchive {
+    dir: Option<PathBuf>,
+    recent: std::sync::Mutex<RecentReplays>,
+}
+
+#[derive(Default)]
+struct RecentReplays {
+    order: std::collections::VecDeque<String>,
+    json: std::collections::HashMap<String, std::sync::Arc<str>>,
+}
+
+/// Replays kept in memory.
+const RECENT_REPLAYS: usize = 256;
+
+impl ReplayArchive {
+    pub fn new(data_dir: Option<&std::path::Path>) -> ReplayArchive {
+        let dir = data_dir.map(|d| d.join("replays"));
+        if let Some(dir) = &dir
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            tracing::error!("cannot create replay dir {}: {e}", dir.display());
+        }
+        ReplayArchive {
+            dir,
+            recent: std::sync::Mutex::new(RecentReplays::default()),
+        }
+    }
+
+    pub fn valid_id(id: &str) -> bool {
+        valid_id(id)
+    }
+
+    /// Stores a replay under `id` (memory now, disk in the background).
+    pub fn put(&self, id: &str, record: &isle_proto::ReplayRecord) {
+        if !valid_id(id) {
+            return;
+        }
+        let json: std::sync::Arc<str> = serde_json::to_string(record).expect("serializable").into();
+        {
+            let mut recent = self.recent.lock().expect("replay lock");
+            if recent.json.insert(id.to_owned(), json.clone()).is_none() {
+                recent.order.push_back(id.to_owned());
+            }
+            while recent.order.len() > RECENT_REPLAYS {
+                if let Some(old) = recent.order.pop_front() {
+                    recent.json.remove(&old);
+                }
+            }
+        }
+        if let Some(dir) = self.dir.clone() {
+            let id = id.to_owned();
+            let write = move || {
+                let tmp = dir.join(format!("{id}.json.tmp"));
+                let result = std::fs::write(&tmp, json.as_bytes())
+                    .and_then(|_| std::fs::rename(&tmp, dir.join(format!("{id}.json"))));
+                if let Err(e) = result {
+                    tracing::error!(replay = %id, "could not save replay: {e}");
+                }
+            };
+            match tokio::runtime::Handle::try_current() {
+                Ok(rt) => drop(rt.spawn_blocking(write)),
+                Err(_) => write(),
+            }
+        }
+    }
+
+    /// The replay's JSON, if known.
+    pub async fn get(&self, id: &str) -> Option<std::sync::Arc<str>> {
+        if !valid_id(id) {
+            return None;
+        }
+        if let Some(json) = self.recent.lock().expect("replay lock").json.get(id) {
+            return Some(json.clone());
+        }
+        let path = self.dir.as_ref()?.join(format!("{id}.json"));
+        let text = tokio::fs::read_to_string(path).await.ok()?;
+        Some(text.into())
     }
 }

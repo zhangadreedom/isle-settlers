@@ -3,7 +3,8 @@
 //! Deterministic rules engine for Isle Settlers, a hex-island game of
 //! settling, trading and building.
 //!
-//! * The board topology is a set of compile-time tables ([`topology`]).
+//! * Board topologies are compile-time tables ([`topology`]): the base
+//!   island for 2–4 players and the extended island for 5–6.
 //! * [`GameState`] is a heap-free `Copy` struct: cloning it is a `memcpy`,
 //!   which is what tree search needs.
 //! * All randomness comes from the state's own seeded [`Rng`], so a game is
@@ -40,3 +41,4 @@ pub use state::{
     ConfigError, DevCard, GameConfig, GameState, MAX_PLAYERS, Phase, PlayerState, TradeOffer,
     TradeResponse,
 };
+pub use topology::{BoardLayout, Topology};

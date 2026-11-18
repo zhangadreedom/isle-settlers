@@ -11,13 +11,15 @@ export type ResourceSet = [number, number, number, number, number];
 
 export type DevCard = "Knight" | "VictoryPoint" | "RoadBuilding" | "YearOfPlenty" | "Monopoly";
 
+export type BoardLayout = "Base" | "Extended";
+
 export type GameConfig = { numPlayers: number, victoryPoints: number, 
 /**
  * Keep 6 and 8 tokens off adjacent tiles when generating the board.
  */
 balancedBoard: boolean, };
 
-export type Phase = { "type": "SetupSettlement" } | { "type": "SetupRoad", "value": { vertex: number, } } | { "type": "PreRoll" } | { "type": "Discard" } | { "type": "MoveRobber" } | { "type": "Main" } | { "type": "RoadBuilding", "value": { remaining: number, } } | { "type": "GameOver" };
+export type Phase = { "type": "SetupSettlement" } | { "type": "SetupRoad", "value": { vertex: number, } } | { "type": "PreRoll" } | { "type": "Discard" } | { "type": "MoveRobber" } | { "type": "Main" } | { "type": "RoadBuilding", "value": { remaining: number, } } | { "type": "SpecialBuild", "value": { builder: number, } } | { "type": "GameOver" };
 
 export type TradeResponse = "Pending" | "Accepted" | "Rejected";
 
@@ -29,15 +31,19 @@ give: ResourceSet,
 /**
  * Cards the current player wants in return.
  */
-get: ResourceSet, responses: [TradeResponse, TradeResponse, TradeResponse, TradeResponse], };
+get: ResourceSet, responses: [TradeResponse, TradeResponse, TradeResponse, TradeResponse, TradeResponse, TradeResponse], };
 
 export type Action = { "type": "RollDice" } | { "type": "BuildRoad", "value": number } | { "type": "BuildSettlement", "value": number } | { "type": "BuildCity", "value": number } | { "type": "BuyDevCard" } | { "type": "PlayKnight" } | { "type": "PlayRoadBuilding" } | { "type": "PlayYearOfPlenty", "value": ResourceSet } | { "type": "PlayMonopoly", "value": Resource } | { "type": "MoveRobber", "value": { tile: number, victim: number | null, } } | { "type": "Discard", "value": ResourceSet } | { "type": "MaritimeTrade", "value": { give: Resource, get: Resource, } } | { "type": "ProposeTrade", "value": { give: ResourceSet, get: ResourceSet, } } | { "type": "RespondTrade", "value": { accept: boolean, } } | { "type": "ConfirmTrade", "value": { partner: number, } } | { "type": "CancelTrade" } | { "type": "EndTurn" };
 
-export type Event = { "type": "DiceRolled", "value": { player: number, dice: [number, number], } } | { "type": "ResourcesProduced", "value": { player: number, resources: ResourceSet, } } | { "type": "StartingResources", "value": { player: number, resources: ResourceSet, } } | { "type": "Discarded", "value": { player: number, resources: ResourceSet, } } | { "type": "RobberMoved", "value": { player: number, tile: number, } } | { "type": "Stolen", "value": { thief: number, victim: number, resource: Resource | null, } } | { "type": "RoadBuilt", "value": { player: number, edge: number, } } | { "type": "SettlementBuilt", "value": { player: number, vertex: number, } } | { "type": "CityBuilt", "value": { player: number, vertex: number, } } | { "type": "DevCardBought", "value": { player: number, card: DevCard | null, } } | { "type": "DevCardPlayed", "value": { player: number, card: DevCard, } } | { "type": "YearOfPlentyTaken", "value": { player: number, resources: ResourceSet, } } | { "type": "MonopolyTaken", "value": { player: number, resource: Resource, taken: [number, number, number, number], } } | { "type": "MaritimeTraded", "value": { player: number, give: ResourceSet, get: Resource, } } | { "type": "TradeProposed", "value": { player: number, give: ResourceSet, get: ResourceSet, } } | { "type": "TradeResponded", "value": { player: number, accept: boolean, } } | { "type": "TradeExecuted", "value": { player: number, partner: number, give: ResourceSet, get: ResourceSet, } } | { "type": "TradeCancelled", "value": { player: number, } } | { "type": "LongestRoadChanged", "value": { owner: number | null, } } | { "type": "LargestArmyChanged", "value": { owner: number | null, } } | { "type": "TurnEnded", "value": { player: number, } } | { "type": "GameWon", "value": { player: number, points: number, } };
+export type Event = { "type": "DiceRolled", "value": { player: number, dice: [number, number], } } | { "type": "ResourcesProduced", "value": { player: number, resources: ResourceSet, } } | { "type": "StartingResources", "value": { player: number, resources: ResourceSet, } } | { "type": "Discarded", "value": { player: number, resources: ResourceSet, } } | { "type": "RobberMoved", "value": { player: number, tile: number, } } | { "type": "Stolen", "value": { thief: number, victim: number, resource: Resource | null, } } | { "type": "RoadBuilt", "value": { player: number, edge: number, } } | { "type": "SettlementBuilt", "value": { player: number, vertex: number, } } | { "type": "CityBuilt", "value": { player: number, vertex: number, } } | { "type": "DevCardBought", "value": { player: number, card: DevCard | null, } } | { "type": "DevCardPlayed", "value": { player: number, card: DevCard, } } | { "type": "YearOfPlentyTaken", "value": { player: number, resources: ResourceSet, } } | { "type": "MonopolyTaken", "value": { player: number, resource: Resource, taken: [number, number, number, number, number, number], } } | { "type": "MaritimeTraded", "value": { player: number, give: ResourceSet, get: Resource, } } | { "type": "TradeProposed", "value": { player: number, give: ResourceSet, get: ResourceSet, } } | { "type": "TradeResponded", "value": { player: number, accept: boolean, } } | { "type": "TradeExecuted", "value": { player: number, partner: number, give: ResourceSet, get: ResourceSet, } } | { "type": "TradeCancelled", "value": { player: number, } } | { "type": "LongestRoadChanged", "value": { owner: number | null, } } | { "type": "LargestArmyChanged", "value": { owner: number | null, } } | { "type": "TurnEnded", "value": { player: number, } } | { "type": "SpecialBuildPassed", "value": { player: number, } } | { "type": "GameWon", "value": { player: number, points: number, } };
 
 export type RuleError = "GameOver" | "InvalidPlayer" | "NotYourTurn" | "WrongPhase" | "InsufficientResources" | "NoPiecesLeft" | "InvalidVertex" | "InvalidEdge" | "Occupied" | "TooCloseToBuilding" | "NotConnected" | "NotYourSettlement" | "InvalidTile" | "RobberMustMove" | "InvalidVictim" | "NoSuchCard" | "DevCardAlreadyPlayed" | "NoRoadSpot" | "DeckEmpty" | "BankShort" | "InvalidTrade" | "NoOpenTrade" | "PartnerHasNotAccepted" | "WrongDiscardAmount" | "NothingToDiscard";
 
 export type BoardInfo = { config: GameConfig, 
+/**
+ * Island shape; selects the topology tables.
+ */
+layout: BoardLayout, 
 /**
  * Terrain per tile.
  */
@@ -93,7 +99,8 @@ export type PlayerView = {
  */
 viewer: number | null, phase: Phase, current: number, 
 /**
- * Seat expected to act next (during discards: lowest seat still owing).
+ * Seat expected to act next (during discards: lowest seat still owing;
+ * during a special building phase: the builder).
  */
 toMove: number | null, turn: number, dice: [number, number] | null, devCardPlayed: boolean, robber: number, bank: ResourceSet, devDeckLen: number, 
 /**
@@ -129,7 +136,11 @@ host: number,
 /**
  * The receiving connection's seat; `None` for spectators.
  */
-you: number | null, started: boolean, seats: Array<SeatView>, spectators: number, };
+you: number | null, started: boolean, seats: Array<SeatView>, spectators: number, 
+/**
+ * Id of the finished game's replay (`/api/replays/{id}`).
+ */
+replay: string | null, };
 
 export type LegalActions = { version: number, actions: Array<Action>, };
 
@@ -154,4 +165,25 @@ seat: number | null, name: string, text: string, };
 export type ClientMsg = { "type": "Create", "value": { players: number, bots: BotLevel, name: string, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
 
 export type ServerMsg = { "type": "Joined", "value": { room: string, seat: number | null, token: string | null, } } | { "type": "Room", "value": RoomInfo } | { "type": "Snapshot", "value": Snapshot } | { "type": "Update", "value": Update } | { "type": "Chat", "value": ChatLine } | { "type": "Error", "value": { code: string, } };
+
+export type ReplayPlayer = { 
+/**
+ * Display name; empty for computer players.
+ */
+name: string, 
+/**
+ * Strength of a computer player, `None` for humans.
+ */
+bot: BotLevel | null, };
+
+export type ReplayRecord = { format: number, config: GameConfig, 
+/**
+ * Game seed in decimal: a `u64` does not fit a JavaScript number.
+ */
+seed: string, players: Array<ReplayPlayer>, 
+/**
+ * Every action applied, in order, each as the acting seat followed by
+ * [`Action::encode`] bytes.
+ */
+actions: Array<number>, winner: number | null, };
 

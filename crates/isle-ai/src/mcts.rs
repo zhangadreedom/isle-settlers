@@ -10,7 +10,6 @@
 //! the reward of the seat that chose its action.
 
 use isle_core::resources::cost;
-use isle_core::topology::TILE_VERTEX_MASK;
 use isle_core::{Action, GameState, MAX_PLAYERS, Phase, ResourceSet, Rng};
 
 use crate::Bot;
@@ -384,7 +383,7 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
         })
         .unwrap_or_else(|| pick(rng)),
         Phase::PreRoll => {
-            let robbed = s.buildings_of(p) & TILE_VERTEX_MASK[s.robber as usize] != 0;
+            let robbed = s.buildings_of(p) & s.topo().tile_vertex_mask[s.robber as usize] != 0;
             if robbed && legal.contains(&Action::PlayKnight) {
                 Action::PlayKnight
             } else {
@@ -392,7 +391,7 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
             }
         }
         Phase::Main if p != s.current => Action::RespondTrade { accept: false },
-        Phase::Main => main_policy(s, p, legal, rng),
+        Phase::Main | Phase::SpecialBuild { .. } => main_policy(s, p, legal, rng),
         Phase::GameOver => legal[0],
     }
 }
@@ -436,7 +435,7 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
     if legal.contains(&Action::BuyDevCard) && rng.below(2) == 0 {
         return Action::BuyDevCard;
     }
-    let robbed = s.buildings_of(p) & TILE_VERTEX_MASK[s.robber as usize] != 0;
+    let robbed = s.buildings_of(p) & s.topo().tile_vertex_mask[s.robber as usize] != 0;
     if robbed && legal.contains(&Action::PlayKnight) {
         return Action::PlayKnight;
     }

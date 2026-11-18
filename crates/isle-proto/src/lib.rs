@@ -8,15 +8,19 @@
 //! cards, the order of the development deck, and the RNG state (future dice).
 //! Card *counts* are public.
 
-use isle_core::topology::{NUM_EDGES, NUM_VERTICES, edges_in, vertices_in};
+use isle_core::topology::{edges_in, vertices_in};
 use isle_core::{
-    GameConfig, GameState, HarborKind, Phase, Resource, ResourceSet, Terrain, TradeOffer,
+    BoardLayout, GameConfig, GameState, HarborKind, Phase, Resource, ResourceSet, Terrain,
+    TradeOffer,
 };
 use serde::{Deserialize, Serialize};
 
 pub use isle_core::{Action, DevCard, Event, RuleError, TradeResponse};
 
 pub mod net;
+pub mod replay;
+
+pub use replay::{ReplayError, ReplayPlayer, ReplayRecord};
 
 /// Owner value meaning "nobody" in per-spot arrays.
 pub const EMPTY: u8 = u8::MAX;
@@ -29,6 +33,8 @@ pub const CITY_FLAG: u8 = 0x80;
 #[serde(rename_all = "camelCase")]
 pub struct BoardInfo {
     pub config: GameConfig,
+    /// Island shape; selects the topology tables.
+    pub layout: BoardLayout,
     /// Terrain per tile.
     pub terrain: Vec<Terrain>,
     /// Number token per tile (0 for the desert).
@@ -84,7 +90,8 @@ pub struct PlayerView {
     pub viewer: Option<u8>,
     pub phase: Phase,
     pub current: u8,
-    /// Seat expected to act next (during discards: lowest seat still owing).
+    /// Seat expected to act next (during discards: lowest seat still owing;
+    /// during a special building phase: the builder).
     pub to_move: Option<u8>,
     pub turn: u32,
     pub dice: Option<(u8, u8)>,
@@ -111,17 +118,19 @@ pub struct PlayerView {
 pub fn board_info(state: &GameState) -> BoardInfo {
     BoardInfo {
         config: state.config,
-        terrain: state.board.terrain.to_vec(),
-        numbers: state.board.numbers.to_vec(),
-        harbors: state.board.harbors.to_vec(),
+        layout: state.board.layout,
+        terrain: state.board.tiles().to_vec(),
+        numbers: state.board.numbers[..state.topo().num_tiles].to_vec(),
+        harbors: state.board.harbor_kinds().to_vec(),
     }
 }
 
 /// Projects `state` for `viewer` (`None` = spectator).
 pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
     let n = state.num_players();
-    let mut buildings = vec![EMPTY; NUM_VERTICES];
-    let mut roads = vec![EMPTY; NUM_EDGES];
+    let topo = state.topo();
+    let mut buildings = vec![EMPTY; topo.num_vertices];
+    let mut roads = vec![EMPTY; topo.num_edges];
     for p in 0..n {
         for v in vertices_in(state.settlements[p]) {
             buildings[v as usize] = p as u8;

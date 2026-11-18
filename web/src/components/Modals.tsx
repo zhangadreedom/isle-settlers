@@ -1,8 +1,9 @@
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import type { Game } from '../game/controller';
-import type { ResourceSet, TradeResponse } from '../generated/proto';
+import type { ReplayRecord, ResourceSet, TradeResponse } from '../generated/proto';
 import { RESOURCES, RESOURCE_NAME, setTotal } from '../game/text';
 import { Modal, ResIcon, SeatDot, SetView, Stepper } from './bits';
+import { downloadReplay } from './Hud';
 
 const empty = (): ResourceSet => [0, 0, 0, 0, 0];
 const withCount = (s: ResourceSet, i: number, v: number): ResourceSet => s.map((x, j) => (j === i ? v : x)) as ResourceSet;
@@ -269,7 +270,12 @@ export function TradeModal(props: { game: Game; onClose: () => void }) {
   );
 }
 
-export function GameOverModal(props: { game: Game; onAgain?: () => void; onLobby: () => void }) {
+export function GameOverModal(props: {
+  game: Game;
+  onAgain?: () => void;
+  onLobby: () => void;
+  onWatchReplay?: (record: ReplayRecord, link: string | null) => void;
+}) {
   const g = props.game;
   const ranking = () =>
     g
@@ -289,6 +295,36 @@ export function GameOverModal(props: { game: Game; onAgain?: () => void; onLobby
         </For>
       </ol>
       <p class="muted">共 {g.view().turn} 个回合</p>
+      <Show when={g.exportReplay}>
+        {(load) => {
+          const [busy, setBusy] = createSignal(false);
+          const withRecord = async (use: (r: ReplayRecord) => void) => {
+            if (busy()) return;
+            setBusy(true);
+            try {
+              const record = await load()();
+              if (record) use(record);
+              else g.showToast('回放还没准备好，请稍后再试');
+            } finally {
+              setBusy(false);
+            }
+          };
+          return (
+            <div class="row replay-actions">
+              <Show when={props.onWatchReplay}>
+                {(watch) => (
+                  <button disabled={busy()} onClick={() => void withRecord((r) => watch()(r, g.replayLink?.() ?? null))}>
+                    观看回放
+                  </button>
+                )}
+              </Show>
+              <button disabled={busy()} onClick={() => void withRecord(downloadReplay)}>
+                下载回放
+              </button>
+            </div>
+          );
+        }}
+      </Show>
       <footer>
         <button onClick={props.onLobby}>返回大厅</button>
         <Show when={props.onAgain}>

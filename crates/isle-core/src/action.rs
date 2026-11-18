@@ -54,6 +54,101 @@ pub enum Action {
     EndTurn,
 }
 
+impl Action {
+    /// Appends a compact encoding: a tag byte followed by the operands.
+    /// Used for replays, where the log of a game should stay small.
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        let resource = |r: Resource| r as u8;
+        match *self {
+            Action::RollDice => out.push(0),
+            Action::BuildRoad(e) => out.extend([1, e]),
+            Action::BuildSettlement(v) => out.extend([2, v]),
+            Action::BuildCity(v) => out.extend([3, v]),
+            Action::BuyDevCard => out.push(4),
+            Action::PlayKnight => out.push(5),
+            Action::PlayRoadBuilding => out.push(6),
+            Action::PlayYearOfPlenty(set) => {
+                out.push(7);
+                out.extend(set.0);
+            }
+            Action::PlayMonopoly(r) => out.extend([8, resource(r)]),
+            Action::MoveRobber { tile, victim } => out.extend([9, tile, victim.unwrap_or(u8::MAX)]),
+            Action::Discard(set) => {
+                out.push(10);
+                out.extend(set.0);
+            }
+            Action::MaritimeTrade { give, get } => out.extend([11, resource(give), resource(get)]),
+            Action::ProposeTrade { give, get } => {
+                out.push(12);
+                out.extend(give.0);
+                out.extend(get.0);
+            }
+            Action::RespondTrade { accept } => out.extend([13, accept as u8]),
+            Action::ConfirmTrade { partner } => out.extend([14, partner]),
+            Action::CancelTrade => out.push(15),
+            Action::EndTurn => out.push(16),
+        }
+    }
+
+    /// Decodes one action from the front of `bytes` (see [`encode`](Self::encode)),
+    /// returning it with the number of bytes read.
+    pub fn decode(bytes: &[u8]) -> Option<(Action, usize)> {
+        let (&tag, rest) = bytes.split_first()?;
+        let arg = |i: usize| rest.get(i).copied();
+        let resource = |i: usize| arg(i).and_then(|r| Resource::from_index(r as usize));
+        let set = |from: usize| -> Option<ResourceSet> {
+            Some(ResourceSet(rest.get(from..from + 5)?.try_into().ok()?))
+        };
+        let (action, operands) = match tag {
+            0 => (Action::RollDice, 0),
+            1 => (Action::BuildRoad(arg(0)?), 1),
+            2 => (Action::BuildSettlement(arg(0)?), 1),
+            3 => (Action::BuildCity(arg(0)?), 1),
+            4 => (Action::BuyDevCard, 0),
+            5 => (Action::PlayKnight, 0),
+            6 => (Action::PlayRoadBuilding, 0),
+            7 => (Action::PlayYearOfPlenty(set(0)?), 5),
+            8 => (Action::PlayMonopoly(resource(0)?), 1),
+            9 => {
+                let victim = arg(1)?;
+                (
+                    Action::MoveRobber {
+                        tile: arg(0)?,
+                        victim: (victim != u8::MAX).then_some(victim),
+                    },
+                    2,
+                )
+            }
+            10 => (Action::Discard(set(0)?), 5),
+            11 => (
+                Action::MaritimeTrade {
+                    give: resource(0)?,
+                    get: resource(1)?,
+                },
+                2,
+            ),
+            12 => (
+                Action::ProposeTrade {
+                    give: set(0)?,
+                    get: set(5)?,
+                },
+                10,
+            ),
+            13 => (
+                Action::RespondTrade {
+                    accept: arg(0)? != 0,
+                },
+                1,
+            ),
+            14 => (Action::ConfirmTrade { partner: arg(0)? }, 1),
+            15 => (Action::CancelTrade, 0),
+            16 => (Action::EndTurn, 0),
+            _ => return None,
+        };
+        Some((action, 1 + operands))
+    }
+}
+
 /// Something that happened. Some events carry private information
 /// (`Stolen`, `DevCardBought`) that must be filtered per viewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -147,6 +242,10 @@ pub enum Event {
         owner: Option<u8>,
     },
     TurnEnded {
+        player: u8,
+    },
+    /// A player passed during the special building phase.
+    SpecialBuildPassed {
         player: u8,
     },
     GameWon {

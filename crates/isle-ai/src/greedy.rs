@@ -6,7 +6,7 @@
 
 use isle_core::board::PIPS;
 use isle_core::resources::cost;
-use isle_core::topology::*;
+use isle_core::topology::{NONE, vertices_in};
 use isle_core::{Action, GameState, Phase, Resource, ResourceSet, Rng};
 
 use crate::Bot;
@@ -71,7 +71,8 @@ impl Bot for GreedyBot {
                 _ => None,
             }),
             Phase::Main if p != s.current => Some(respond_trade(s, p, legal)),
-            Phase::Main => main_turn(s, p, legal),
+            // Out-of-turn building only offers builds, purchases and passing.
+            Phase::Main | Phase::SpecialBuild { .. } => main_turn(s, p, legal),
             Phase::GameOver => None,
         };
         choice.unwrap_or_else(|| {
@@ -112,7 +113,7 @@ pub(crate) fn production(s: &GameState, q: u8) -> [f32; 5] {
         (s.cities[q as usize], 2.0),
     ] {
         for v in vertices_in(mask) {
-            for &t in &VERTEX_TILES[v as usize] {
+            for &t in &s.topo().vertex_tiles[v as usize] {
                 if t == NONE {
                     break;
                 }
@@ -129,7 +130,7 @@ pub(crate) fn production(s: &GameState, q: u8) -> [f32; 5] {
 /// Board-wide scarcity: resources with fewer pips are worth more.
 pub(crate) fn scarcity(s: &GameState) -> [f32; 5] {
     let mut pips = [0.0f32; 5];
-    for t in 0..NUM_TILES as u8 {
+    for t in 0..s.topo().num_tiles as u8 {
         if let Some(r) = s.board.terrain[t as usize].resource() {
             pips[r.index()] += tile_pips(s, t);
         }
@@ -145,7 +146,7 @@ pub(crate) fn spot_value(s: &GameState, p: u8, v: u8) -> f32 {
     let mut value = 0.0;
     let mut kinds = 0u8;
     let mut gained = [0.0f32; 5];
-    for &t in &VERTEX_TILES[v as usize] {
+    for &t in &s.topo().vertex_tiles[v as usize] {
         if t == NONE {
             break;
         }
@@ -179,11 +180,11 @@ pub(crate) fn spot_value(s: &GameState, p: u8, v: u8) -> f32 {
 
 /// Settlement spots reachable from vertex `from` within two road segments
 /// (not passing through opponent buildings), scored and decayed by distance.
-fn frontier_value(s: &GameState, p: u8, from: u8, legal_spots: u64) -> f32 {
+fn frontier_value(s: &GameState, p: u8, from: u8, legal_spots: u128) -> f32 {
     let blocked = s.occupied_vertices() & !s.buildings_of(p);
     let mut best = 0.0f32;
     let mut frontier = vec![(from, 0u8)];
-    let mut seen = 1u64 << from;
+    let mut seen = 1u128 << from;
     while let Some((v, d)) = frontier.pop() {
         if legal_spots & (1 << v) != 0 {
             best = best.max(spot_value(s, p, v) * [1.0, 0.75, 0.5][d as usize]);
@@ -191,7 +192,7 @@ fn frontier_value(s: &GameState, p: u8, from: u8, legal_spots: u64) -> f32 {
         if d == 2 || blocked & (1 << v) != 0 {
             continue;
         }
-        for &n in &VERTEX_VERTICES[v as usize] {
+        for &n in &s.topo().vertex_vertices[v as usize] {
             if n != NONE && seen & (1 << n) == 0 {
                 seen |= 1 << n;
                 frontier.push((n, d + 1));
@@ -205,8 +206,8 @@ fn frontier_value(s: &GameState, p: u8, from: u8, legal_spots: u64) -> f32 {
 /// plus a little for longest-road progress.
 fn road_value(s: &GameState, p: u8, e: u8) -> f32 {
     let spots = s.settlement_spots(p, false);
-    let [a, b] = EDGE_VERTICES[e as usize];
-    let reach = s.buildings_of(p) | endpoints_of(s.roads[p as usize]);
+    let [a, b] = s.topo().edge_vertices[e as usize];
+    let reach = s.buildings_of(p) | s.topo().endpoints_of(s.roads[p as usize]);
     // Score from the endpoint the road extends towards.
     let far = if reach & (1 << a) != 0 { b } else { a };
     let mut value = frontier_value(s, p, far, spots);
@@ -233,7 +234,7 @@ pub(crate) fn missing(hand: ResourceSet, need: ResourceSet) -> u32 {
 /// Is any settlement spot within two road segments of our network?
 fn has_expansion_room(s: &GameState, p: u8) -> bool {
     let spots = s.settlement_spots(p, false);
-    let reach = s.buildings_of(p) | endpoints_of(s.roads[p as usize]);
+    let reach = s.buildings_of(p) | s.topo().endpoints_of(s.roads[p as usize]);
     vertices_in(reach).any(|v| frontier_value(s, p, v, spots) > 0.0)
 }
 
@@ -270,7 +271,7 @@ fn hand_value(s: &GameState, p: u8, hand: ResourceSet) -> f32 {
 
 pub(crate) fn robber_value(s: &GameState, p: u8, tile: u8, victim: Option<u8>) -> f32 {
     let pips = tile_pips(s, tile);
-    let tv = TILE_VERTEX_MASK[tile as usize];
+    let tv = s.topo().tile_vertex_mask[tile as usize];
     let mut value = 0.0;
     for q in 0..s.num_players() as u8 {
         let weight = (s.settlements[q as usize] & tv).count_ones() as f32
@@ -290,7 +291,8 @@ pub(crate) fn robber_value(s: &GameState, p: u8, tile: u8, victim: Option<u8>) -
 }
 
 fn robber_hurts_me(s: &GameState, p: u8) -> bool {
-    s.buildings_of(p) & TILE_VERTEX_MASK[s.robber as usize] != 0 && tile_pips(s, s.robber) >= 3.0
+    s.buildings_of(p) & s.topo().tile_vertex_mask[s.robber as usize] != 0
+        && tile_pips(s, s.robber) >= 3.0
 }
 
 fn knight_wins_army(s: &GameState, p: u8) -> bool {
@@ -433,7 +435,7 @@ fn main_turn(s: &GameState, p: u8, legal: &[Action]) -> Option<Action> {
 }
 
 pub(crate) fn vertex_production(s: &GameState, v: u8) -> f32 {
-    VERTEX_TILES[v as usize]
+    s.topo().vertex_tiles[v as usize]
         .iter()
         .filter(|&&t| t != NONE)
         .map(|&t| tile_pips(s, t))

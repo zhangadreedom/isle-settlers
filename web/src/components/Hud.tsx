@@ -1,13 +1,14 @@
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import type { Game } from '../game/controller';
-import { COSTS, DEV_CARDS, DEV_HELP, DEV_NAME, RESOURCES, RESOURCE_CSS, RESOURCE_SHORT } from '../game/text';
+import type { ReplayControls } from '../game/source';
+import { BOT_LEVEL_NAME, COSTS, DEV_CARDS, DEV_HELP, DEV_NAME, RESOURCES, RESOURCE_CSS, RESOURCE_SHORT } from '../game/text';
 import type { DevCard } from '../generated/proto';
 import { Die, ResIcon, SeatDot, SetView } from './bits';
 
 export function PlayerList(props: { game: Game }) {
   const g = props.game;
   return (
-    <aside class="panel players-panel" data-inset>
+    <aside class="panel players-panel" classList={{ many: g.view().players.length > 4 }} data-inset>
       <For each={g.view().players}>
         {(p) => {
           const isMe = () => p.seat === g.me;
@@ -16,11 +17,21 @@ export function PlayerList(props: { game: Game }) {
             <div
               class="seat"
               id={`seat-${p.seat}`}
-              classList={{ current: g.view().current === p.seat, me: isMe(), winner: g.view().winner === p.seat }}
+              classList={{
+                current: g.view().current === p.seat,
+                building: g.view().phase.type === 'SpecialBuild' && g.view().toMove === p.seat,
+                me: isMe(),
+                winner: g.view().winner === p.seat,
+              }}
             >
               <div class="seat-head">
                 <SeatDot seat={p.seat} />
                 <span class="seat-name">{g.name(p.seat)}</span>
+                <Show when={g.replay && g.seat(p.seat).bot}>
+                  <span class="presence bot" title={`${BOT_LEVEL_NAME[g.replay!.players[p.seat]?.bot ?? 'Normal']} AI`}>
+                    AI
+                  </span>
+                </Show>
                 <Show when={g.online && p.seat !== g.me}>
                   <Show when={g.seat(p.seat).bot}>
                     <span class="presence bot">AI</span>
@@ -157,6 +168,18 @@ export function GameLog(props: { game: Game; open: boolean; onToggle: () => void
 function prompt(g: Game): string {
   const v = g.view();
   if (v.winner !== null) return `${g.name(v.winner)}获胜`;
+  if (g.replay) {
+    const builder = v.phase.type === 'SpecialBuild' ? `，${g.name(v.phase.value.builder)} 特殊建造中` : '';
+    return `回放 · ${g.name(v.current)}的回合${builder}`;
+  }
+  if (v.phase.type === 'SpecialBuild') {
+    const builder = v.phase.value.builder;
+    if (builder === g.me) {
+      if (g.mode()) return `选择位置建造${g.mode() === 'road' ? '道路' : g.mode() === 'settlement' ? '村庄' : '城市'}（再点一次按钮取消）`;
+      return '特殊建造：可以建造或买发展卡（不能交易），或者跳过';
+    }
+    return `${g.name(builder)} 特殊建造中…`;
+  }
   if (g.me === null) return `观战中 · ${g.name(v.current)}的回合`;
   const myTurn = v.current === g.me;
   switch (v.phase.type) {
@@ -184,6 +207,7 @@ function prompt(g: Game): string {
     case 'GameOver':
       return '游戏结束';
   }
+  return '';
 }
 
 export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (card: DevCard) => void }) {
@@ -195,10 +219,12 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
     ];
     return type !== undefined && g.has(type as never);
   };
-  const isMain = () => g.view().phase.type === 'Main' && g.view().current === g.me;
+  const isMain = () => !g.replay && g.view().phase.type === 'Main' && g.view().current === g.me;
+  const isSpecialBuild = () => !g.replay && g.view().phase.type === 'SpecialBuild' && g.view().toMove === g.me;
 
   return (
     <div class="handbar-wrap" data-inset>
+      <Show when={g.replay}>{(r) => <ReplayBar game={g} replay={r()} />}</Show>
       <div class="prompt">{prompt(g)}</div>
       <Show when={me()}>
         {(m) => (
@@ -241,7 +267,7 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
                   掷骰子
                 </button>
               </Show>
-              <Show when={isMain()}>
+              <Show when={isMain() || isSpecialBuild()}>
                 <For each={[['road', '道路', 'BuildRoad', 0], ['settlement', '村庄', 'BuildSettlement', 1], ['city', '城市', 'BuildCity', 2]] as const}>
                   {([mode, label, type, costIndex]) => (
                     <button
@@ -260,10 +286,19 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
                   发展卡
                   <SetView set={COSTS[3].cost} />
                 </button>
-                <button onClick={props.onTrade}>交易</button>
-                <button class="primary" disabled={!g.has('EndTurn')} onClick={() => g.act((a) => a.type === 'EndTurn')}>
-                  结束回合
-                </button>
+                <Show
+                  when={isMain()}
+                  fallback={
+                    <button class="primary" disabled={!g.has('EndTurn')} onClick={() => g.act((a) => a.type === 'EndTurn')}>
+                      跳过
+                    </button>
+                  }
+                >
+                  <button onClick={props.onTrade}>交易</button>
+                  <button class="primary" disabled={!g.has('EndTurn')} onClick={() => g.act((a) => a.type === 'EndTurn')}>
+                    结束回合
+                  </button>
+                </Show>
               </Show>
             </div>
           </div>
@@ -305,4 +340,89 @@ export function Flights(props: { game: Game }) {
       </For>
     </div>
   );
+}
+
+const SPEEDS = [0.5, 1, 2, 4];
+
+/** Replay transport: play/pause, scrubbing, speed and perspective. */
+export function ReplayBar(props: { game: Game; replay: ReplayControls }) {
+  const r = props.replay;
+  const g = props.game;
+  const [copied, setCopied] = createSignal(false);
+  const link = () => g.replayLink?.() ?? null;
+  return (
+    <div class="panel replay-bar" role="group" aria-label="回放控制">
+      <div class="replay-row">
+        <button class="icon" onClick={() => r.step(-1)} disabled={r.position() === 0} aria-label="后退一步" title="后退一步">
+          ‹
+        </button>
+        <button class="primary replay-play" onClick={() => r.toggle()} aria-label={r.playing() ? '暂停' : '播放'}>
+          {r.playing() ? '暂停' : r.position() >= r.length ? '重播' : '播放'}
+        </button>
+        <button class="icon" onClick={() => r.step(1)} disabled={r.position() >= r.length} aria-label="前进一步" title="前进一步">
+          ›
+        </button>
+        <input
+          class="replay-seek grow"
+          type="range"
+          min={0}
+          max={r.length}
+          value={r.position()}
+          onInput={(e) => r.seek(Number(e.currentTarget.value))}
+          aria-label="进度"
+        />
+        <span class="replay-pos muted">
+          {r.position()}/{r.length}
+        </span>
+      </div>
+      <div class="replay-row">
+        <div class="seg small">
+          <For each={SPEEDS}>
+            {(x) => (
+              <button classList={{ on: r.speed() === x }} onClick={() => r.setSpeed(x)}>
+                {x}×
+              </button>
+            )}
+          </For>
+        </div>
+        <select
+          value={r.viewer() ?? -1}
+          onChange={(e) => r.setViewer(Number(e.currentTarget.value) < 0 ? null : Number(e.currentTarget.value))}
+          aria-label="视角"
+        >
+          <option value={-1}>公开视角</option>
+          <For each={r.players}>{(_, i) => <option value={i()}>{g.name(i())} 的手牌</option>}</For>
+        </select>
+        <Show when={link()}>
+          {(url) => (
+            <button
+              onClick={() => {
+                void navigator.clipboard?.writeText(url()).then(() => {
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1500);
+                });
+              }}
+            >
+              {copied() ? '已复制' : '复制链接'}
+            </button>
+          )}
+        </Show>
+        <button onClick={() => downloadReplay(r.record)}>下载</button>
+      </div>
+    </div>
+  );
+}
+
+/** Saves a replay record as a JSON file. */
+export function downloadReplay(record: import('../generated/proto').ReplayRecord) {
+  const blob = new Blob([JSON.stringify(record)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  a.href = url;
+  a.download = `isle-replay-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

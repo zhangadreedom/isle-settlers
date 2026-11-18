@@ -54,8 +54,14 @@ const TILE_HEIGHT = 0.22;
 const TOP = TILE_HEIGHT;
 const SQRT3_2 = Math.sqrt(3) / 2;
 const PIPS = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
-/** Radius (world units) that must stay visible: tiles plus harbor labels. */
-const ISLAND_RADIUS = 5.2;
+/** Margin (world units) kept visible around the outermost tile centres: tiles plus harbor labels. */
+const MARGIN_X = 1.74;
+const MARGIN_Z = 1.42;
+/** Instance capacity for per-spot meshes; covers the largest board. */
+const MAX_SPOTS = 128;
+/** Beach outline: distance from the outermost tile centres at the top and the foot of the sand. */
+const BEACH_TOP = 1.55;
+const BEACH_FOOT = 1.94;
 const CAMERA_DIR = new THREE.Vector3(0, 10.5, 8.5).normalize();
 const DROP_MS = 420;
 const ROBBER_MS = 550;
@@ -76,6 +82,58 @@ function prng(seed: number) {
     s ^= s << 5;
     return (s >>> 0) / 4294967296;
   };
+}
+
+/** Convex hull (counter-clockwise, no collinear points) of 2D points. */
+function convexHull(points: [number, number][]): [number, number][] {
+  const pts = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o: [number, number], a: [number, number], b: [number, number]) =>
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (list: [number, number][]) => {
+    const out: [number, number][] = [];
+    for (const p of list) {
+      while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], p) <= 1e-9) out.pop();
+      out.push(p);
+    }
+    out.pop();
+    return out;
+  };
+  return [...half(pts), ...half([...pts].reverse())];
+}
+
+/** Moves every edge of a convex counter-clockwise polygon outwards by `d`. */
+function offsetPolygon(poly: [number, number][], d: number): [number, number][] {
+  const n = poly.length;
+  const normal = (i: number): [number, number] => {
+    const [ax, az] = poly[i];
+    const [bx, bz] = poly[(i + 1) % n];
+    const len = Math.hypot(bx - ax, bz - az);
+    return [(bz - az) / len, -(bx - ax) / len];
+  };
+  return poly.map((p, i) => {
+    const n1 = normal((i - 1 + n) % n);
+    const n2 = normal(i);
+    const k = d / (1 + n1[0] * n2[0] + n1[1] * n2[1]);
+    return [p[0] + (n1[0] + n2[0]) * k, p[1] + (n1[1] + n2[1]) * k];
+  });
+}
+
+/** A sand bank: flat top polygon `top` at y = 0 sloping down to `foot` at y = -height. */
+function bankGeometry(top: [number, number][], foot: [number, number][], height: number) {
+  const pos: number[] = [];
+  const n = top.length;
+  // Hull points are counter-clockwise in (x, z); seen from above (+y) that is clockwise.
+  for (let i = 1; i < n - 1; i++) pos.push(top[0][0], 0, top[0][1], top[i + 1][0], 0, top[i + 1][1], top[i][0], 0, top[i][1]);
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const [a, b, c, d] = [top[i], top[j], foot[i], foot[j]];
+    pos.push(a[0], 0, a[1], b[0], 0, b[1], c[0], -height, c[1]);
+    pos.push(b[0], 0, b[1], d[0], -height, d[1], c[0], -height, c[1]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return g;
 }
 
 function std(color: number, extra: Partial<THREE.MeshStandardMaterialParameters> = {}) {
@@ -224,9 +282,16 @@ export class BoardRenderer {
   private readonly markers: Record<PickKind, THREE.InstancedMesh>;
   private readonly robber = new THREE.Group();
   private readonly resizeObserver: ResizeObserver;
-  private readonly tileXZ: [number, number][];
-  private readonly vertexXZ: [number, number][];
-  private readonly edgeXZ: { x: number; z: number; angle: number }[];
+  private readonly beach: THREE.Mesh;
+  private readonly sun: THREE.DirectionalLight;
+  private topology: Topology | null = null;
+  private tileXZ: [number, number][] = [];
+  private vertexXZ: [number, number][] = [];
+  private edgeXZ: { x: number; z: number; angle: number }[] = [];
+  /** Unit vector pointing out to sea from each harbor slot. */
+  private harborOut: [number, number][] = [];
+  /** Half extents (world units) of the area that must stay in view. */
+  private extent = { x: 5.2, z: 4.42 };
   private readonly numberTextures = new Map<number, THREE.Texture>();
   private readonly raycaster = new THREE.Raycaster();
   private readonly plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -TOP);
@@ -248,29 +313,17 @@ export class BoardRenderer {
   private pointerDown: { x: number; y: number; t: number } | null = null;
 
   /** `forceWebGL` skips WebGPU (also available as `?renderer=webgl`). */
-  static async create(container: HTMLElement, topology: Topology, forceWebGL = false) {
+  static async create(container: HTMLElement, forceWebGL = false) {
     const renderer = createRenderer(forceWebGL);
     await renderer.init();
-    return new BoardRenderer(container, topology, renderer);
+    return new BoardRenderer(container, renderer);
   }
 
   private constructor(
     private readonly container: HTMLElement,
-    private readonly topology: Topology,
     private renderer: THREE.WebGPURenderer,
   ) {
     this.attachRenderer(renderer);
-
-    this.tileXZ = [];
-    for (let i = 0; i < topology.tilePos.length; i += 2) this.tileXZ.push(lattice(topology.tilePos[i], topology.tilePos[i + 1]));
-    this.vertexXZ = [];
-    for (let i = 0; i < topology.vertexPos.length; i += 2) this.vertexXZ.push(lattice(topology.vertexPos[i], topology.vertexPos[i + 1]));
-    this.edgeXZ = [];
-    for (let e = 0; e < topology.edgeVertices.length / 2; e++) {
-      const [ax, az] = this.vertexXZ[topology.edgeVertices[2 * e]];
-      const [bx, bz] = this.vertexXZ[topology.edgeVertices[2 * e + 1]];
-      this.edgeXZ.push({ x: (ax + bx) / 2, z: (az + bz) / 2, angle: -Math.atan2(bz - az, bx - ax) });
-    }
 
     this.scene.background = new THREE.Color(SKY);
     this.scene.fog = new THREE.Fog(SKY, 22, 60);
@@ -291,26 +344,27 @@ export class BoardRenderer {
     Object.assign(sun.shadow.camera, { left: -7, right: 7, top: 7, bottom: -7, near: 1, far: 30 });
     sun.shadow.bias = -0.0005;
     this.scene.add(sun);
+    this.sun = sun;
 
     const sea = new THREE.Mesh(new THREE.PlaneGeometry(120, 120).rotateX(-Math.PI / 2), std(SEA, { roughness: 0.55, flatShading: false }));
     sea.position.y = -0.14;
     sea.receiveShadow = true;
-    const beach = new THREE.Mesh(new THREE.CylinderGeometry(5.25, 5.7, 0.24, 6).rotateY(Math.PI / 6), std(BEACH));
-    beach.position.y = -0.12;
-    beach.receiveShadow = true;
-    this.scene.add(sea, beach, this.board);
+    this.beach = new THREE.Mesh(new THREE.BufferGeometry(), std(BEACH));
+    this.beach.position.y = 0;
+    this.beach.receiveShadow = true;
+    this.scene.add(sea, this.beach, this.board);
 
     const pieceMaterial = std(0xffffff, { roughness: 0.6 });
-    this.roads = this.instanced(roadGeometry, pieceMaterial, this.edgeXZ.length, true);
-    this.settlements = this.instanced(settlementGeometry, pieceMaterial, this.vertexXZ.length, true);
-    this.cities = this.instanced(cityGeometry, pieceMaterial, this.vertexXZ.length, true);
+    this.roads = this.instanced(roadGeometry, pieceMaterial, MAX_SPOTS, true);
+    this.settlements = this.instanced(settlementGeometry, pieceMaterial, MAX_SPOTS, true);
+    this.cities = this.instanced(cityGeometry, pieceMaterial, MAX_SPOTS, true);
     this.scene.add(this.roads, this.settlements, this.cities);
 
     const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false });
     this.markers = {
-      vertex: this.instanced(vertexMarkerGeometry, markerMaterial, this.vertexXZ.length, true),
-      edge: this.instanced(edgeMarkerGeometry, markerMaterial, this.edgeXZ.length, true),
-      tile: this.instanced(tileMarkerGeometry, markerMaterial, this.tileXZ.length, true),
+      vertex: this.instanced(vertexMarkerGeometry, markerMaterial, MAX_SPOTS, true),
+      edge: this.instanced(edgeMarkerGeometry, markerMaterial, MAX_SPOTS, true),
+      tile: this.instanced(tileMarkerGeometry, markerMaterial, MAX_SPOTS, true),
     };
     for (const m of Object.values(this.markers)) {
       m.castShadow = m.receiveShadow = false;
@@ -339,13 +393,54 @@ export class BoardRenderer {
     return this._backend;
   }
 
+  /** Island geometry: spot positions, beach, framing and shadow bounds. */
+  private setTopology(topology: Topology) {
+    this.topology = topology;
+    this.tileXZ = [];
+    for (let i = 0; i < topology.tilePos.length; i += 2) this.tileXZ.push(lattice(topology.tilePos[i], topology.tilePos[i + 1]));
+    this.vertexXZ = [];
+    for (let i = 0; i < topology.vertexPos.length; i += 2) this.vertexXZ.push(lattice(topology.vertexPos[i], topology.vertexPos[i + 1]));
+    this.edgeXZ = [];
+    for (let e = 0; e < topology.edgeVertices.length / 2; e++) {
+      const [ax, az] = this.vertexXZ[topology.edgeVertices[2 * e]];
+      const [bx, bz] = this.vertexXZ[topology.edgeVertices[2 * e + 1]];
+      this.edgeXZ.push({ x: (ax + bx) / 2, z: (az + bz) / 2, angle: -Math.atan2(bz - az, bx - ax) });
+    }
+    // A harbor faces away from the one tile its coastal edge belongs to.
+    this.harborOut = [...topology.harborEdges].map((e) => {
+      const a = topology.edgeVertices[2 * e];
+      const b = topology.edgeVertices[2 * e + 1];
+      let t = 0;
+      for (let i = 0; i < this.tileXZ.length; i++) {
+        const corners = topology.tileVertices.subarray(i * 6, i * 6 + 6);
+        if (corners.includes(a) && corners.includes(b)) t = i;
+      }
+      const { x, z } = this.edgeXZ[e];
+      const [cx, cz] = this.tileXZ[t];
+      const len = Math.hypot(x - cx, z - cz);
+      return [(x - cx) / len, (z - cz) / len];
+    });
+
+    const hull = convexHull(this.tileXZ);
+    this.beach.geometry.dispose();
+    this.beach.geometry = bankGeometry(offsetPolygon(hull, BEACH_TOP), offsetPolygon(hull, BEACH_FOOT), 0.24);
+    const maxX = Math.max(...this.tileXZ.map(([x]) => Math.abs(x)));
+    const maxZ = Math.max(...this.tileXZ.map(([, z]) => Math.abs(z)));
+    this.extent = { x: maxX + MARGIN_X, z: maxZ + MARGIN_Z };
+    const r = Math.max(maxX, maxZ) + 3.5;
+    Object.assign(this.sun.shadow.camera, { left: -r, right: r, top: r, bottom: -r });
+    this.sun.shadow.camera.updateProjectionMatrix();
+    this.resize();
+  }
+
   /** Draw calls in the last frame (for the HUD). */
   get drawCalls() {
     return this.renderer.info.render.drawCalls;
   }
 
   /** Rebuilds tiles, number tokens, decorations and harbors for a new map. */
-  setBoard({ terrain, numbers, harbors }: BoardData) {
+  setBoard({ terrain, numbers, harbors }: BoardData, topology: Topology) {
+    if (topology !== this.topology) this.setTopology(topology);
     this.camera.position.copy(CAMERA_DIR).multiplyScalar(this.fitDistance || 14);
     this.controls.update();
     for (const d of this.disposables) d.dispose();
@@ -404,7 +499,7 @@ export class BoardRenderer {
     });
     this.buildingPieces = nextBuildings;
 
-    const [rx, rz] = this.tileXZ[robber];
+    const [rx, rz] = this.tileXZ[robber] ?? [0, 0];
     const to: [number, number] = [rx + 0.42, rz + 0.12];
     if (animate && (to[0] !== this.robberTo[0] || to[1] !== this.robberTo[1]) && this.robberFrom !== null) {
       this.robberFrom = [this.robber.position.x, this.robber.position.z];
@@ -732,16 +827,17 @@ export class BoardRenderer {
     const s = new THREE.Vector3();
     const p = new THREE.Vector3();
     const up = new THREE.Vector3(0, 1, 0);
-    const ev = this.topology.edgeVertices;
+    const topology = this.topology!;
+    const ev = topology.edgeVertices;
 
     harbors.forEach((code, slot) => {
-      const e = this.topology.harborEdges[slot];
+      const e = topology.harborEdges[slot];
       const a = this.vertexXZ[ev[2 * e]];
       const b = this.vertexXZ[ev[2 * e + 1]];
       const mx = (a[0] + b[0]) / 2;
       const mz = (a[1] + b[1]) / 2;
-      const len = Math.hypot(mx, mz);
-      const dock: [number, number] = [mx + (mx / len) * 0.5, mz + (mz / len) * 0.5];
+      const [ox, oz] = this.harborOut[slot];
+      const dock: [number, number] = [mx + ox * 0.5, mz + oz * 0.5];
       docks.setMatrixAt(slot, m.makeTranslation(dock[0], -0.02, dock[1]));
       [a, b].forEach((v, k) => {
         const dx = dock[0] - v[0];
@@ -775,7 +871,7 @@ export class BoardRenderer {
     const safeH = Math.max(h * 0.45, h - top - bottom);
     const tanV = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
     const tanH = tanV * this.camera.aspect;
-    const distance = Math.max(ISLAND_RADIUS / (tanH * (safeW / w)), (ISLAND_RADIUS * 0.85) / (tanV * (safeH / h)));
+    const distance = Math.max(this.extent.x / (tanH * (safeW / w)), this.extent.z / (tanV * (safeH / h)));
     const shiftX = Math.min(left, w - safeW) + safeW / 2 - w / 2;
     const shiftY = Math.min(top, h - safeH) + safeH / 2 - h / 2;
     this.camera.setViewOffset(w, h, -shiftX, -shiftY, w, h);
@@ -787,6 +883,9 @@ export class BoardRenderer {
     this.camera.position.copy(dir).multiplyScalar(distance * zoom);
     this.controls.minDistance = distance * 0.45;
     this.controls.maxDistance = distance * 1.6;
+    const fog = this.scene.fog as THREE.Fog;
+    fog.near = Math.max(22, distance * 1.6);
+    fog.far = Math.max(60, distance * 4);
     this.camera.updateProjectionMatrix();
     this.controls.update();
     this.requestRender();

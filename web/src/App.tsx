@@ -4,10 +4,11 @@ import { DiceView, Flights, GameLog, HandBar, PlayerList } from './components/Hu
 import { Lobby, randomSeed, type CreateRoom } from './components/Lobby';
 import { DiscardModal, GameOverModal, IncomingTrade, MonopolyModal, TradeModal, VictimModal, YearOfPlentyModal } from './components/Modals';
 import { JoinPrompt, RoomLobby } from './components/Room';
-import { loadEngine, Match, type Topology } from './engine';
+import { EngineError, loadEngine, Match, Replay, topology } from './engine';
 import { boardData, createGame, type Game } from './game/controller';
-import { createLocalSource, createOnlineSource, type LocalOptions } from './game/source';
-import type { DevCard } from './generated/proto';
+import { createLocalSource, createOnlineSource, createReplaySource, replayUrl, type LocalOptions } from './game/source';
+import { errorText } from './game/text';
+import type { DevCard, ReplayRecord } from './generated/proto';
 import { createConnection, savedName, savedToken, type Connection } from './net/connection';
 
 declare global {
@@ -17,7 +18,6 @@ declare global {
       game: () => Game | null;
       conn: () => Connection | null;
       project: (kind: PickKind, id: number) => { x: number; y: number };
-      topology: Topology;
     };
   }
 }
@@ -48,18 +48,20 @@ function measureInsets(): Insets {
 
 /** Room id from an invite link (`#/r/ID`). */
 const roomFromHash = () => location.hash.match(/^#\/r\/([A-Za-z0-9]+)/)?.[1]?.toUpperCase() ?? null;
+/** Replay id from a replay link (`#/replay/ID`). */
+const replayFromHash = () => location.hash.match(/^#\/replay\/([A-Za-z0-9]+)/)?.[1]?.toUpperCase() ?? null;
 
 export default function App() {
   let stage!: HTMLDivElement;
   const params = new URLSearchParams(location.search);
   const [renderer, setRenderer] = createSignal<BoardRenderer>();
-  const [topology, setTopology] = createSignal<Topology>();
   const [game, setGame] = createSignal<Game | null>(null);
   const [conn, setConn] = createSignal<Connection | null>(null);
   const [joinRoom, setJoinRoom] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal('加载规则引擎…');
   const [backend, setBackend] = createSignal('');
   const [previewSeed, setPreviewSeed] = createSignal(randomSeed());
+  const [previewPlayers, setPreviewPlayers] = createSignal(4);
   const [tradeOpen, setTradeOpen] = createSignal(false);
   const [devModal, setDevModal] = createSignal<'YearOfPlenty' | 'Monopoly' | null>(null);
   // The log (with chat) starts open on wide screens and as a toggle on phones.
@@ -68,17 +70,16 @@ export default function App() {
 
   onMount(async () => {
     try {
-      const topo = await loadEngine();
-      setTopology(topo);
+      await loadEngine();
       setStatus('加载 3D 场景…');
       // Three.js lives in its own chunk, loaded after the lobby is on screen.
       const { BoardRenderer } = await import('./board/BoardRenderer');
-      const r = await BoardRenderer.create(stage, topo, params.get('renderer') === 'webgl');
+      const r = await BoardRenderer.create(stage, params.get('renderer') === 'webgl');
       r.onBackendChange = setBackend;
       setBackend(r.backend);
       setRenderer(r);
       setStatus('');
-      if (params.has('debug')) window.__isle = { game, conn, project: (k, id) => r.project(k, id), topology: topo };
+      if (params.has('debug')) window.__isle = { game, conn, project: (k, id) => r.project(k, id) };
       openInvite();
     } catch (err) {
       console.error(err);
@@ -88,8 +89,13 @@ export default function App() {
 
   // ---- navigation ----
 
-  /** Follows an invite link: rejoin silently if we have a seat, else ask for a name. */
+  /** Follows an invite or replay link: rejoin silently if we have a seat, else ask for a name. */
   function openInvite() {
+    const replayId = replayFromHash();
+    if (replayId) {
+      void openStoredReplay(replayId);
+      return;
+    }
     const room = roomFromHash();
     if (!room || room === conn()?.roomId()) return;
     leave(false);
@@ -109,14 +115,54 @@ export default function App() {
 
   async function startLocal(o: LocalOptions) {
     const r = renderer();
-    const t = topology();
-    if (!r || !t) return;
+    if (!r) return;
     lastLocal = o;
     game()?.dispose();
     setGame(null);
     setTradeOpen(false);
     const source = await createLocalSource(o);
-    setGame(createGame(source, r, t));
+    setGame(createGame(source, r));
+  }
+
+  /** Opens the replay viewer on a record (JSON text). */
+  function openReplay(json: string, link: string | null = null): boolean {
+    const r = renderer();
+    if (!r) return false;
+    let replay: Replay;
+    try {
+      replay = new Replay(json);
+    } catch (e) {
+      setStatus('');
+      setReplayError(errorText(e instanceof EngineError ? e.code : String(e)));
+      return false;
+    }
+    game()?.dispose();
+    conn()?.close();
+    setConn(null);
+    setJoinRoom(null);
+    setTradeOpen(false);
+    setGame(createGame(createReplaySource(replay, link), r));
+    return true;
+  }
+
+  function watchReplay(record: ReplayRecord, link: string | null) {
+    if (!openReplay(JSON.stringify(record), link)) return;
+    // The address bar shows the replay link (or nothing for a local game).
+    history.replaceState(null, '', link ?? location.pathname + location.search);
+  }
+
+  /** A replay stored by the server (`#/replay/ID`). */
+  async function openStoredReplay(id: string) {
+    setStatus('加载回放…');
+    try {
+      const res = await fetch(`/api/replays/${id}`);
+      if (!res.ok) throw new EngineError('ReplayNotFound');
+      openReplay(await res.text(), replayUrl(id));
+    } catch (e) {
+      setReplayError(errorText(e instanceof EngineError ? e.code : 'ReplayNotFound'));
+    } finally {
+      setStatus('');
+    }
   }
 
   /** Back to the main menu. */
@@ -130,6 +176,8 @@ export default function App() {
     if (clearHash && location.hash) history.replaceState(null, '', location.pathname + location.search);
     setPreviewSeed(randomSeed());
   }
+
+  const [replayError, setReplayError] = createSignal<string | null>(null);
 
   // Once connected, the address bar holds the invite link.
   createEffect(() => {
@@ -145,18 +193,18 @@ export default function App() {
     const c = conn();
     const snapshot = c?.snapshot();
     const r = renderer();
-    const t = topology();
-    if (!c || !snapshot || !r || !t || game()) return;
-    setGame(createGame(createOnlineSource(c, snapshot), r, t));
+    if (!c || !snapshot || !r || game()) return;
+    setGame(createGame(createOnlineSource(c, snapshot), r));
   });
 
   // In the menus, show a map in the background.
   createEffect(() => {
     const r = renderer();
     const seed = previewSeed();
+    const players = previewPlayers();
     if (!r || game()) return;
-    const m = new Match(4, seed, null, 'greedy');
-    r.setBoard(boardData(m.board));
+    const m = new Match(players, seed, null, 'greedy');
+    r.setBoard(boardData(m.board), topology(m.board.layout));
     const v = m.view();
     r.setPieces({ buildings: v.buildings, roads: v.roads, robber: v.robber }, false);
     m.free();
@@ -190,7 +238,7 @@ export default function App() {
     const g = game();
     if (!g) return;
     const v = g.view();
-    if (!(v.phase.type === 'Main' && v.current === g.me)) {
+    if (!((v.phase.type === 'Main' && v.current === g.me) || (v.phase.type === 'SpecialBuild' && v.toMove === g.me))) {
       setTradeOpen(false);
       setDevModal(null);
     }
@@ -203,6 +251,13 @@ export default function App() {
       g.setMode(null);
       setTradeOpen(false);
       setDevModal(null);
+    } else if (e.key === ' ' && g.replay) {
+      // A focused button handles Space itself.
+      if ((e.target as HTMLElement).closest('button')) return;
+      e.preventDefault();
+      g.replay.toggle();
+    } else if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && g.replay) {
+      g.replay.step(e.key === 'ArrowRight' ? 1 : -1);
     } else if (e.key === ' ' && g.has('RollDice')) {
       e.preventDefault();
       g.act((a) => a.type === 'RollDice');
@@ -234,6 +289,9 @@ export default function App() {
             <Lobby
               ready={!!renderer()}
               seed={previewSeed()}
+              players={previewPlayers()}
+              onPlayers={setPreviewPlayers}
+              onOpenReplay={(json) => openReplay(json)}
               onSeed={setPreviewSeed}
               onStartLocal={startLocal}
               onCreateRoom={createRoom}
@@ -263,6 +321,9 @@ export default function App() {
               <Show when={conn()}>
                 {(c) => <span class="room-tag muted">房间 {c().roomId()}</span>}
               </Show>
+              <Show when={g().replay}>
+                <span class="room-tag muted">回放</span>
+              </Show>
               <button class="ghost log-toggle" onClick={() => setLogOpen(!logOpen())} aria-expanded={logOpen()}>
                 {logOpen() ? '收起记录' : g().online ? '记录 · 聊天' : '记录'}
               </button>
@@ -273,11 +334,13 @@ export default function App() {
             <HandBar game={g()} onTrade={() => setTradeOpen(true)} onDevCard={(c) => playDevCard(g(), c)} />
             <Flights game={g()} />
 
-            <Show when={g().me !== null && g().view().phase.type === 'Discard' && g().view().pendingDiscard[g().me!] > 0}>
+            <Show when={!g().replay && g().me !== null && g().view().phase.type === 'Discard' && g().view().pendingDiscard[g().me!] > 0}>
               <DiscardModal game={g()} />
             </Show>
             <VictimModal game={g()} />
-            <IncomingTrade game={g()} />
+            <Show when={!g().replay}>
+              <IncomingTrade game={g()} />
+            </Show>
             <Show when={tradeOpen()}>
               <TradeModal game={g()} onClose={() => setTradeOpen(false)} />
             </Show>
@@ -287,11 +350,12 @@ export default function App() {
             <Show when={devModal() === 'Monopoly'}>
               <MonopolyModal game={g()} onClose={() => setDevModal(null)} />
             </Show>
-            <Show when={g().view().winner !== null}>
+            <Show when={g().view().winner !== null && !g().replay}>
               <GameOverModal
                 game={g()}
                 onLobby={() => leave()}
                 onAgain={g().online ? undefined : () => lastLocal && startLocal({ ...lastLocal, seed: randomSeed() })}
+                onWatchReplay={watchReplay}
               />
             </Show>
             <Show when={g().toast()}>
@@ -303,6 +367,13 @@ export default function App() {
         )}
       </Show>
 
+      <Show when={replayError()}>
+        {(msg) => (
+          <div class="banner" role="alert" onClick={() => setReplayError(null)}>
+            {msg()}（点击关闭）
+          </div>
+        )}
+      </Show>
       <Show when={conn()?.status() === 'reconnecting'}>
         <div class="banner" role="status">
           连接中断，正在重连…

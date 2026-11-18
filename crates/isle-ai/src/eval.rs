@@ -2,7 +2,7 @@
 //! units, and the conversion into per-seat rewards for search.
 
 use isle_core::board::PIPS;
-use isle_core::topology::*;
+use isle_core::topology::{NONE, vertices_in};
 use isle_core::{DevCard, GameState, MAX_PLAYERS};
 
 /// Tunable weights of the evaluation.
@@ -59,7 +59,7 @@ pub fn income(s: &GameState, q: u8) -> [f32; 5] {
         (s.cities[q as usize], 2.0),
     ] {
         for v in vertices_in(mask) {
-            for &t in &VERTEX_TILES[v as usize] {
+            for &t in &s.topo().vertex_tiles[v as usize] {
                 if t == NONE {
                     break;
                 }
@@ -191,6 +191,6 @@ mod tests {
         g.winner = Some(2);
         let mut r = [0.0; MAX_PLAYERS];
         rewards(&g, &Weights::default(), &mut r);
-        assert_eq!(r, [0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(r[..4], [0.0, 0.0, 1.0, 0.0]);
     }
 }

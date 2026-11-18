@@ -8,8 +8,8 @@ use crate::topology::*;
 use RuleError as E;
 
 impl GameState {
-    /// Validates and applies `action` for seat `player`.
-    #[inline]
+    /// Validates and applies `action` for seat `player`. Not inlined, so
+    /// the event-less instantiation exists once rather than once per crate.
     pub fn apply(&mut self, player: u8, action: Action) -> Result<(), RuleError> {
         self.apply_with(player, action, &mut ())
     }
@@ -72,15 +72,17 @@ impl GameState {
             _ => {}
         }
 
-        if player != self.current {
+        if player != self.active_player() {
             return Err(E::NotYourTurn);
         }
+        let topo = self.topo();
+        let special = matches!(self.phase, Phase::SpecialBuild { .. });
 
         match action {
             Action::RollDice => self.require_phase(Phase::PreRoll),
 
             Action::BuildRoad(e) => {
-                if e as usize >= NUM_EDGES {
+                if e as usize >= topo.num_edges {
                     return Err(E::InvalidEdge);
                 }
                 let bit = 1u128 << e;
@@ -89,16 +91,17 @@ impl GameState {
                 }
                 match self.phase {
                     Phase::SetupRoad { vertex } => {
-                        if VERTEX_EDGE_MASK[vertex as usize] & bit == 0 {
+                        if topo.vertex_edge_mask[vertex as usize] & bit == 0 {
                             return Err(E::NotConnected);
                         }
                         Ok(())
                     }
-                    Phase::Main | Phase::RoadBuilding { .. } => {
+                    Phase::Main | Phase::RoadBuilding { .. } | Phase::SpecialBuild { .. } => {
                         if ps.roads_left == 0 {
                             return Err(E::NoPiecesLeft);
                         }
-                        if self.phase == Phase::Main && !ps.hand.contains(&cost::ROAD) {
+                        let paid = !matches!(self.phase, Phase::RoadBuilding { .. });
+                        if paid && !ps.hand.contains(&cost::ROAD) {
                             return Err(E::InsufficientResources);
                         }
                         if self.road_spots(player) & bit == 0 {
@@ -113,18 +116,18 @@ impl GameState {
             Action::BuildSettlement(v) => {
                 let setup = match self.phase {
                     Phase::SetupSettlement => true,
-                    Phase::Main => false,
+                    Phase::Main | Phase::SpecialBuild { .. } => false,
                     _ => return Err(E::WrongPhase),
                 };
-                if v as usize >= NUM_VERTICES {
+                if v as usize >= topo.num_vertices {
                     return Err(E::InvalidVertex);
                 }
-                let bit = 1u64 << v;
+                let bit = 1u128 << v;
                 let occ = self.occupied_vertices();
                 if occ & bit != 0 {
                     return Err(E::Occupied);
                 }
-                if VERTEX_ADJ_MASK[v as usize] & occ != 0 {
+                if topo.vertex_adj_mask[v as usize] & occ != 0 {
                     return Err(E::TooCloseToBuilding);
                 }
                 if ps.settlements_left == 0 {
@@ -134,7 +137,7 @@ impl GameState {
                     if !ps.hand.contains(&cost::SETTLEMENT) {
                         return Err(E::InsufficientResources);
                     }
-                    if VERTEX_EDGE_MASK[v as usize] & self.roads[player as usize] == 0 {
+                    if topo.vertex_edge_mask[v as usize] & self.roads[player as usize] == 0 {
                         return Err(E::NotConnected);
                     }
                 }
@@ -142,11 +145,13 @@ impl GameState {
             }
 
             Action::BuildCity(v) => {
-                self.require_phase(Phase::Main)?;
-                if v as usize >= NUM_VERTICES {
+                if !(special || self.phase == Phase::Main) {
+                    return Err(E::WrongPhase);
+                }
+                if v as usize >= topo.num_vertices {
                     return Err(E::InvalidVertex);
                 }
-                if self.settlements[player as usize] & (1u64 << v) == 0 {
+                if self.settlements[player as usize] & (1u128 << v) == 0 {
                     return Err(E::NotYourSettlement);
                 }
                 if ps.cities_left == 0 {
@@ -159,7 +164,9 @@ impl GameState {
             }
 
             Action::BuyDevCard => {
-                self.require_phase(Phase::Main)?;
+                if !(special || self.phase == Phase::Main) {
+                    return Err(E::WrongPhase);
+                }
                 if self.dev_deck_len == 0 {
                     return Err(E::DeckEmpty);
                 }
@@ -192,7 +199,7 @@ impl GameState {
 
             Action::MoveRobber { tile, victim } => {
                 self.require_phase(Phase::MoveRobber)?;
-                if tile as usize >= NUM_TILES {
+                if tile as usize >= topo.num_tiles {
                     return Err(E::InvalidTile);
                 }
                 if tile == self.robber {
@@ -255,7 +262,13 @@ impl GameState {
                 self.trade.map(|_| ()).ok_or(E::NoOpenTrade)
             }
 
-            Action::EndTurn => self.require_phase(Phase::Main),
+            Action::EndTurn => {
+                if special {
+                    Ok(())
+                } else {
+                    self.require_phase(Phase::Main)
+                }
+            }
 
             Action::Discard(_) | Action::RespondTrade { .. } => unreachable!("handled above"),
         }
@@ -326,7 +339,10 @@ impl GameState {
             }
 
             Action::BuildRoad(e) => {
-                let free = !matches!(self.phase, Phase::Main);
+                let free = matches!(
+                    self.phase,
+                    Phase::SetupRoad { .. } | Phase::RoadBuilding { .. }
+                );
                 if !free {
                     self.pay(p, cost::ROAD);
                 }
@@ -356,14 +372,14 @@ impl GameState {
                 if !setup {
                     self.pay(p, cost::SETTLEMENT);
                 }
-                self.settlements[p] |= 1u64 << v;
+                self.settlements[p] |= 1u128 << v;
                 self.players[p].settlements_left -= 1;
                 self.players[p].harbors |= self.board.vertex_harbor[v as usize];
                 sink.emit(Event::SettlementBuilt { player, vertex: v });
                 if setup {
                     if self.is_second_setup_round() {
                         let mut got = ResourceSet::EMPTY;
-                        for &t in &VERTEX_TILES[v as usize] {
+                        for &t in &self.topo().vertex_tiles[v as usize] {
                             if t == NONE {
                                 break;
                             }
@@ -386,7 +402,7 @@ impl GameState {
 
             Action::BuildCity(v) => {
                 self.pay(p, cost::CITY);
-                let bit = 1u64 << v;
+                let bit = 1u128 << v;
                 self.settlements[p] &= !bit;
                 self.cities[p] |= bit;
                 self.players[p].settlements_left += 1;
@@ -398,7 +414,10 @@ impl GameState {
                 self.pay(p, cost::DEV_CARD);
                 self.dev_deck_len -= 1;
                 let card = self.dev_deck[self.dev_deck_len as usize];
-                if card == DevCard::VictoryPoint {
+                // Cards bought while building out of turn are playable from
+                // the buyer's next turn.
+                if card == DevCard::VictoryPoint || matches!(self.phase, Phase::SpecialBuild { .. })
+                {
                     self.players[p].dev_cards[card.index()] += 1;
                 } else {
                     self.players[p].new_dev_cards[card.index()] += 1;
@@ -539,22 +558,43 @@ impl GameState {
             }
 
             Action::EndTurn => {
-                let ps = &mut self.players[p];
-                for c in 0..5 {
-                    ps.dev_cards[c] += std::mem::take(&mut ps.new_dev_cards[c]);
+                let n = self.num_players();
+                if let Phase::SpecialBuild { builder } = self.phase {
+                    let next = (builder as usize + 1) % n;
+                    if next == self.current as usize {
+                        self.start_next_turn();
+                    } else {
+                        self.phase = Phase::SpecialBuild {
+                            builder: next as u8,
+                        };
+                    }
+                    sink.emit(Event::SpecialBuildPassed { player });
+                } else {
+                    let ps = &mut self.players[p];
+                    for c in 0..5 {
+                        ps.dev_cards[c] += std::mem::take(&mut ps.new_dev_cards[c]);
+                    }
+                    self.dev_card_played = false;
+                    self.dice = None;
+                    self.turn += 1;
+                    sink.emit(Event::TurnEnded { player });
+                    if self.board.layout.has_special_build() {
+                        self.phase = Phase::SpecialBuild {
+                            builder: ((p + 1) % n) as u8,
+                        };
+                    } else {
+                        self.start_next_turn();
+                    }
                 }
-                self.dev_card_played = false;
-                self.dice = None;
-                self.turn += 1;
-                self.current = ((p + 1) % self.num_players()) as u8;
-                self.phase = Phase::PreRoll;
-                sink.emit(Event::TurnEnded { player });
             }
         }
 
         // A player can only win on their own turn; this also covers points
         // gained during an opponent's turn, which count once theirs begins.
-        if self.phase != Phase::GameOver && !self.is_setup() {
+        if self.phase != Phase::GameOver
+            && !self.is_setup()
+            && !matches!(self.phase, Phase::SpecialBuild { .. })
+        {
             let vp = self.victory_points(self.current);
             if vp >= self.config.victory_points {
                 self.winner = Some(self.current);
@@ -571,6 +611,13 @@ impl GameState {
     #[inline]
     pub fn is_setup(&self) -> bool {
         matches!(self.phase, Phase::SetupSettlement | Phase::SetupRoad { .. })
+    }
+
+    /// Passes the turn to the next seat.
+    #[inline]
+    fn start_next_turn(&mut self) {
+        self.current = ((self.current as usize + 1) % self.num_players()) as u8;
+        self.phase = Phase::PreRoll;
     }
 
     #[inline]
@@ -621,7 +668,7 @@ impl GameState {
             let Some(r) = self.board.terrain[t as usize].resource() else {
                 continue;
             };
-            let tv = TILE_VERTEX_MASK[t as usize];
+            let tv = self.topo().tile_vertex_mask[t as usize];
             for q in 0..n {
                 owed[q][r] += (self.settlements[q] & tv).count_ones() as u8
                     + 2 * (self.cities[q] & tv).count_ones() as u8;
@@ -703,7 +750,7 @@ impl GameState {
         builder: u8,
         sink: &mut S,
     ) {
-        let edges_at_v = VERTEX_EDGE_MASK[v as usize];
+        let edges_at_v = self.topo().vertex_edge_mask[v as usize];
         let mut changed = false;
         for q in 0..self.num_players() as u8 {
             if q != builder && (self.roads[q as usize] & edges_at_v).count_ones() >= 2 {

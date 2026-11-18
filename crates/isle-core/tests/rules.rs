@@ -1,9 +1,12 @@
 //! Scenario tests for individual rules.
 
-use isle_core::topology::*;
+use isle_core::topology::{BASE, NONE, Topology, edges_in};
+
+/// Scenarios run on the base island unless they say otherwise.
+const T: &Topology = &BASE;
 use isle_core::{
-    Action, DevCard, Event, GameConfig, GameState, HarborKind, Phase, Resource, ResourceSet, Rng,
-    RuleError,
+    Action, BoardLayout, ConfigError, DevCard, Event, GameConfig, GameState, HarborKind, Phase,
+    Resource, ResourceSet, Rng, RuleError, Terrain,
 };
 
 // ---------- helpers ----------
@@ -52,11 +55,11 @@ fn put_road(g: &mut GameState, p: u8, e: u8) {
 }
 
 fn edge_between(a: u8, b: u8) -> u8 {
-    let k = VERTEX_VERTICES[a as usize]
+    let k = T.vertex_vertices[a as usize]
         .iter()
         .position(|&n| n == b)
         .expect("adjacent");
-    VERTEX_EDGES[a as usize][k]
+    T.vertex_edges[a as usize][k]
 }
 
 fn put_path(g: &mut GameState, p: u8, path: &[u8]) {
@@ -67,13 +70,13 @@ fn put_path(g: &mut GameState, p: u8, path: &[u8]) {
 
 /// Finds a simple path of `len` edges avoiding `forbidden` vertices, such
 /// that `pred` accepts it.
-fn find_path(len: usize, forbidden: u64, pred: &dyn Fn(&[u8]) -> bool) -> Vec<u8> {
-    fn dfs(path: &mut Vec<u8>, len: usize, forbidden: u64, pred: &dyn Fn(&[u8]) -> bool) -> bool {
+fn find_path(len: usize, forbidden: u128, pred: &dyn Fn(&[u8]) -> bool) -> Vec<u8> {
+    fn dfs(path: &mut Vec<u8>, len: usize, forbidden: u128, pred: &dyn Fn(&[u8]) -> bool) -> bool {
         if path.len() == len + 1 {
             return pred(path);
         }
         let v = *path.last().unwrap();
-        for &n in &VERTEX_VERTICES[v as usize] {
+        for &n in &T.vertex_vertices[v as usize] {
             if n == NONE || forbidden & (1 << n) != 0 || path.contains(&n) {
                 continue;
             }
@@ -85,7 +88,7 @@ fn find_path(len: usize, forbidden: u64, pred: &dyn Fn(&[u8]) -> bool) -> Vec<u8
         }
         false
     }
-    for start in 0..NUM_VERTICES as u8 {
+    for start in 0..T.num_vertices as u8 {
         if forbidden & (1 << start) != 0 {
             continue;
         }
@@ -98,14 +101,14 @@ fn find_path(len: usize, forbidden: u64, pred: &dyn Fn(&[u8]) -> bool) -> Vec<u8
 }
 
 /// Path vertices plus their neighbours.
-fn halo(path: &[u8]) -> u64 {
+fn halo(path: &[u8]) -> u128 {
     path.iter()
-        .fold(0, |m, &v| m | 1 << v | VERTEX_ADJ_MASK[v as usize])
+        .fold(0, |m, &v| m | 1 << v | T.vertex_adj_mask[v as usize])
 }
 
 /// Third neighbour of `path[i]` (not on the path), if the vertex has degree 3.
 fn side_neighbor(path: &[u8], i: usize) -> Option<u8> {
-    VERTEX_VERTICES[path[i] as usize]
+    T.vertex_vertices[path[i] as usize]
         .iter()
         .copied()
         .find(|&n| n != NONE && !path.contains(&n))
@@ -179,14 +182,14 @@ fn setup_follows_snake_order_and_pays_second_settlement() {
 fn setup_road_must_touch_the_new_settlement() {
     let mut g = game(3);
     g.apply(0, Action::BuildSettlement(0)).unwrap();
-    let far = (0..NUM_EDGES as u8)
-        .find(|&e| VERTEX_EDGE_MASK[0] & (1 << e) == 0)
+    let far = (0..T.num_edges as u8)
+        .find(|&e| T.vertex_edge_mask[0] & (1 << e) == 0)
         .unwrap();
     assert_eq!(
         g.apply(0, Action::BuildRoad(far)),
         Err(RuleError::NotConnected)
     );
-    let near = VERTEX_EDGES[0][0];
+    let near = T.vertex_edges[0][0];
     g.apply(0, Action::BuildRoad(near)).unwrap();
     assert_eq!(g.current, 1);
 }
@@ -195,8 +198,9 @@ fn setup_road_must_touch_the_new_settlement() {
 fn distance_rule() {
     let mut g = game(3);
     g.apply(0, Action::BuildSettlement(10)).unwrap();
-    g.apply(0, Action::BuildRoad(VERTEX_EDGES[10][0])).unwrap();
-    let neighbor = VERTEX_VERTICES[10][1];
+    g.apply(0, Action::BuildRoad(T.vertex_edges[10][0]))
+        .unwrap();
+    let neighbor = T.vertex_vertices[10][1];
     assert_eq!(
         g.apply(1, Action::BuildSettlement(neighbor)),
         Err(RuleError::TooCloseToBuilding)
@@ -214,7 +218,7 @@ fn distance_rule() {
 // ---------- production ----------
 
 fn producing_tile(g: &GameState) -> usize {
-    (0..NUM_TILES)
+    (0..T.num_tiles)
         .find(|&t| g.board.numbers[t] != 0 && t as u8 != g.robber)
         .unwrap()
 }
@@ -222,7 +226,7 @@ fn producing_tile(g: &GameState) -> usize {
 /// Expected yield for a building at `v` on a roll of `sum`.
 fn expected_yield(g: &GameState, v: u8, sum: u8, mult: u8) -> ResourceSet {
     let mut s = ResourceSet::EMPTY;
-    for &t in &VERTEX_TILES[v as usize] {
+    for &t in &T.vertex_tiles[v as usize] {
         if t != NONE && g.board.numbers[t as usize] == sum && t != g.robber {
             s[g.board.terrain[t as usize].resource().unwrap()] += mult;
         }
@@ -236,7 +240,7 @@ fn settlements_produce_one_and_cities_two() {
     g.phase = Phase::PreRoll;
     g.dice = None;
     let t = producing_tile(&g);
-    let (a, b) = (TILE_VERTICES[t][0], TILE_VERTICES[t][2]);
+    let (a, b) = (T.tile_vertices[t][0], T.tile_vertices[t][2]);
     put_settlement(&mut g, 0, a);
     put_city(&mut g, 1, b);
     let sum = g.board.numbers[t];
@@ -253,7 +257,7 @@ fn robber_blocks_production() {
     g.phase = Phase::PreRoll;
     g.dice = None;
     let t = producing_tile(&g);
-    let v = TILE_VERTICES[t][0];
+    let v = T.tile_vertices[t][0];
     put_settlement(&mut g, 0, v);
     g.robber = t as u8;
     let sum = g.board.numbers[t];
@@ -261,7 +265,7 @@ fn robber_blocks_production() {
     roll(&mut g, sum);
     assert_eq!(g.players[0].hand, expected); // other tiles only
     let r = g.board.terrain[t].resource().unwrap();
-    let other_same: u8 = VERTEX_TILES[v as usize]
+    let other_same: u8 = T.vertex_tiles[v as usize]
         .iter()
         .filter(|&&x| x != NONE && x as usize != t)
         .filter(|&&x| {
@@ -280,8 +284,8 @@ fn bank_shortage_rule() {
     let t = producing_tile(&g);
     let r = g.board.terrain[t].resource().unwrap();
     let sum = g.board.numbers[t];
-    put_settlement(&mut g, 0, TILE_VERTICES[t][0]);
-    put_city(&mut g, 1, TILE_VERTICES[t][2]);
+    put_settlement(&mut g, 0, T.tile_vertices[t][0]);
+    put_city(&mut g, 1, T.tile_vertices[t][2]);
     give(&mut g, 2, ResourceSet::single(r, 18)); // bank keeps 1
     let mut h = g;
     roll(&mut h, sum);
@@ -293,7 +297,7 @@ fn bank_shortage_rule() {
     let mut g2 = g;
     g2.settlements[0] = 0;
     g2.players[0].settlements_left += 1;
-    let only_tile = VERTEX_TILES[TILE_VERTICES[t][2] as usize]
+    let only_tile = T.vertex_tiles[T.tile_vertices[t][2] as usize]
         .iter()
         .filter(|&&x| x != NONE && g2.board.numbers[x as usize] == sum)
         .count();
@@ -316,10 +320,10 @@ fn seven_forces_discards_then_robber() {
     give(&mut g, 1, ResourceSet::new(2, 2, 1, 1, 1)); // 7 cards -> safe
     give(&mut g, 2, ResourceSet::new(3, 3, 2, 2, 0)); // 10 cards -> discard 5
     let t = producing_tile(&g);
-    put_settlement(&mut g, 1, TILE_VERTICES[t][0]);
+    put_settlement(&mut g, 1, T.tile_vertices[t][0]);
     roll(&mut g, 7);
     assert_eq!(g.phase, Phase::Discard);
-    assert_eq!(g.pending_discard, [4, 0, 5, 0]);
+    assert_eq!(g.pending_discard, [4, 0, 5, 0, 0, 0]);
     assert_eq!(g.to_move(), Some(0));
 
     assert_eq!(
@@ -395,7 +399,7 @@ fn robber_may_go_to_the_desert_and_skip_stealing_from_empty_hands() {
     let t = producing_tile(&g);
     g.robber = t as u8;
     let desert = g.board.desert;
-    put_settlement(&mut g, 1, TILE_VERTICES[desert as usize][0]);
+    put_settlement(&mut g, 1, T.tile_vertices[desert as usize][0]);
     // Player 1 has no cards, so there is nobody to rob.
     assert_eq!(
         g.apply(
@@ -452,7 +456,7 @@ fn dev_cards_wait_a_turn_and_one_per_turn() {
     assert_eq!(g.phase, Phase::PreRoll);
     g.apply(0, Action::PlayKnight).unwrap();
     assert_eq!(g.phase, Phase::MoveRobber);
-    let tile = (g.robber + 1) % NUM_TILES as u8;
+    let tile = (g.robber + 1) % T.num_tiles as u8;
     let victim = (g.robber_victims(tile, 0) != 0).then_some(1);
     g.apply(0, Action::MoveRobber { tile, victim }).unwrap();
     assert_eq!(g.phase, Phase::PreRoll);
@@ -493,7 +497,7 @@ fn largest_army_needs_three_and_must_be_exceeded() {
     h.players[1].dev_cards[DevCard::Knight.index()] = 2;
     h.apply(1, Action::PlayKnight).unwrap(); // 3 vs 3: holder keeps
     assert_eq!(h.largest_army_owner, Some(0));
-    let tile = (h.robber + 1) % NUM_TILES as u8;
+    let tile = (h.robber + 1) % T.num_tiles as u8;
     h.apply(1, Action::MoveRobber { tile, victim: None })
         .unwrap();
     h.dev_card_played = false;
@@ -533,7 +537,7 @@ fn road_building_places_two_free_roads() {
     g.players[0].dev_cards[DevCard::RoadBuilding.index()] = 1;
     g.apply(0, Action::PlayRoadBuilding).unwrap();
     assert_eq!(g.phase, Phase::RoadBuilding { remaining: 2 });
-    let e1 = VERTEX_EDGES[20][0];
+    let e1 = T.vertex_edges[20][0];
     g.apply(0, Action::BuildRoad(e1)).unwrap();
     assert_eq!(g.phase, Phase::RoadBuilding { remaining: 1 });
     assert_eq!(g.apply(0, Action::EndTurn), Err(RuleError::WrongPhase));
@@ -673,7 +677,7 @@ fn maritime_trade_ratios() {
 #[test]
 fn harbor_access_comes_from_settling_on_it() {
     let mut g = game(2);
-    let v = EDGE_VERTICES[HARBOR_EDGES[0] as usize][0];
+    let v = T.edge_vertices[T.harbor_edges[0] as usize][0];
     g.apply(0, Action::BuildSettlement(v)).unwrap();
     assert_eq!(g.players[0].harbors, g.board.harbors[0].bit());
 }
@@ -833,4 +837,205 @@ fn games_are_reproducible_from_seed() {
     a.apply(0, Action::RollDice).unwrap();
     b.apply(0, Action::RollDice).unwrap();
     assert_eq!(a, b);
+}
+
+// ---------- five and six players ----------
+
+/// `k` vertices of the board being played that respect the distance rule.
+fn spread_vertices(g: &GameState, k: usize) -> Vec<u8> {
+    let topo = g.topo();
+    let mut taken = 0u128;
+    let mut out = Vec::new();
+    for v in 0..topo.num_vertices as u8 {
+        if out.len() == k {
+            break;
+        }
+        if (taken | topo.neighbors_of(taken)) & (1 << v) == 0 {
+            taken |= 1 << v;
+            out.push(v);
+        }
+    }
+    assert_eq!(out.len(), k);
+    out
+}
+
+#[test]
+fn five_and_six_players_use_the_extended_island() {
+    for n in [5, 6] {
+        let g = game(n);
+        assert_eq!(g.board.layout, BoardLayout::Extended);
+        assert_eq!(g.topo().num_tiles, 30);
+        assert_eq!(g.board.harbor_kinds().len(), 11);
+        assert_eq!(g.bank, ResourceSet([24; 5]));
+        assert_eq!(g.dev_deck_len, 34);
+        let knights = g.dev_deck[..34]
+            .iter()
+            .filter(|&&c| c == DevCard::Knight)
+            .count();
+        assert_eq!(knights, 20);
+        let deserts = g
+            .board
+            .tiles()
+            .iter()
+            .filter(|&&t| t == Terrain::Desert)
+            .count();
+        assert_eq!(deserts, 2);
+        g.check_invariants().unwrap();
+    }
+    assert_eq!(game(4).board.layout, BoardLayout::Base);
+    assert_eq!(
+        GameState::new(
+            GameConfig {
+                num_players: 7,
+                ..GameConfig::default()
+            },
+            1
+        ),
+        Err(ConfigError::PlayerCount)
+    );
+}
+
+#[test]
+fn six_player_setup_snakes_through_every_seat() {
+    let mut g = game(6);
+    let order = play_setup_first_legal(&mut g);
+    assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 5, 4, 3, 2, 1, 0]);
+    assert_eq!((g.phase, g.current), (Phase::PreRoll, 0));
+    g.check_invariants().unwrap();
+}
+
+#[test]
+fn special_building_phase_after_each_turn() {
+    let mut g = main_phase(5);
+    let spots = spread_vertices(&g, 3);
+    let road = first_edge(&g, spots[1]);
+    put_settlement(&mut g, 2, spots[1]);
+    give(&mut g, 2, ResourceSet::new(1, 1, 1, 1, 1)); // a road and a dev card
+    // Player 1 holds a playable knight, drawn from the deck.
+    put_on_top_of_deck(&mut g, DevCard::Knight);
+    g.dev_deck_len -= 1;
+    g.players[1].dev_cards[DevCard::Knight.index()] = 1;
+    put_on_top_of_deck(&mut g, DevCard::Knight);
+    give(&mut g, 1, ResourceSet::new(4, 0, 0, 0, 0));
+
+    let mut events = Vec::new();
+    g.apply_with(0, Action::EndTurn, &mut events).unwrap();
+    assert!(events.contains(&Event::TurnEnded { player: 0 }));
+    assert_eq!(g.phase, Phase::SpecialBuild { builder: 1 });
+    assert_eq!((g.current, g.to_move(), g.dice), (0, Some(1), None));
+
+    // Only building, buying and passing: no trading or card plays.
+    let mut legal = Vec::new();
+    g.legal_actions(1, &mut legal);
+    assert_eq!(legal, vec![Action::EndTurn]);
+    assert_eq!(g.apply(1, Action::PlayKnight), Err(RuleError::WrongPhase));
+    let trade = Action::MaritimeTrade {
+        give: Resource::Brick,
+        get: Resource::Ore,
+    };
+    assert_eq!(g.apply(1, trade), Err(RuleError::WrongPhase));
+    let offer = Action::ProposeTrade {
+        give: ResourceSet::new(1, 0, 0, 0, 0),
+        get: ResourceSet::new(0, 0, 0, 0, 1),
+    };
+    assert_eq!(g.apply(1, offer), Err(RuleError::WrongPhase));
+    assert_eq!(g.apply(0, Action::EndTurn), Err(RuleError::NotYourTurn));
+    assert_eq!(g.apply(2, Action::EndTurn), Err(RuleError::NotYourTurn));
+    g.apply_with(1, Action::EndTurn, &mut events).unwrap();
+    assert!(events.contains(&Event::SpecialBuildPassed { player: 1 }));
+    assert_eq!(g.phase, Phase::SpecialBuild { builder: 2 });
+
+    // Builds are paid for; bought cards are playable from the next turn.
+    g.legal_actions(2, &mut legal);
+    assert!(legal.contains(&Action::BuildRoad(road)));
+    assert!(legal.contains(&Action::BuyDevCard));
+    g.apply(2, Action::BuildRoad(road)).unwrap();
+    g.apply(2, Action::BuyDevCard).unwrap();
+    assert!(g.players[2].hand.is_empty());
+    assert_eq!(g.players[2].dev_cards[DevCard::Knight.index()], 1);
+    assert_eq!(g.players[2].new_dev_cards, [0; 5]);
+    g.legal_actions(2, &mut legal);
+    assert!(!legal.contains(&Action::PlayKnight));
+    g.check_invariants().unwrap();
+
+    for p in [2, 3, 4] {
+        assert_eq!(g.phase, Phase::SpecialBuild { builder: p });
+        g.apply(p, Action::EndTurn).unwrap();
+    }
+    assert_eq!((g.phase, g.current, g.turn), (Phase::PreRoll, 1, 1));
+    g.legal_actions(1, &mut legal);
+    assert!(legal.contains(&Action::PlayKnight));
+    g.check_invariants().unwrap();
+}
+
+/// First edge at `v` on the board being played.
+fn first_edge(g: &GameState, v: u8) -> u8 {
+    g.topo().vertex_edges[v as usize][0]
+}
+
+#[test]
+fn points_from_special_building_win_when_the_builders_turn_begins() {
+    let mut g = main_phase(5);
+    g.current = 1;
+    let spots = spread_vertices(&g, 6);
+    for &v in &spots[..3] {
+        put_city(&mut g, 2, v);
+    }
+    for &v in &spots[3..] {
+        put_settlement(&mut g, 2, v);
+    }
+    assert_eq!(g.victory_points(2), 9);
+    give(&mut g, 2, ResourceSet::new(0, 0, 0, 2, 3));
+    g.apply(1, Action::EndTurn).unwrap();
+    assert_eq!(g.phase, Phase::SpecialBuild { builder: 2 });
+    g.apply(2, Action::BuildCity(spots[3])).unwrap();
+    assert_eq!(g.victory_points(2), 10);
+    assert_eq!(g.winner, None, "nobody wins outside their own turn");
+    for p in [2, 3, 4, 0] {
+        g.apply(p, Action::EndTurn).unwrap();
+    }
+    assert_eq!((g.winner, g.phase), (Some(2), Phase::GameOver));
+}
+
+#[test]
+fn extended_island_production_reaches_three_tiles_per_number() {
+    let mut g = main_phase(6);
+    let roll_sum = (2..=12)
+        .find(|&n| {
+            n != 7
+                && g.board.tiles_by_number[n as usize]
+                    .iter()
+                    .all(|&t| t != NONE)
+        })
+        .expect("most numbers appear three times");
+    let tiles = g.board.tiles_by_number[roll_sum as usize];
+    let mut taken = 0u128;
+    let mut expected = ResourceSet::EMPTY;
+    for &t in &tiles {
+        if t == g.robber {
+            continue;
+        }
+        let topo = g.topo();
+        let v = topo.tile_vertices[t as usize]
+            .iter()
+            .copied()
+            .find(|&v| (taken | topo.neighbors_of(taken)) & (1 << v) == 0)
+            .unwrap();
+        taken |= 1 << v;
+        put_settlement(&mut g, 3, v);
+        for &u in &topo.vertex_tiles[v as usize] {
+            if u != NONE
+                && g.board.numbers[u as usize] == roll_sum
+                && u != g.robber
+                && let Some(r) = g.board.terrain[u as usize].resource()
+            {
+                expected[r] += 1;
+            }
+        }
+    }
+    g.phase = Phase::PreRoll;
+    g.dice = None;
+    roll(&mut g, roll_sum);
+    assert_eq!(g.players[3].hand, expected);
+    g.check_invariants().unwrap();
 }

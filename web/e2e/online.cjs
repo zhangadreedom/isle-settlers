@@ -6,7 +6,11 @@
 //   cargo run --release -p isle-server -- --bot-delay 0.3 &   # serves web/dist
 //   node web/e2e/online.cjs [screenshot-dir]
 //
-// Env: E2E_URL (default http://localhost:8080/), E2E_AI=困难 (bot level).
+// Env: E2E_URL (default http://localhost:8080/), E2E_AI=困难 (bot level),
+// E2E_PLAYERS=2..6 (room size, default 3; 5-6 seats use the extended island).
+//
+// At the end the guest opens the stored replay from the game-over dialog and
+// a third browser opens the shared replay link.
 // Requires `playwright`.
 const { chromium } = require('playwright');
 const path = require('path');
@@ -17,6 +21,7 @@ fs.mkdirSync(OUT, { recursive: true });
 const BASE = process.env.E2E_URL || 'http://localhost:8080/';
 const QUERY = '?debug&renderer=webgl';
 const RES = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'];
+const PLAYERS = Number(process.env.E2E_PLAYERS || 3);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -55,7 +60,8 @@ async function clickSpot(page, kind, ids) {
 
 async function rankSettlements(page, ids) {
   return page.evaluate((ids) => {
-    const { game, topology } = window.__isle;
+    const { game } = window.__isle;
+    const topology = game().topology;
     const nums = game().board.numbers;
     const pips = (n) => (n === 0 ? 0 : 6 - Math.abs(7 - n));
     const score = (v) => {
@@ -116,6 +122,17 @@ async function step(p, other, shared) {
     if (choice) await choice.click();
   } else if (types.has('RollDice')) {
     await page.click('.actions >> text=掷骰子');
+  } else if (v.phase.type === 'SpecialBuild' && v.toMove === me) {
+    p.stats.special = (p.stats.special ?? 0) + 1;
+    if (types.has('BuildSettlement')) {
+      await page.click('.build >> text=村庄');
+      await clickSpot(page, 'vertex', of('BuildSettlement').map((a) => a.value));
+    } else if (types.has('BuildCity')) {
+      await page.click('.build >> text=城市');
+      await clickSpot(page, 'vertex', of('BuildCity').map((a) => a.value));
+    } else {
+      await page.click('.actions >> text=跳过');
+    }
   } else if (v.phase.type === 'Main' && v.current === me) {
     if (v.trade) {
       const waiting = v.trade.responses.some((r, i) => i !== me && i < v.players.length && r === 'Pending');
@@ -222,7 +239,7 @@ async function playLoop(p, other, shared, deadline) {
   await host.page.waitForFunction(() => !document.querySelector('.lobby button.primary')?.disabled);
   await host.page.click('.tabs >> text=联机对战');
   await host.page.fill('input[aria-label="昵称"]', 'Alice');
-  await host.page.click('.seg >> text=3 人');
+  await host.page.click(`.seg >> text=${PLAYERS} 人`);
   // E2E_AI=简单|普通|困难 sets the level of the bot filling the free seat.
   if (process.env.E2E_AI) await host.page.click(`.seg >> text=${process.env.E2E_AI}`);
   await host.page.click('button:has-text("创建房间")');
@@ -251,7 +268,7 @@ async function playLoop(p, other, shared, deadline) {
   await guest.page.waitForFunction(() => [...document.querySelectorAll('.log li.chat')].some((li) => li.textContent.includes('木头')));
 
   const shared = {};
-  const deadline = Date.now() + 8 * 60_000;
+  const deadline = Date.now() + (PLAYERS > 4 ? 15 : 8) * 60_000;
   let midShot = false;
   const shooter = (async () => {
     while (!midShot && Date.now() < deadline) {
@@ -275,6 +292,27 @@ async function playLoop(p, other, shared, deadline) {
   console.log('winner:', hs.view.winner, 'same for guest:', gs.view.winner === hs.view.winner, 'turns:', hs.view.turn);
   console.log('final points:', JSON.stringify(hs.view.finalPoints));
   console.log('host:', JSON.stringify(host.stats), 'guest:', JSON.stringify(guest.stats));
+  if (PLAYERS > 4 && !host.stats.special && !guest.stats.special) errors.push('never saw a special building phase');
+
+  // The stored replay, from the dialog and through a shared link.
+  await guest.page.click('.modal >> text=观看回放');
+  await guest.page.waitForSelector('.replay-bar');
+  const hash = await guest.page.evaluate(() => location.hash);
+  if (!/^#\/replay\/\w+$/.test(hash)) errors.push(`unexpected replay link ${hash}`);
+  const viewer = await player(browser, 'viewer', errors);
+  await viewer.page.goto(BASE + QUERY + hash);
+  await viewer.page.waitForSelector('.replay-bar', { timeout: 30000 });
+  const total = await viewer.page.evaluate(() => window.__isle.game().replay.length);
+  await viewer.page.evaluate((n) => window.__isle.game().replay.seek(n), total);
+  await sleep(300);
+  const end = await state(viewer.page);
+  if (end.view.winner !== hs.view.winner || JSON.stringify(end.view.buildings) !== JSON.stringify(hs.view.buildings)) {
+    errors.push('shared replay does not end like the game');
+  }
+  await viewer.page.evaluate((n) => window.__isle.game().replay.seek(Math.floor(n / 2)), total);
+  await sleep(300);
+  await viewer.page.screenshot({ path: `${OUT}/p2-replay-link.png` });
+  console.log('replay:', hash, total, 'actions');
   console.log('errors:', errors.length ? errors.slice(0, 10) : 'none');
   await browser.close();
   if (errors.length || hs.view.winner === null || gs.view.winner !== hs.view.winner || !shared.reloaded) process.exit(1);

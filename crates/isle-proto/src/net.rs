@@ -35,6 +35,15 @@ impl BotLevel {
             BotLevel::Hard => "mcts",
         }
     }
+
+    /// Level of a bot given by its `bot_by_name` name (with options).
+    pub fn of_bot_name(name: &str) -> BotLevel {
+        match name.split([':', '/']).next().unwrap_or("") {
+            "mcts" => BotLevel::Hard,
+            "greedy" => BotLevel::Normal,
+            _ => BotLevel::Easy,
+        }
+    }
 }
 
 /// What occupies a seat, as everyone sees it.
@@ -67,6 +76,8 @@ pub struct RoomInfo {
     pub started: bool,
     pub seats: Vec<SeatView>,
     pub spectators: u32,
+    /// Id of the finished game's replay (`/api/replays/{id}`).
+    pub replay: Option<String>,
 }
 
 /// Legal actions for the receiving seat, tagged with the state version they
