@@ -62,6 +62,8 @@ export default function App() {
   const [previewSeed, setPreviewSeed] = createSignal(randomSeed());
   const [tradeOpen, setTradeOpen] = createSignal(false);
   const [devModal, setDevModal] = createSignal<'YearOfPlenty' | 'Monopoly' | null>(null);
+  // The log (with chat) starts open on wide screens and as a toggle on phones.
+  const [logOpen, setLogOpen] = createSignal(window.innerWidth > 720);
   let lastLocal: LocalOptions | null = null;
 
   onMount(async () => {
@@ -259,10 +261,13 @@ export default function App() {
               <Show when={conn()}>
                 {(c) => <span class="room-tag muted">房间 {c().roomId()}</span>}
               </Show>
+              <button class="ghost log-toggle" onClick={() => setLogOpen(!logOpen())} aria-expanded={logOpen()}>
+                {logOpen() ? '收起记录' : g().online ? '记录 · 聊天' : '记录'}
+              </button>
             </header>
             <DiceView game={g()} />
             <PlayerList game={g()} />
-            <GameLog game={g()} />
+            <GameLog game={g()} open={logOpen()} onToggle={() => setLogOpen(!logOpen())} />
             <HandBar game={g()} onTrade={() => setTradeOpen(true)} onDevCard={(c) => playDevCard(g(), c)} />
             <Flights game={g()} />
 

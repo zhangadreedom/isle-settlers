@@ -94,8 +94,10 @@ export function DiceView(props: { game: Game }) {
   );
 }
 
-export function GameLog(props: { game: Game }) {
-  const [open, setOpen] = createSignal(true);
+/** Game log with chat. On phones it is an overlay that leaves the board layout alone. */
+export function GameLog(props: { game: Game; open: boolean; onToggle: () => void }) {
+  const open = () => props.open;
+  const setOpen = (_: boolean) => props.onToggle();
   let list!: HTMLOListElement;
   const entries = createMemo(() => {
     const l = props.game.log();
@@ -103,7 +105,7 @@ export function GameLog(props: { game: Game }) {
     return l;
   });
   return (
-    <section class="panel log" classList={{ collapsed: !open() }} data-inset>
+    <section class="panel log" classList={{ collapsed: !open() }} data-inset={window.innerWidth > 720 ? '' : undefined}>
       <header>
         <h3>对局记录</h3>
         <button class="icon" onClick={() => setOpen(!open())} aria-label={open() ? '收起' : '展开'}>

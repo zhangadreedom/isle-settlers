@@ -537,6 +537,18 @@ impl Room {
         if self.conns.is_empty() {
             self.idle_since = Some(now);
         }
+        // Before the start, a host who leaves hands over to someone present,
+        // so the others are not stuck waiting.
+        if self.game.is_none()
+            && self.seats[self.host as usize].connections == 0
+            && let Some(next) = self
+                .seats
+                .iter()
+                .position(|s| matches!(s.kind, SeatKind::Human { .. }) && s.connections > 0)
+        {
+            self.host = next as u8;
+            self.mark_dirty(now);
+        }
         self.broadcast_room(now);
         self.reschedule(now);
     }

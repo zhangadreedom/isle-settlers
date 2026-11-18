@@ -513,3 +513,16 @@ async fn health_endpoint() {
     assert!(body.contains("\"rooms\":1"), "{body}");
     server.stop().await;
 }
+
+#[tokio::test]
+async fn host_role_moves_on_if_the_host_leaves_the_lobby() {
+    let server = Server::start(fast_config()).await;
+    let host = Client::create(server.addr, 3, "Alice").await;
+    let mut guest = Client::join(server.addr, &host.room_id, "Bob", None).await;
+    drop(host);
+    guest.until(|c| c.room.as_ref().unwrap().host == 1).await;
+    guest.send(&ClientMsg::Start).await;
+    guest.until(|c| c.view.is_some()).await;
+    assert!(guest.room.as_ref().unwrap().started);
+    server.stop().await;
+}

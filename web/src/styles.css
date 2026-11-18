@@ -510,6 +510,7 @@ button.on {
 }
 
 .log ol {
+  flex: 1;
   list-style: none;
   margin: 0;
   padding: 0 12px 10px;
@@ -955,6 +956,10 @@ input {
   color: var(--muted);
 }
 
+.topbar .log-toggle {
+  display: none;
+}
+
 .room-tag {
   margin-left: 8px;
   font-size: 12px;
@@ -1081,9 +1086,27 @@ input {
     font-size: 16px;
   }
 
-  .log,
   .renderer-info {
     display: none;
+  }
+
+  /* On phones the log is an overlay opened from the top bar. */
+  .log {
+    top: 44px;
+    left: var(--gutter);
+    right: var(--gutter);
+    width: auto;
+    height: 45%;
+    z-index: 20;
+    background: var(--panel-solid);
+  }
+
+  .log.collapsed {
+    display: none;
+  }
+
+  .topbar .log-toggle {
+    display: inline-block;
   }
 
   .handbar {
