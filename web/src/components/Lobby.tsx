@@ -38,7 +38,8 @@ export function Lobby(props: {
   const createRoom = () => {
     const n = name().trim() || '玩家';
     saveName(n);
-    props.onCreateRoom({ players: players(), bots: bot() === 'greedy' ? 'Normal' : 'Easy', name: n });
+    const level: Record<string, BotLevel> = { weighted: 'Easy', greedy: 'Normal', mcts: 'Hard' };
+    props.onCreateRoom({ players: players(), bots: level[bot()] ?? 'Normal', name: n });
   };
 
   // Accept a bare code or a pasted invite link.
@@ -79,6 +80,9 @@ export function Lobby(props: {
             </button>
             <button classList={{ on: bot() === 'greedy' }} onClick={() => setBot('greedy')}>
               普通
+            </button>
+            <button classList={{ on: bot() === 'mcts' }} onClick={() => setBot('mcts')} title="搜索型 AI，会推演后续局面">
+              困难
             </button>
           </div>
         </div>

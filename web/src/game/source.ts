@@ -2,7 +2,8 @@
 // talks to this interface, so local and online games share all UI code.
 
 import { createSignal } from 'solid-js';
-import { EngineError, Match, type BotKind } from '../engine';
+import { EngineError, WorkerMatch, type BotKind } from '../engine';
+import type { MatchState } from './worker';
 import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, Snapshot } from '../generated/proto';
 import type { Connection } from '../net/connection';
 
@@ -54,74 +55,99 @@ export interface LocalOptions {
   fast: boolean;
 }
 
-/** A match hosted in WebAssembly, with bots paced like a real table. */
-export function createLocalSource(opts: LocalOptions): GameSource {
-  const match = new Match(opts.players, opts.seed, opts.humanSeat, opts.bot);
+/**
+ * A match hosted in a Web Worker, with bots paced like a real table. Worker
+ * replies arrive in request order and carry the full state, so applying
+ * them as they come keeps everything consistent.
+ */
+export async function createLocalSource(opts: LocalOptions): Promise<GameSource> {
+  const worker = new WorkerMatch();
+  const first = await worker.create(opts.players, opts.seed, opts.humanSeat, opts.bot);
   const [thinking, setThinking] = createSignal(-1);
   let handlers: SourceHandlers | null = null;
+  let current: MatchState = first;
   let timer: number | undefined;
+  let humanBusy = false;
+  let botBusy = false;
   let disposed = false;
-  let view = match.view();
 
-  function emit(events: Event[], resync = false) {
+  function emit(state: MatchState, resync = false) {
     if (disposed || !handlers) return;
-    view = match.view();
-    handlers.state({ view, legal: match.legal(), events, resync });
+    current = state;
+    handlers.state({ view: state.view, legal: state.legal, events: state.events, resync });
     schedule();
   }
 
   function delay(): number {
+    const v = current.view;
     let ms = 650;
-    if (view.phase.type === 'SetupSettlement' || view.phase.type === 'SetupRoad') ms = 450;
-    else if (view.phase.type === 'PreRoll') ms = 750;
-    else if (view.phase.type === 'Discard') ms = 350;
-    else if (view.trade && view.current === opts.humanSeat) ms = 700;
+    if (v.phase.type === 'SetupSettlement' || v.phase.type === 'SetupRoad') ms = 450;
+    else if (v.phase.type === 'PreRoll') ms = 750;
+    else if (v.phase.type === 'Discard') ms = 350;
+    else if (v.trade && v.current === opts.humanSeat) ms = 700;
     return opts.fast ? ms * 0.3 : ms;
   }
 
   function schedule() {
-    if (timer !== undefined || disposed) return;
-    const seat = match.nextBot();
+    if (timer !== undefined || botBusy || disposed) return;
+    const seat = current.nextBot;
     setThinking(seat);
     if (seat < 0) return;
-    timer = window.setTimeout(() => {
+    timer = window.setTimeout(async () => {
       timer = undefined;
       if (disposed) return;
-      const step = match.stepBot();
-      emit(step?.events ?? []);
+      botBusy = true;
+      try {
+        emit(await worker.stepBot());
+      } catch (e) {
+        if (!disposed) handlers?.error(e instanceof EngineError ? e.code : String(e));
+      } finally {
+        botBusy = false;
+        schedule();
+      }
     }, delay());
   }
 
+  async function run(request: Promise<MatchState>) {
+    humanBusy = true;
+    try {
+      emit(await request);
+    } catch (e) {
+      if (!disposed) handlers?.error(e instanceof EngineError ? e.code : String(e));
+    } finally {
+      humanBusy = false;
+    }
+  }
+
   return {
-    board: match.board,
+    board: first.board!,
     me: opts.humanSeat,
     online: false,
     seat: (s) => ({ name: `AI ${s + 1}`, bot: s !== opts.humanSeat, connected: true, autopilot: false }),
     thinking,
     start(h) {
       handlers = h;
-      emit([], true);
+      emit(first, true);
     },
     play(action, legal) {
-      try {
-        if (action.type === 'ProposeTrade') {
-          emit(match.proposeTrade(action.value.give, action.value.get));
-          return true;
-        }
-        const index = legal.actions.indexOf(action);
-        if (index < 0) throw new EngineError('NoSuchAction');
-        emit(match.apply(legal.version, index));
+      // One human action at a time: ignore double clicks until it lands.
+      if (humanBusy) return false;
+      if (action.type === 'ProposeTrade') {
+        void run(worker.proposeTrade(action.value.give, action.value.get));
         return true;
-      } catch (e) {
-        handlers?.error(e instanceof EngineError ? e.code : String(e));
-        emit([]);
+      }
+      const index = legal.actions.indexOf(action);
+      if (index < 0) {
+        handlers?.error('NoSuchAction');
         return false;
       }
+      void run(worker.apply(legal.version, index));
+      return true;
     },
     dispose() {
       disposed = true;
       window.clearTimeout(timer);
-      match.free();
+      worker.terminate();
     },
   };
 }

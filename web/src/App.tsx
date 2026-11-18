@@ -107,14 +107,16 @@ export default function App() {
     connect({ type: 'Create', ...o });
   }
 
-  function startLocal(o: LocalOptions) {
+  async function startLocal(o: LocalOptions) {
     const r = renderer();
     const t = topology();
     if (!r || !t) return;
     lastLocal = o;
     game()?.dispose();
+    setGame(null);
     setTradeOpen(false);
-    setGame(createGame(createLocalSource(o), r, t));
+    const source = await createLocalSource(o);
+    setGame(createGame(source, r, t));
   }
 
   /** Back to the main menu. */

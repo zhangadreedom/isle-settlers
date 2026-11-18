@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use isle_ai::{BOT_NAMES, Bot, bot_by_name, play_game};
+use isle_ai::{Bot, bot_by_name, play_game};
 use isle_core::{GameConfig, GameState, MAX_PLAYERS};
 
 struct Args {
@@ -19,6 +19,8 @@ struct Args {
     bots: Vec<String>,
     max_turns: u32,
     check: bool,
+    /// Rotate the lineup every game so no bot keeps the first seat.
+    rotate: bool,
 }
 
 fn parse_args() -> Args {
@@ -32,6 +34,7 @@ fn parse_args() -> Args {
         bots: Vec::new(),
         max_turns: 1000,
         check: false,
+        rotate: false,
     };
     let mut bot = String::from("weighted");
     let mut it = std::env::args().skip(1);
@@ -51,6 +54,7 @@ fn parse_args() -> Args {
                 a.max_turns = val().parse().unwrap_or_else(|_| usage("bad --max-turns"))
             }
             "--check" => a.check = true,
+            "--rotate" => a.rotate = true,
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown flag {other}")),
         }
@@ -64,11 +68,8 @@ fn parse_args() -> Args {
     if a.bots.len() != a.players as usize {
         usage("--bots needs one name per seat");
     }
-    if let Some(bad) = a.bots.iter().find(|b| !BOT_NAMES.contains(&b.as_str())) {
-        usage(&format!(
-            "unknown bot {bad}; expected one of {}",
-            BOT_NAMES.join(", ")
-        ));
+    if let Some(bad) = a.bots.iter().find(|b| bot_by_name(b, 0).is_none()) {
+        usage(&format!("unknown bot {bad}"));
     }
     a.threads = a.threads.max(1);
     a
@@ -80,8 +81,8 @@ fn usage(err: &str) -> ! {
     }
     eprintln!(
         "usage: isle-sim [--games N] [--players 2-4] [--seed S] [--threads T]\n\
-         \x20               [--bot NAME | --bots NAME,NAME,...] [--max-turns N] [--check]\n\
-         bots: random, weighted, greedy"
+         \x20               [--bot NAME | --bots NAME,NAME,...] [--rotate] [--max-turns N] [--check]\n\
+         bots: random, weighted, greedy, mcts, mcts:N (N iterations), mcts:N/key=value/..."
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 });
 }
@@ -93,6 +94,8 @@ struct Stats {
     turns: u64,
     actions: u64,
     wins: [u64; MAX_PLAYERS],
+    /// Wins per lineup entry (equals `wins` unless rotating).
+    wins_by_bot: [u64; MAX_PLAYERS],
 }
 
 fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
@@ -107,8 +110,17 @@ fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
             .wrapping_mul(0x9E37_79B9)
             .wrapping_add(shard << 40 | i);
         let mut g = GameState::new(config, game_seed).expect("valid config");
-        let mut b: Vec<Box<dyn Bot + Send>> = (0..args.players as u64)
-            .map(|k| bot_by_name(&args.bots[k as usize], game_seed ^ (k + 1)).expect("validated"))
+        let n = args.players as usize;
+        let shift = if args.rotate {
+            (shard as usize + i as usize * 7) % n
+        } else {
+            0
+        };
+        let lineup = |seat: usize| (seat + shift) % n;
+        let mut b: Vec<Box<dyn Bot + Send>> = (0..n)
+            .map(|k| {
+                bot_by_name(&args.bots[lineup(k)], game_seed ^ (k as u64 + 1)).expect("validated")
+            })
             .collect();
         let mut bots: Vec<&mut dyn Bot> = b.iter_mut().map(|b| &mut **b as &mut dyn Bot).collect();
         let outcome = play_game(&mut g, &mut bots, args.max_turns, args.check);
@@ -118,6 +130,7 @@ fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
         if let Some(w) = outcome.winner {
             s.finished += 1;
             s.wins[w as usize] += 1;
+            s.wins_by_bot[lineup(w as usize)] += 1;
         }
     }
     s
@@ -150,6 +163,7 @@ fn main() {
         total.actions += s.actions;
         for p in 0..MAX_PLAYERS {
             total.wins[p] += s.wins[p];
+            total.wins_by_bot[p] += s.wins_by_bot[p];
         }
     }
     let g = total.games.max(1) as f64;
@@ -188,4 +202,11 @@ fn main() {
         })
         .collect();
     println!("wins by seat    {}", wins.join("  "));
+    // Win rate of each lineup entry with a 95% confidence interval.
+    let f = total.finished.max(1) as f64;
+    for (i, name) in args.bots.iter().enumerate() {
+        let p = total.wins_by_bot[i] as f64 / f;
+        let ci = 1.96 * (p * (1.0 - p) / f).sqrt();
+        println!("  [{i}] {name:<28} {:5.1}% ± {:.1}", 100.0 * p, 100.0 * ci);
+    }
 }

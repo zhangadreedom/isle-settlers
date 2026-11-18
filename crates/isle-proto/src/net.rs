@@ -23,6 +23,7 @@ pub const MAX_CHAT_CHARS: usize = 200;
 pub enum BotLevel {
     Easy,
     Normal,
+    Hard,
 }
 
 impl BotLevel {
@@ -31,6 +32,7 @@ impl BotLevel {
         match self {
             BotLevel::Easy => "weighted",
             BotLevel::Normal => "greedy",
+            BotLevel::Hard => "mcts",
         }
     }
 }

@@ -526,3 +526,31 @@ async fn host_role_moves_on_if_the_host_leaves_the_lobby() {
     assert!(guest.room.as_ref().unwrap().started);
     server.stop().await;
 }
+
+#[tokio::test]
+async fn hard_bots_play_on_the_blocking_pool() {
+    let config = ServerConfig {
+        hard_bot: "mcts:32".into(),
+        ..fast_config()
+    };
+    let server = Server::start(config).await;
+    let mut host = Client::connect(server.addr).await;
+    host.send(&ClientMsg::Create {
+        players: 4,
+        bots: BotLevel::Hard,
+        name: "Alice".into(),
+    })
+    .await;
+    host.until(|c| c.room.is_some()).await;
+    host.send(&ClientMsg::Start).await;
+    host.until(|c| c.view.is_some()).await;
+    assert!(host.room.as_ref().unwrap().seats[1..].iter().all(|s| *s
+        == SeatView::Bot {
+            level: BotLevel::Hard
+        }));
+    let host = timeout(Duration::from_secs(120), play_to_end(host))
+        .await
+        .expect("game did not finish");
+    assert!(host.game_over());
+    server.stop().await;
+}

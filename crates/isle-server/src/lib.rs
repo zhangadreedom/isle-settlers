@@ -39,6 +39,9 @@ pub struct ServerConfig {
     pub idle_ttl_game: Duration,
     pub idle_ttl_finished: Duration,
     pub max_rooms: usize,
+    /// Bot used for the hard level (`isle_ai::bot_by_name` syntax), e.g. a
+    /// smaller search budget on slow machines or in tests.
+    pub hard_bot: String,
     /// Where rooms are persisted; `None` keeps them in memory only.
     pub data_dir: Option<PathBuf>,
     /// Built web client (`web/dist`) served at `/`.
@@ -54,6 +57,7 @@ impl Default for ServerConfig {
             idle_ttl_game: Duration::from_secs(60 * 60),
             idle_ttl_finished: Duration::from_secs(10 * 60),
             max_rooms: 10_000,
+            hard_bot: "mcts".into(),
             data_dir: None,
             static_dir: None,
         }

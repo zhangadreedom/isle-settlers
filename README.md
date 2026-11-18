@@ -11,7 +11,7 @@
 crates/
   isle-core/   规则引擎（Rust，零依赖）：编译期拓扑表、Copy 状态、规则、合法走法
   isle-proto/  按玩家投影的视图（PlayerView）与线上类型；生成前端 TS 类型
-  isle-ai/     AI 对手：GreedyBot（普通难度）与随机基线
+  isle-ai/     AI 对手：ISMCTS（困难）、GreedyBot（普通）、随机基线；确定化与评估函数
   isle-sim/    自对弈与引擎基准 CLI
   isle-wasm/   WebAssembly 绑定：浏览器内对局托管（MatchHost / LocalMatch）
   isle-server/ 联机服务器（axum + WebSocket）：房间、邀请链接、断线重连、托管、持久化
@@ -74,10 +74,10 @@ cargo run --release -p isle-sim -- --games 40000
 cargo run --release -p isle-sim -- --games 5000 --check
 ```
 
-AI 强度对比（GreedyBot 对 3 个加权随机 bot）：
+AI 强度对比：`--rotate` 每局轮换座位，按 bot 统计胜率并给出 95% 置信区间。`mcts:N/key=value/...` 可以调整搜索参数，比如 `mcts:1000/r=0/c=0.3`，键名见 `MctsConfig::set`：
 
 ```bash
-cargo run --release -p isle-sim -- --games 4000 --bots greedy,weighted,weighted,weighted
+cargo run --release -p isle-sim -- --games 400 --rotate --bots mcts,greedy,greedy,greedy
 ```
 
 修改 Rust 线上类型后重新生成前端 TS 类型（不同步时测试会失败）：
@@ -137,5 +137,5 @@ node web/e2e/online.cjs
 - [x] P0：规则引擎、基线 bot、自对弈基准、WASM 绑定、3D 棋盘骨架
 - [x] P1：浏览器内人机对局（大厅、点击建造、交易、发展卡、弃牌与强盗、动画、观战模式）
 - [x] P2：联机对战（WebSocket 服务器、房间与邀请链接、断线重连、掉线托管、聊天、持久化、Docker）
-- [ ] P3：AI 分层（价值函数 → Expectimax → ISMCTS）
+- [x] P3：困难 AI（确定化 + ISMCTS + 评估函数，锦标赛调参；浏览器端跑在 Web Worker 里）
 - [ ] P4：5–6 人扩展、扩展包、账号与排位

@@ -5,7 +5,7 @@
 //   pnpm --filter @isle/web build && pnpm --filter @isle/web preview &
 //   node web/e2e/play-through.cjs [screenshot-dir]
 //
-// Env: E2E_URL (default http://localhost:4173/), BUILD_ONLY=1 (never trade
+// Env: E2E_URL (default http://localhost:4173/), E2E_AI=困难 (difficulty), BUILD_ONLY=1 (never trade
 // with players or buy cards; exercises building), TRACE=1.
 // Requires the `playwright` package with Chromium available.
 const { chromium, devices } = require('playwright');
@@ -30,6 +30,8 @@ const P = BUILD_ONLY ? 'b-' : '';
   await page.screenshot({ path: `${OUT}/p1-${P}lobby.png` });
   await page.click('.seg >> text=先手');
   await page.click('text=快速');
+  // E2E_AI=简单|普通|困难 picks the bot difficulty.
+  if (process.env.E2E_AI) await page.click(`.seg >> text=${process.env.E2E_AI}`);
   await page.click('text=开始游戏');
 
   const state = () =>
@@ -62,12 +64,36 @@ const P = BUILD_ONLY ? 'b-' : '';
   const stats = { settlements: 0, roads: 0, cities: 0, bankTrades: 0, offers: 0, deals: 0, discards: 0, robbers: 0, dev: 0, turns: 0 };
   const shots = { setup: false, offer: false, robber: false, mid: false };
   let triedOfferTurn = -1;
+  // Actions are confirmed asynchronously (the match runs in a worker): after
+  // acting at a version, wait for the next version before deciding again.
+  let actedAt = -1;
   const deadline = Date.now() + 420_000;
 
+  // On failure, keep a screenshot and the state for debugging.
+  const fail = async (e) => {
+    await page.screenshot({ path: `${OUT}/p1-${P}error.png` }).catch(() => {});
+    const s = await state().catch(() => null);
+    console.error('failed in phase', JSON.stringify(s?.view.phase), 'trade', JSON.stringify(s?.view.trade),
+      'modal', await page.$eval('.modal h2', (h) => h.textContent).catch(() => 'none'));
+    throw e;
+  };
+  try {
   while (Date.now() < deadline) {
     const s = await state();
+    if (!s) {
+      // The local match starts asynchronously (it lives in a worker).
+      await page.waitForTimeout(100);
+      continue;
+    }
     const v = s.view;
     if (v.winner !== null) break;
+    if (s.legal.version === actedAt) {
+      await page
+        .waitForFunction((v) => window.__isle.game()?.legal().version !== v, actedAt, { timeout: 4000 })
+        .catch(() => {});
+      actedAt = -1;
+      continue;
+    }
     const acts = s.legal.actions;
     const types = new Set(acts.map((a) => a.type));
     if (!acts.length) {
@@ -144,8 +170,9 @@ const P = BUILD_ONLY ? 'b-' : '';
         if (deal) {
           await deal.click();
           stats.deals++;
-        } else await page.click('text=撤回报价');
+        } else await page.click('button:has-text("撤回报价")');
         await page.keyboard.press('Escape');
+        actedAt = s.legal.version;
         continue;
       }
       if (types.has('BuildCity')) {
@@ -212,7 +239,12 @@ const P = BUILD_ONLY ? 'b-' : '';
     } else {
       await page.waitForTimeout(120);
     }
+    actedAt = s.legal.version;
     await page.waitForTimeout(60);
+  }
+
+  } catch (e) {
+    await fail(e);
   }
 
   const final = await state();

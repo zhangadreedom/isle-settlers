@@ -113,7 +113,7 @@ pendingDiscard: Array<number>, trade: TradeOffer | null, longestRoadOwner: numbe
  */
 finalPoints: Array<number> | null, };
 
-export type BotLevel = "Easy" | "Normal";
+export type BotLevel = "Easy" | "Normal" | "Hard";
 
 export type SeatView = { "type": "Open" } | { "type": "Human", "value": { name: string, connected: boolean, 
 /**

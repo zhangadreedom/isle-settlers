@@ -89,22 +89,30 @@ struct Conn {
 struct Game {
     state: GameState,
     /// One per seat: plays bot seats, and humans' seats on autopilot.
-    bots: Vec<Box<dyn Bot + Send>>,
+    /// Taken out while a bot thinks on the blocking thread pool.
+    bots: Vec<Option<Box<dyn Bot + Send>>>,
     actions: Vec<(u8, Action)>,
     log: VecDeque<Event>,
 }
 
 impl Game {
-    fn new(state: GameState, seats: &[Seat], seed: u64) -> Game {
+    fn new(state: GameState, seats: &[Seat], seed: u64, config: &ServerConfig) -> Game {
         let bots = seats
             .iter()
             .enumerate()
             .map(|(i, s)| {
                 let name = match s.kind {
+                    SeatKind::Bot(BotLevel::Hard) => config.hard_bot.as_str(),
                     SeatKind::Bot(level) => level.bot_name(),
+                    // Autopilot for disconnected players.
                     _ => "greedy",
                 };
-                bot_by_name(name, seed.rotate_left(i as u32 * 8) ^ i as u64).expect("known bot")
+                let seed = seed.rotate_left(i as u32 * 8) ^ i as u64;
+                Some(
+                    bot_by_name(name, seed)
+                        .or_else(|| bot_by_name("greedy", seed))
+                        .expect("known bot"),
+                )
             })
             .collect();
         Game {
@@ -222,7 +230,7 @@ impl Room {
                 ..GameConfig::default()
             };
             let state = GameState::new(config, record.seed).map_err(|e| format!("{e:?}"))?;
-            let mut game = Game::new(state, &seats, record.seed);
+            let mut game = Game::new(state, &seats, record.seed, registry.config());
             let mut events = Vec::new();
             for (i, (seat, action)) in record.actions.iter().enumerate() {
                 events.clear();
@@ -328,7 +336,7 @@ impl Room {
     async fn tick(&mut self, now: Instant) -> bool {
         if self.bot_due.is_some_and(|t| t <= now) {
             self.bot_due = None;
-            self.machine_step(now);
+            self.machine_step().await;
         }
         let autopilot: Vec<bool> = (0..self.seats.len() as u8)
             .map(|i| self.on_autopilot(i, now))
@@ -608,7 +616,7 @@ impl Room {
                     ..GameConfig::default()
                 };
                 let state = GameState::new(config, self.seed).map_err(|e| format!("{e:?}"))?;
-                self.game = Some(Game::new(state, &self.seats, self.seed));
+                self.game = Some(Game::new(state, &self.seats, self.seed, &self.config));
                 tracing::info!(room = %self.id, "game started");
                 self.mark_dirty(now);
                 self.broadcast_room(now);
@@ -641,24 +649,44 @@ impl Room {
 
     // ------------------------------------------------------------- game flow
 
-    fn machine_step(&mut self, now: Instant) {
-        let Some(p) = self.machine_actor(now) else {
+    /// Lets the bot (or autopilot) to move play once. Bots think on the
+    /// blocking thread pool so a long search never stalls other rooms.
+    async fn machine_step(&mut self) {
+        let Some(p) = self.machine_actor(Instant::now()) else {
             return;
         };
         let game = self.game.as_mut().expect("machine actor implies a game");
+        let state = game.state;
         let mut legal = Vec::new();
-        game.state.legal_actions(p, &mut legal);
+        state.legal_actions(p, &mut legal);
         if legal.is_empty() {
             tracing::error!(room = %self.id, seat = p, "no legal action for machine actor");
             return;
         }
-        let action = game.bots[p as usize].choose(&game.state, p, &legal);
+        let Some(mut bot) = game.bots[p as usize].take() else {
+            return;
+        };
+        let thinking = tokio::task::spawn_blocking(move || {
+            let action = bot.choose(&state, p, &legal);
+            (bot, action)
+        });
+        let (bot, action) = match thinking.await {
+            Ok(done) => done,
+            Err(e) => {
+                tracing::error!(room = %self.id, seat = p, "bot panicked: {e}; replacing it");
+                let game = self.game.as_mut().expect("game running");
+                game.bots[p as usize] = bot_by_name("greedy", self.seed ^ p as u64);
+                return;
+            }
+        };
+        let game = self.game.as_mut().expect("game running");
+        game.bots[p as usize] = Some(bot);
         let mut events = Vec::new();
         if let Err(e) = game.state.apply_with(p, action, &mut events) {
             tracing::error!(room = %self.id, seat = p, ?action, "bot played an illegal action: {e}");
             return;
         }
-        self.after_action(p, action, events, now);
+        self.after_action(p, action, events, Instant::now());
     }
 
     fn after_action(&mut self, seat: u8, action: Action, events: Vec<Event>, now: Instant) {

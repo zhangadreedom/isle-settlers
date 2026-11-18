@@ -13,6 +13,8 @@ export default defineConfig({
     // the game protocol to it.
     proxy: { '/api': { target: 'http://localhost:8080', ws: true } },
   },
+  // ES-module workers, so the WASM glue can resolve its file via import.meta.url.
+  worker: { format: 'es' },
   build: {
     target: 'es2022',
     // The Three.js chunk is lazy-loaded after first paint.

@@ -5,13 +5,17 @@
 //! * [`RandomBot`] / [`WeightedRandomBot`]: baselines for tests and benchmarks.
 //! * [`GreedyBot`]: plan-based heuristic player ("normal" difficulty) that
 //!   only uses public information and its own hand.
-//!
-//! Search-based bots (expectimax, ISMCTS) will build on the same trait.
+//! * [`MctsBot`]: information-set Monte Carlo tree search ("hard"). It only
+//!   ever searches [`determinize`]d states, so it cannot see hidden cards.
 
+pub mod determinize;
+pub mod eval;
 mod greedy;
+mod mcts;
 
 pub use greedy::GreedyBot;
 use isle_core::{Action, GameState, Rng};
+pub use mcts::{MctsBot, MctsConfig, SearchStats};
 
 /// A computer player.
 pub trait Bot {
@@ -91,15 +95,29 @@ impl Bot for WeightedRandomBot {
 }
 
 /// Names accepted by [`bot_by_name`].
-pub const BOT_NAMES: [&str; 3] = ["random", "weighted", "greedy"];
+pub const BOT_NAMES: [&str; 4] = ["random", "weighted", "greedy", "mcts"];
 
-/// Creates a bot from its name (`random`, `weighted` or `greedy`).
+/// Creates a bot from its name: `random`, `weighted`, `greedy` or `mcts`.
+/// The search bot takes options: `mcts:N` sets the iterations per decision,
+/// and `mcts:N/key=value/...` overrides settings (see [`MctsConfig::set`]).
 pub fn bot_by_name(name: &str, seed: u64) -> Option<Box<dyn Bot + Send>> {
     Some(match name {
         "random" => Box::new(RandomBot::new(seed)),
         "weighted" => Box::new(WeightedRandomBot::new(seed)),
         "greedy" => Box::new(GreedyBot::new(seed)),
-        _ => return None,
+        "mcts" => Box::new(MctsBot::new(seed)),
+        _ => {
+            let mut parts = name.strip_prefix("mcts:")?.split('/');
+            let mut config = MctsConfig {
+                iterations: parts.next()?.parse().ok().filter(|&n| n > 0)?,
+                ..MctsConfig::default()
+            };
+            for kv in parts {
+                let (key, value) = kv.split_once('=')?;
+                config.set(key, value.parse().ok()?)?;
+            }
+            Box::new(MctsBot::with_config(seed, config))
+        }
     })
 }
 

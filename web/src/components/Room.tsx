@@ -45,7 +45,7 @@ export function JoinPrompt(props: { room: string; onJoin: (name: string) => void
   );
 }
 
-const LEVEL_NAME: Record<BotLevel, string> = { Easy: 'AI · 简单', Normal: 'AI · 普通' };
+const LEVEL_NAME: Record<BotLevel, string> = { Easy: 'AI · 简单', Normal: 'AI · 普通', Hard: 'AI · 困难' };
 
 function seatLabel(s: SeatView): string {
   switch (s.type) {
@@ -133,6 +133,12 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                             onClick={() => c.send({ type: 'SetSeat', value: { seat: i(), bot: 'Normal' } })}
                           >
                             普通 AI
+                          </button>
+                          <button
+                            classList={{ on: s.type === 'Bot' && s.value.level === 'Hard' }}
+                            onClick={() => c.send({ type: 'SetSeat', value: { seat: i(), bot: 'Hard' } })}
+                          >
+                            困难 AI
                           </button>
                         </div>
                       </Show>

@@ -1,6 +1,7 @@
 // Typed wrapper around the WebAssembly match host.
 import init, * as wasm from './wasm/isle_wasm.js';
 import type { Action, BoardInfo, Event, PlayerView, ResourceSet } from './generated/proto';
+import type { MatchState, WorkerReply, WorkerRequest } from './game/worker';
 
 /** Owner value meaning "nobody" in per-spot arrays. */
 export const EMPTY = 255;
@@ -43,7 +44,7 @@ function call<T>(f: () => string): T {
   }
 }
 
-export type BotKind = 'greedy' | 'weighted' | 'random';
+export type BotKind = 'greedy' | 'weighted' | 'random' | 'mcts' | `mcts:${number}`;
 
 /** A match hosted entirely in WebAssembly. JS only sees the human's view. */
 export class Match {
@@ -83,6 +84,56 @@ export class Match {
     this.inner.free();
   }
 }
+
+/** A local match running in a Web Worker (see game/worker.ts). */
+export class WorkerMatch {
+  private readonly worker = new Worker(new URL('./game/worker.ts', import.meta.url), { type: 'module' });
+  private nextId = 1;
+  private readonly pending = new Map<number, { resolve: (s: MatchState) => void; reject: (e: Error) => void }>();
+
+  constructor() {
+    this.worker.onmessage = (e: MessageEvent<WorkerReply>) => {
+      const reply = e.data;
+      const p = this.pending.get(reply.id);
+      if (!p) return;
+      this.pending.delete(reply.id);
+      if (reply.ok) p.resolve(reply.state);
+      else p.reject(new EngineError(reply.error));
+    };
+  }
+
+  private call(req: DistributiveOmit<WorkerRequest, 'id'>): Promise<MatchState> {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.worker.postMessage({ ...req, id });
+    });
+  }
+
+  create(players: number, seed: number, humanSeat: number | null, bot: BotKind) {
+    return this.call({ op: 'create', players, seed, humanSeat, bot });
+  }
+
+  apply(version: number, index: number) {
+    return this.call({ op: 'apply', version, index });
+  }
+
+  proposeTrade(give: ResourceSet, get: ResourceSet) {
+    return this.call({ op: 'propose', give: [...give], get: [...get] });
+  }
+
+  stepBot() {
+    return this.call({ op: 'step' });
+  }
+
+  terminate() {
+    this.worker.terminate();
+    for (const p of this.pending.values()) p.reject(new EngineError('Terminated'));
+    this.pending.clear();
+  }
+}
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 let ready: Promise<Topology> | undefined;
 

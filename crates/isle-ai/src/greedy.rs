@@ -100,12 +100,12 @@ fn best_by(legal: &[Action], mut score: impl FnMut(&Action) -> Option<f32>) -> O
 
 // ---------------------------------------------------------------- evaluation
 
-fn tile_pips(s: &GameState, t: u8) -> f32 {
+pub(crate) fn tile_pips(s: &GameState, t: u8) -> f32 {
     PIPS[s.board.numbers[t as usize] as usize] as f32
 }
 
 /// Expected production per resource (pips, cities count double).
-fn production(s: &GameState, q: u8) -> [f32; 5] {
+pub(crate) fn production(s: &GameState, q: u8) -> [f32; 5] {
     let mut out = [0.0; 5];
     for (mask, mult) in [
         (s.settlements[q as usize], 1.0),
@@ -127,7 +127,7 @@ fn production(s: &GameState, q: u8) -> [f32; 5] {
 }
 
 /// Board-wide scarcity: resources with fewer pips are worth more.
-fn scarcity(s: &GameState) -> [f32; 5] {
+pub(crate) fn scarcity(s: &GameState) -> [f32; 5] {
     let mut pips = [0.0f32; 5];
     for t in 0..NUM_TILES as u8 {
         if let Some(r) = s.board.terrain[t as usize].resource() {
@@ -139,7 +139,7 @@ fn scarcity(s: &GameState) -> [f32; 5] {
 }
 
 /// How good vertex `v` is as a settlement for `p`.
-fn spot_value(s: &GameState, p: u8, v: u8) -> f32 {
+pub(crate) fn spot_value(s: &GameState, p: u8, v: u8) -> f32 {
     let own = production(s, p);
     let scarce = scarcity(s);
     let mut value = 0.0;
@@ -224,7 +224,7 @@ fn best_road(s: &GameState, p: u8, legal: &[Action]) -> Option<Action> {
     })
 }
 
-fn missing(hand: ResourceSet, need: ResourceSet) -> u32 {
+pub(crate) fn missing(hand: ResourceSet, need: ResourceSet) -> u32 {
     (0..5)
         .map(|i| need.0[i].saturating_sub(hand.0[i]) as u32)
         .sum()
@@ -268,7 +268,7 @@ fn hand_value(s: &GameState, p: u8, hand: ResourceSet) -> f32 {
     covered as f32 * 3.0 + breadth as f32 * 0.5 + hand.total() as f32 * 0.1
 }
 
-fn robber_value(s: &GameState, p: u8, tile: u8, victim: Option<u8>) -> f32 {
+pub(crate) fn robber_value(s: &GameState, p: u8, tile: u8, victim: Option<u8>) -> f32 {
     let pips = tile_pips(s, tile);
     let tv = TILE_VERTEX_MASK[tile as usize];
     let mut value = 0.0;
@@ -432,7 +432,7 @@ fn main_turn(s: &GameState, p: u8, legal: &[Action]) -> Option<Action> {
     Some(Action::EndTurn)
 }
 
-fn vertex_production(s: &GameState, v: u8) -> f32 {
+pub(crate) fn vertex_production(s: &GameState, v: u8) -> f32 {
     VERTEX_TILES[v as usize]
         .iter()
         .filter(|&&t| t != NONE)

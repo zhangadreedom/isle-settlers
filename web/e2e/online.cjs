@@ -6,7 +6,8 @@
 //   cargo run --release -p isle-server -- --bot-delay 0.3 &   # serves web/dist
 //   node web/e2e/online.cjs [screenshot-dir]
 //
-// Env: E2E_URL (default http://localhost:8080/). Requires `playwright`.
+// Env: E2E_URL (default http://localhost:8080/), E2E_AI=困难 (bot level).
+// Requires `playwright`.
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
@@ -123,7 +124,7 @@ async function step(p, other, shared) {
       if (deal) {
         await deal.click();
         p.stats.deals++;
-      } else await page.click('text=撤回报价');
+      } else await page.click('button:has-text("撤回报价")');
       await page.keyboard.press('Escape');
     } else if (types.has('BuildCity')) {
       await page.click('.build >> text=城市');
@@ -222,6 +223,8 @@ async function playLoop(p, other, shared, deadline) {
   await host.page.click('.tabs >> text=联机对战');
   await host.page.fill('input[aria-label="昵称"]', 'Alice');
   await host.page.click('.seg >> text=3 人');
+  // E2E_AI=简单|普通|困难 sets the level of the bot filling the free seat.
+  if (process.env.E2E_AI) await host.page.click(`.seg >> text=${process.env.E2E_AI}`);
   await host.page.click('button:has-text("创建房间")');
   await host.page.waitForSelector('.invite input');
   const link = await host.page.inputValue('.invite input');
