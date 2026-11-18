@@ -21,6 +21,17 @@ export function PlayerList(props: { game: Game }) {
               <div class="seat-head">
                 <SeatDot seat={p.seat} />
                 <span class="seat-name">{g.name(p.seat)}</span>
+                <Show when={g.online && p.seat !== g.me}>
+                  <Show when={g.seat(p.seat).bot}>
+                    <span class="presence bot">AI</span>
+                  </Show>
+                  <Show when={!g.seat(p.seat).bot && g.seat(p.seat).autopilot}>
+                    <span class="presence auto" title="掉线期间由 AI 代打">托管</span>
+                  </Show>
+                  <Show when={!g.seat(p.seat).bot && !g.seat(p.seat).connected && !g.seat(p.seat).autopilot}>
+                    <span class="presence off" title="连接已断开">离线</span>
+                  </Show>
+                </Show>
                 <Show when={g.thinking() === p.seat}>
                   <span class="thinking" aria-label="思考中">
                     <i />
@@ -102,13 +113,40 @@ export function GameLog(props: { game: Game }) {
       <ol ref={list}>
         <For each={entries()}>
           {(e) => (
-            <li>
+            <li classList={{ chat: !!e.chat }}>
               {e.seat !== null ? <SeatDot seat={e.seat} /> : <span class="dot blank" />}
-              {e.text}
+              <span>
+                {e.chat ? <b>{e.chat.name}：</b> : null}
+                {e.text}
+              </span>
             </li>
           )}
         </For>
       </ol>
+      <Show when={props.game.chat}>
+        {(send) => {
+          const [text, setText] = createSignal('');
+          return (
+            <form
+              class="chat-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (text().trim()) send()(text());
+                setText('');
+              }}
+            >
+              <input
+                value={text()}
+                maxLength={200}
+                placeholder="聊天，比如谈谈交易条件…"
+                onInput={(e) => setText(e.currentTarget.value)}
+                aria-label="聊天消息"
+              />
+              <button type="submit">发送</button>
+            </form>
+          );
+        }}
+      </Show>
     </section>
   );
 }

@@ -1,16 +1,24 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import type { BoardRenderer, Insets, PickKind } from './board/BoardRenderer';
 import { DiceView, Flights, GameLog, HandBar, PlayerList } from './components/Hud';
-import { Lobby, randomSeed } from './components/Lobby';
-import { DiscardModal, GameOverModal, MonopolyModal, TradeModal, VictimModal, YearOfPlentyModal } from './components/Modals';
+import { Lobby, randomSeed, type CreateRoom } from './components/Lobby';
+import { DiscardModal, GameOverModal, IncomingTrade, MonopolyModal, TradeModal, VictimModal, YearOfPlentyModal } from './components/Modals';
+import { JoinPrompt, RoomLobby } from './components/Room';
 import { loadEngine, Match, type Topology } from './engine';
-import { boardData, createGame, type Game, type GameOptions } from './game/controller';
+import { boardData, createGame, type Game } from './game/controller';
+import { createLocalSource, createOnlineSource, type LocalOptions } from './game/source';
 import type { DevCard } from './generated/proto';
+import { createConnection, savedName, savedToken, type Connection } from './net/connection';
 
 declare global {
   interface Window {
     /** Test hook, present with `?debug` in the URL. */
-    __isle?: { game: () => Game | null; project: (kind: PickKind, id: number) => { x: number; y: number }; topology: Topology };
+    __isle?: {
+      game: () => Game | null;
+      conn: () => Connection | null;
+      project: (kind: PickKind, id: number) => { x: number; y: number };
+      topology: Topology;
+    };
   }
 }
 
@@ -38,18 +46,23 @@ function measureInsets(): Insets {
   return insets;
 }
 
+/** Room id from an invite link (`#/r/ID`). */
+const roomFromHash = () => location.hash.match(/^#\/r\/([A-Za-z0-9]+)/)?.[1]?.toUpperCase() ?? null;
+
 export default function App() {
   let stage!: HTMLDivElement;
   const params = new URLSearchParams(location.search);
   const [renderer, setRenderer] = createSignal<BoardRenderer>();
   const [topology, setTopology] = createSignal<Topology>();
   const [game, setGame] = createSignal<Game | null>(null);
+  const [conn, setConn] = createSignal<Connection | null>(null);
+  const [joinRoom, setJoinRoom] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal('加载规则引擎…');
   const [backend, setBackend] = createSignal('');
   const [previewSeed, setPreviewSeed] = createSignal(randomSeed());
   const [tradeOpen, setTradeOpen] = createSignal(false);
   const [devModal, setDevModal] = createSignal<'YearOfPlenty' | 'Monopoly' | null>(null);
-  let lastOptions: GameOptions | null = null;
+  let lastLocal: LocalOptions | null = null;
 
   onMount(async () => {
     try {
@@ -63,14 +76,77 @@ export default function App() {
       setBackend(r.backend);
       setRenderer(r);
       setStatus('');
-      if (params.has('debug')) window.__isle = { game, project: (k, id) => r.project(k, id), topology: topo };
+      if (params.has('debug')) window.__isle = { game, conn, project: (k, id) => r.project(k, id), topology: topo };
+      openInvite();
     } catch (err) {
       console.error(err);
       setStatus(`初始化失败：${err instanceof Error ? err.message : String(err)}`);
     }
   });
 
-  // In the lobby, show the map that will be played.
+  // ---- navigation ----
+
+  /** Follows an invite link: rejoin silently if we have a seat, else ask for a name. */
+  function openInvite() {
+    const room = roomFromHash();
+    if (!room || room === conn()?.roomId()) return;
+    leave(false);
+    if (savedToken(room)) connect({ type: 'Join', room, name: savedName() || '玩家' });
+    else setJoinRoom(room);
+  }
+  window.addEventListener('hashchange', openInvite);
+
+  function connect(hello: Parameters<typeof createConnection>[0]) {
+    setJoinRoom(null);
+    setConn(createConnection(hello));
+  }
+
+  function createRoom(o: CreateRoom) {
+    connect({ type: 'Create', ...o });
+  }
+
+  function startLocal(o: LocalOptions) {
+    const r = renderer();
+    const t = topology();
+    if (!r || !t) return;
+    lastLocal = o;
+    game()?.dispose();
+    setTradeOpen(false);
+    setGame(createGame(createLocalSource(o), r, t));
+  }
+
+  /** Back to the main menu. */
+  function leave(clearHash = true) {
+    game()?.dispose();
+    conn()?.close();
+    setGame(null);
+    setConn(null);
+    setJoinRoom(null);
+    setTradeOpen(false);
+    if (clearHash && location.hash) history.replaceState(null, '', location.pathname + location.search);
+    setPreviewSeed(randomSeed());
+  }
+
+  // Once connected, the address bar holds the invite link.
+  createEffect(() => {
+    const c = conn();
+    if (c?.status() === 'open' && c.roomId()) {
+      const hash = `#/r/${c.roomId()}`;
+      if (location.hash !== hash) history.replaceState(null, '', location.pathname + location.search + hash);
+    }
+  });
+
+  // The server sends a snapshot when the game starts (or on rejoin).
+  createEffect(() => {
+    const c = conn();
+    const snapshot = c?.snapshot();
+    const r = renderer();
+    const t = topology();
+    if (!c || !snapshot || !r || !t || game()) return;
+    setGame(createGame(createOnlineSource(c, snapshot), r, t));
+  });
+
+  // In the menus, show a map in the background.
   createEffect(() => {
     const r = renderer();
     const seed = previewSeed();
@@ -132,25 +208,11 @@ export default function App() {
 
   onCleanup(() => {
     window.removeEventListener('keydown', onKey);
+    window.removeEventListener('hashchange', openInvite);
     game()?.dispose();
+    conn()?.close();
     renderer()?.dispose();
   });
-
-  function start(o: GameOptions) {
-    const r = renderer();
-    const t = topology();
-    if (!r || !t) return;
-    lastOptions = o;
-    game()?.dispose();
-    setTradeOpen(false);
-    setGame(createGame(o, r, t));
-  }
-
-  function toLobby() {
-    game()?.dispose();
-    setGame(null);
-    setPreviewSeed(randomSeed());
-  }
 
   function playDevCard(g: Game, card: DevCard) {
     if (card === 'Knight') g.act((a) => a.type === 'PlayKnight');
@@ -158,17 +220,45 @@ export default function App() {
     else if (card === 'YearOfPlenty' || card === 'Monopoly') setDevModal(card);
   }
 
+  const menu = () => (
+    <Show
+      when={conn()}
+      fallback={
+        <Show
+          when={joinRoom()}
+          fallback={
+            <Lobby
+              ready={!!renderer()}
+              seed={previewSeed()}
+              onSeed={setPreviewSeed}
+              onStartLocal={startLocal}
+              onCreateRoom={createRoom}
+              onJoinRoom={(room) => (savedToken(room) ? connect({ type: 'Join', room, name: savedName() || '玩家' }) : setJoinRoom(room))}
+            />
+          }
+        >
+          {(room) => <JoinPrompt room={room()} onJoin={(name) => connect({ type: 'Join', room: room(), name })} onCancel={() => leave()} />}
+        </Show>
+      }
+    >
+      {(c) => <RoomLobby conn={c()} onLeave={() => leave()} />}
+    </Show>
+  );
+
   return (
     <div class="app">
       <div class="stage" ref={stage} />
 
-      <Show when={game()} fallback={<Lobby ready={!!renderer()} onStart={start} seed={previewSeed()} onSeed={setPreviewSeed} />}>
+      <Show when={game()} fallback={menu()}>
         {(g) => (
           <>
             <header class="topbar">
-              <button class="ghost" onClick={toLobby}>
+              <button class="ghost" onClick={() => leave()}>
                 ← 大厅
               </button>
+              <Show when={conn()}>
+                {(c) => <span class="room-tag muted">房间 {c().roomId()}</span>}
+              </Show>
             </header>
             <DiceView game={g()} />
             <PlayerList game={g()} />
@@ -180,6 +270,7 @@ export default function App() {
               <DiscardModal game={g()} />
             </Show>
             <VictimModal game={g()} />
+            <IncomingTrade game={g()} />
             <Show when={tradeOpen()}>
               <TradeModal game={g()} onClose={() => setTradeOpen(false)} />
             </Show>
@@ -190,7 +281,11 @@ export default function App() {
               <MonopolyModal game={g()} onClose={() => setDevModal(null)} />
             </Show>
             <Show when={g().view().winner !== null}>
-              <GameOverModal game={g()} onLobby={toLobby} onAgain={() => lastOptions && start({ ...lastOptions, seed: randomSeed() })} />
+              <GameOverModal
+                game={g()}
+                onLobby={() => leave()}
+                onAgain={g().online ? undefined : () => lastLocal && startLocal({ ...lastLocal, seed: randomSeed() })}
+              />
             </Show>
             <Show when={g().toast()}>
               <div class="toast" role="status">
@@ -201,6 +296,11 @@ export default function App() {
         )}
       </Show>
 
+      <Show when={conn()?.status() === 'reconnecting'}>
+        <div class="banner" role="status">
+          连接中断，正在重连…
+        </div>
+      </Show>
       <footer class="renderer-info muted">{backend() ? `${backend()} · 按需渲染` : ''}</footer>
       <Show when={status()}>
         <div class="loading">{status()}</div>

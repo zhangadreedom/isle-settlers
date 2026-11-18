@@ -57,8 +57,23 @@ const ERRORS: Record<RuleError, string> = {
   NothingToDiscard: '你不需要弃牌',
 };
 
+const SERVER_ERRORS: Record<string, string> = {
+  Stale: '状态已更新，请重试',
+  NoSuchAction: '现在不能这样做',
+  Offline: '连接已断开，正在重连…',
+  BadMessage: '请求无效',
+  RoomNotFound: '房间不存在或已关闭',
+  TooManyRooms: '服务器房间已满，请稍后再试',
+  NotHost: '只有房主可以这样做',
+  AlreadyStarted: '游戏已经开始',
+  NotStarted: '游戏还没开始',
+  Spectator: '观众不能操作',
+  RateLimited: '发言太快了',
+  InvalidSeat: '不能修改这个座位',
+};
+
 export function errorText(code: string): string {
-  return ERRORS[code as RuleError] ?? (code === 'Stale' ? '状态已更新，请重试' : code);
+  return ERRORS[code as RuleError] ?? SERVER_ERRORS[code] ?? code;
 }
 
 export function setText(set: ResourceSet): string {

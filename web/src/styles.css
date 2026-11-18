@@ -849,6 +849,169 @@ button.on {
   margin-left: auto;
 }
 
+/* ---------- online ---------- */
+
+input.grow,
+.invite input,
+.chat-form input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+input {
+  font: inherit;
+  color: var(--text);
+  background: var(--button);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--panel-border);
+}
+
+.lobby .tabs button {
+  flex: 1;
+}
+
+.seed.big {
+  font-size: 22px;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+}
+
+.invite {
+  display: flex;
+  gap: 8px;
+}
+
+.invite input {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.seats {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.seats li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.seats li.me {
+  outline: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.seat-label {
+  flex: 1;
+}
+
+.seg.small button {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.presence {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  line-height: 16px;
+}
+
+.presence.off {
+  color: var(--danger);
+}
+
+.presence.auto {
+  color: var(--accent);
+}
+
+.presence.bot {
+  color: var(--muted);
+}
+
+.room-tag {
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.banner {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--danger);
+  color: #fff;
+  padding: 6px 16px;
+  border-radius: 0 0 10px 10px;
+  z-index: 40;
+  font-size: 13px;
+}
+
+.log li.chat {
+  color: var(--text);
+}
+
+.log li.chat b {
+  font-weight: 600;
+}
+
+.chat-form {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+
+.chat-form input,
+.chat-form button {
+  font-size: 12.5px;
+  padding: 5px 8px;
+}
+
+.incoming {
+  position: absolute;
+  top: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 15;
+  min-width: 260px;
+  border-color: var(--accent);
+  animation: toast-in 0.2s ease-out;
+}
+
+.incoming p {
+  margin: 0;
+}
+
 /* ---------- small screens ---------- */
 
 @media (max-width: 860px) {

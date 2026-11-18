@@ -1,28 +1,63 @@
-import { createSignal, For } from 'solid-js';
+import { createSignal, For, Show } from 'solid-js';
 import type { BotKind } from '../engine';
-import type { GameOptions } from '../game/controller';
+import type { BotLevel } from '../generated/proto';
+import type { LocalOptions } from '../game/source';
+import { saveName, savedName } from '../net/connection';
 
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 
-export function Lobby(props: { onStart: (o: GameOptions) => void; seed: number; onSeed: (seed: number) => void; ready: boolean }) {
+export interface CreateRoom {
+  players: number;
+  bots: BotLevel;
+  name: string;
+}
+
+export function Lobby(props: {
+  ready: boolean;
+  seed: number;
+  onSeed: (seed: number) => void;
+  onStartLocal: (o: LocalOptions) => void;
+  onCreateRoom: (o: CreateRoom) => void;
+  onJoinRoom: (room: string) => void;
+}) {
+  const [tab, setTab] = createSignal<'local' | 'online'>('local');
   const [players, setPlayers] = createSignal(4);
   const [bot, setBot] = createSignal<BotKind>('greedy');
   const [seat, setSeat] = createSignal<'random' | number>('random');
   const [fast, setFast] = createSignal(false);
-  const reroll = () => props.onSeed(randomSeed());
+  const [name, setName] = createSignal(savedName());
+  const [code, setCode] = createSignal('');
 
-  const start = (spectate: boolean) => {
+  const startLocal = (spectate: boolean) => {
     const n = players();
     const s = seat();
     const humanSeat = spectate ? null : s === 'random' ? Math.floor(Math.random() * n) : Math.min(s, n - 1);
-    props.onStart({ players: n, humanSeat, bot: bot(), seed: props.seed, fast: fast() });
+    props.onStartLocal({ players: n, humanSeat, bot: bot(), seed: props.seed, fast: fast() });
   };
+
+  const createRoom = () => {
+    const n = name().trim() || '玩家';
+    saveName(n);
+    props.onCreateRoom({ players: players(), bots: bot() === 'greedy' ? 'Normal' : 'Easy', name: n });
+  };
+
+  // Accept a bare code or a pasted invite link.
+  const roomCode = () => (code().match(/#\/r\/([A-Za-z0-9]+)/)?.[1] ?? code()).trim().toUpperCase();
 
   return (
     <div class="lobby-wrap">
       <div class="panel lobby">
         <h1>Isle Settlers</h1>
         <p class="muted">在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。</p>
+
+        <div class="tabs">
+          <button classList={{ on: tab() === 'local' }} onClick={() => setTab('local')}>
+            单机 · 对战 AI
+          </button>
+          <button classList={{ on: tab() === 'online' }} onClick={() => setTab('online')}>
+            联机对战
+          </button>
+        </div>
 
         <div class="field">
           <span>人数</span>
@@ -47,49 +82,89 @@ export function Lobby(props: { onStart: (o: GameOptions) => void; seed: number; 
             </button>
           </div>
         </div>
-        <div class="field">
-          <span>你的座位</span>
-          <div class="seg">
-            <button classList={{ on: seat() === 'random' }} onClick={() => setSeat('random')}>
-              随机
-            </button>
-            <For each={[...Array(players()).keys()]}>
-              {(i) => (
-                <button classList={{ on: seat() === i }} onClick={() => setSeat(i)}>
-                  {i === 0 ? '先手' : `${i + 1} 号`}
-                </button>
-              )}
-            </For>
-          </div>
-        </div>
-        <div class="field">
-          <span>节奏</span>
-          <div class="seg">
-            <button classList={{ on: !fast() }} onClick={() => setFast(false)}>
-              正常
-            </button>
-            <button classList={{ on: fast() }} onClick={() => setFast(true)}>
-              快速
-            </button>
-          </div>
-        </div>
-        <div class="field">
-          <span>地图</span>
-          <div class="row">
-            <code class="seed">#{props.seed}</code>
-            <button onClick={reroll}>换一张</button>
-          </div>
-        </div>
 
-        <div class="row lobby-actions">
-          <button class="primary big" disabled={!props.ready} onClick={() => start(false)}>
-            开始游戏
-          </button>
-          <button disabled={!props.ready} onClick={() => start(true)}>
-            观战 AI 对局
-          </button>
-        </div>
-        <p class="muted small">联机对战（邀请链接）将在下个版本推出。</p>
+        <Show when={tab() === 'local'}>
+          <div class="field">
+            <span>你的座位</span>
+            <div class="seg">
+              <button classList={{ on: seat() === 'random' }} onClick={() => setSeat('random')}>
+                随机
+              </button>
+              <For each={[...Array(players()).keys()]}>
+                {(i) => (
+                  <button classList={{ on: seat() === i }} onClick={() => setSeat(i)}>
+                    {i === 0 ? '先手' : `${i + 1} 号`}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+          <div class="field">
+            <span>节奏</span>
+            <div class="seg">
+              <button classList={{ on: !fast() }} onClick={() => setFast(false)}>
+                正常
+              </button>
+              <button classList={{ on: fast() }} onClick={() => setFast(true)}>
+                快速
+              </button>
+            </div>
+          </div>
+          <div class="field">
+            <span>地图</span>
+            <div class="row">
+              <code class="seed">#{props.seed}</code>
+              <button onClick={() => props.onSeed(randomSeed())}>换一张</button>
+            </div>
+          </div>
+          <div class="row lobby-actions">
+            <button class="primary big" disabled={!props.ready} onClick={() => startLocal(false)}>
+              开始游戏
+            </button>
+            <button disabled={!props.ready} onClick={() => startLocal(true)}>
+              观战 AI 对局
+            </button>
+          </div>
+        </Show>
+
+        <Show when={tab() === 'online'}>
+          <div class="field">
+            <span>昵称</span>
+            <input
+              class="grow"
+              value={name()}
+              maxLength={16}
+              placeholder="你的名字"
+              onInput={(e) => setName(e.currentTarget.value)}
+              aria-label="昵称"
+            />
+          </div>
+          <p class="muted small">创建房间后把邀请链接发给朋友；没人坐的位置开局时由 AI 补上。</p>
+          <div class="row lobby-actions">
+            <button class="primary big" disabled={!props.ready} onClick={createRoom}>
+              创建房间
+            </button>
+          </div>
+          <div class="divider">或</div>
+          <form
+            class="row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (roomCode()) props.onJoinRoom(roomCode());
+            }}
+          >
+            <input
+              class="grow"
+              value={code()}
+              placeholder="房间码或邀请链接"
+              onInput={(e) => setCode(e.currentTarget.value)}
+              aria-label="房间码"
+            />
+            <button type="submit" disabled={!props.ready || !roomCode()}>
+              加入
+            </button>
+          </form>
+        </Show>
       </div>
     </div>
   );

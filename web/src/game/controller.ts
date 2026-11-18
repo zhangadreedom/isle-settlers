@@ -1,20 +1,12 @@
-// Game session: owns the WASM match, paces the bots, keeps the view/legal
-// actions in Solid signals and turns events into log lines and animations.
+// Game presentation: turns states from a GameSource (local WASM match or the
+// online server) into Solid signals, log lines, highlights and animations.
 
 import { batch, createSignal } from 'solid-js';
 import type { BoardRenderer, BoardData, Highlights, PickKind } from '../board/BoardRenderer';
-import { EngineError, Match, type BotKind, type LegalActions, type Topology } from '../engine';
-import type { Action, BoardInfo, Event, PlayerView, ResourceSet } from '../generated/proto';
+import type { Topology } from '../engine';
+import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, ResourceSet } from '../generated/proto';
+import type { GameSource, SourceState } from './source';
 import { RESOURCES, describe, errorText } from './text';
-
-export interface GameOptions {
-  players: number;
-  /** Human seat, or null to watch bots play. */
-  humanSeat: number | null;
-  bot: BotKind;
-  seed: number;
-  fast: boolean;
-}
 
 export type BuildMode = 'road' | 'settlement' | 'city' | null;
 
@@ -22,6 +14,8 @@ export interface LogEntry {
   id: number;
   text: string;
   seat: number | null;
+  /** Chat lines are shown with the sender's name. */
+  chat?: { name: string };
 }
 
 /** A resource chip flying from the board to a seat's panel. */
@@ -45,16 +39,14 @@ export function boardData(info: BoardInfo): BoardData {
 
 const sameSet = (a: ResourceSet, b: ResourceSet) => a.every((x, i) => x === b[i]);
 
-export function createGame(opts: GameOptions, renderer: BoardRenderer, topology: Topology) {
-  const match = new Match(opts.players, opts.seed, opts.humanSeat, opts.bot);
-  const board = boardData(match.board);
-  const me = opts.humanSeat;
+export function createGame(source: GameSource, renderer: BoardRenderer, topology: Topology) {
+  const board = boardData(source.board);
+  const me = source.me;
 
-  const [view, setView] = createSignal<PlayerView>(match.view());
-  const [legal, setLegal] = createSignal<LegalActions>(match.legal());
+  const [view, setView] = createSignal<PlayerView | null>(null);
+  const [legal, setLegal] = createSignal<LegalActions>({ version: 0, actions: [] });
   const [log, setLog] = createSignal<LogEntry[]>([]);
   const [mode, setModeSignal] = createSignal<BuildMode>(null);
-  const [thinking, setThinking] = createSignal(-1);
   const [toast, setToast] = createSignal<string | null>(null);
   const [dice, setDice] = createSignal<{ values: [number, number]; key: number } | null>(null);
   const [flights, setFlights] = createSignal<Flight[]>([]);
@@ -62,11 +54,10 @@ export function createGame(opts: GameOptions, renderer: BoardRenderer, topology:
 
   let logId = 0;
   let flightId = 0;
-  let timer: number | undefined;
   let toastTimer: number | undefined;
   let disposed = false;
 
-  const name = (seat: number) => (seat === me ? '你' : `AI ${seat + 1}`);
+  const name = (seat: number) => (seat === me ? '你' : source.seat(seat).name);
   const actions = () => legal().actions;
   const has = (type: Action['type']) => actions().some((a) => a.type === type);
 
@@ -75,19 +66,22 @@ export function createGame(opts: GameOptions, renderer: BoardRenderer, topology:
 
   // ---- state sync ----
 
-  function refresh(animate = true) {
+  function onState(s: SourceState) {
     if (disposed) return;
-    const v = match.view();
-    const l = match.legal();
+    if (s.resync) {
+      setLog([]);
+      if (s.log?.length) handleEvents(s.log, s.view, false);
+    } else {
+      handleEvents(s.events, view() ?? s.view, true);
+    }
     batch(() => {
-      setView(v);
-      setLegal(l);
-      if (mode() && !modeAvailable(mode(), l.actions)) setModeSignal(null);
-      if (v.phase.type !== 'MoveRobber') setVictimChoice(null);
+      setView(s.view);
+      setLegal(s.legal);
+      if (mode() && !modeAvailable(mode(), s.legal.actions)) setModeSignal(null);
+      if (s.view.phase.type !== 'MoveRobber') setVictimChoice(null);
     });
-    renderer.setPieces({ buildings: v.buildings, roads: v.roads, robber: v.robber }, animate);
+    renderer.setPieces({ buildings: s.view.buildings, roads: s.view.roads, robber: s.view.robber }, !s.resync);
     renderer.setHighlights(highlights());
-    scheduleBot();
   }
 
   function modeAvailable(m: BuildMode, list: Action[]) {
@@ -98,7 +92,7 @@ export function createGame(opts: GameOptions, renderer: BoardRenderer, topology:
   function highlights(): Highlights | null {
     const v = view();
     const list = actions();
-    if (!list.length) return null;
+    if (!v || !list.length) return null;
     const ids = (type: 'BuildRoad' | 'BuildSettlement' | 'BuildCity') =>
       list.flatMap((a) => (a.type === type ? [a.value] : []));
     switch (v.phase.type) {
@@ -120,65 +114,25 @@ export function createGame(opts: GameOptions, renderer: BoardRenderer, topology:
     }
   }
 
-  // ---- bots ----
-
-  function botDelay(): number {
-    const v = view();
-    let ms = 650;
-    if (v.phase.type === 'SetupSettlement' || v.phase.type === 'SetupRoad') ms = 450;
-    else if (v.phase.type === 'PreRoll') ms = 750;
-    else if (v.phase.type === 'Discard') ms = 350;
-    else if (v.trade && v.current === me) ms = 700;
-    return opts.fast ? ms * 0.3 : ms;
-  }
-
-  function scheduleBot() {
-    if (timer !== undefined || disposed) return;
-    const seat = match.nextBot();
-    setThinking(seat);
-    if (seat < 0) return;
-    timer = window.setTimeout(() => {
-      timer = undefined;
-      if (disposed) return;
-      const step = match.stepBot();
-      if (step) handleEvents(step.events);
-      refresh();
-    }, botDelay());
-  }
-
   // ---- human actions ----
 
   function act(pred: (a: Action) => boolean): boolean {
-    const { version, actions: list } = legal();
-    const index = list.findIndex(pred);
-    if (index < 0) {
+    const l = legal();
+    const action = l.actions.find(pred);
+    if (!action) {
       showToast('现在不能这样做');
       return false;
     }
-    try {
-      handleEvents(match.apply(version, index));
-    } catch (e) {
-      showToast(e instanceof EngineError ? errorText(e.code) : String(e));
-      refresh();
-      return false;
-    }
-    refresh();
-    return true;
+    return source.play(action, l);
   }
 
   function proposeTrade(give: ResourceSet, get: ResourceSet): boolean {
-    try {
-      handleEvents(match.proposeTrade(give, get));
-    } catch (e) {
-      showToast(e instanceof EngineError ? errorText(e.code) : String(e));
-      return false;
-    }
-    refresh();
-    return true;
+    return source.play({ type: 'ProposeTrade', value: { give, get } }, legal());
   }
 
   function onPick(kind: PickKind, id: number) {
     const v = view();
+    if (!v) return;
     if (kind === 'tile') {
       const options = actions().flatMap((a) => (a.type === 'MoveRobber' && a.value.tile === id ? [a.value.victim] : []));
       const victims = options.filter((x): x is number => x !== null);
@@ -201,8 +155,7 @@ export function createGame(opts: GameOptions, renderer: BoardRenderer, topology:
 
   // ---- events, log, animations ----
 
-  function handleEvents(events: Event[]) {
-    const v = view();
+  function handleEvents(events: Event[], v: PlayerView, animate: boolean) {
     const lines: LogEntry[] = [];
     let lastSettlement = -1;
     for (const e of events) {
@@ -216,17 +169,23 @@ export function createGame(opts: GameOptions, renderer: BoardRenderer, topology:
         case 'SettlementBuilt':
           lastSettlement = e.value.vertex;
           break;
-        case 'ResourcesProduced': {
-          const sum = (dice()?.values ?? [0, 0]).reduce((a, b) => a + b, 0);
-          launchProduction(e.value.player, e.value.resources, sum, v);
+        case 'ResourcesProduced':
+          if (animate) {
+            const sum = (dice()?.values ?? [0, 0]).reduce((a, b) => a + b, 0);
+            launchProduction(e.value.player, e.value.resources, sum, v);
+          }
           break;
-        }
         case 'StartingResources':
-          if (lastSettlement >= 0) launchFrom(e.value.player, e.value.resources, tilesAround(lastSettlement));
+          if (animate && lastSettlement >= 0) launchFrom(e.value.player, e.value.resources, tilesAround(lastSettlement));
           break;
       }
     }
-    if (lines.length) setLog((old) => [...old, ...lines].slice(-80));
+    if (lines.length) setLog((old) => [...old, ...lines].slice(-100));
+  }
+
+  function onChat(line: ChatLine) {
+    const who = line.seat === me && me !== null ? '你' : line.name;
+    setLog((old) => [...old, { id: ++logId, text: line.text, seat: line.seat, chat: { name: who } }].slice(-100));
   }
 
   function tilesAround(vertex: number): number[] {
@@ -271,24 +230,29 @@ export function createGame(opts: GameOptions, renderer: BoardRenderer, topology:
 
   function dispose() {
     disposed = true;
-    window.clearTimeout(timer);
     window.clearTimeout(toastTimer);
     renderer.onPick = undefined;
     renderer.setHighlights(null);
-    match.free();
+    source.dispose();
   }
 
-  refresh(false);
+  source.start({
+    state: onState,
+    error: (code) => showToast(errorText(code)),
+    chat: onChat,
+  });
 
   return {
-    options: opts,
     board,
     me,
-    view,
+    online: source.online,
+    /** Current view (always set once the source has started). */
+    view: () => view()!,
     legal,
     log,
     mode,
-    thinking,
+    thinking: () => source.thinking(),
+    seat: (s: number) => source.seat(s),
     toast,
     dice,
     flights,
@@ -298,6 +262,7 @@ export function createGame(opts: GameOptions, renderer: BoardRenderer, topology:
     act,
     proposeTrade,
     setMode,
+    chat: source.chat ? (text: string) => source.chat!(text) : undefined,
     clearVictimChoice: () => setVictimChoice(null),
     showToast,
     dispose,

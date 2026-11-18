@@ -269,7 +269,7 @@ export function TradeModal(props: { game: Game; onClose: () => void }) {
   );
 }
 
-export function GameOverModal(props: { game: Game; onAgain: () => void; onLobby: () => void }) {
+export function GameOverModal(props: { game: Game; onAgain?: () => void; onLobby: () => void }) {
   const g = props.game;
   const ranking = () =>
     g
@@ -291,10 +291,65 @@ export function GameOverModal(props: { game: Game; onAgain: () => void; onLobby:
       <p class="muted">共 {g.view().turn} 个回合</p>
       <footer>
         <button onClick={props.onLobby}>返回大厅</button>
-        <button class="primary" onClick={props.onAgain}>
-          再来一局
-        </button>
+        <Show when={props.onAgain}>
+          {(again) => (
+            <button class="primary" onClick={() => again()()}>
+              再来一局
+            </button>
+          )}
+        </Show>
       </footer>
     </Modal>
+  );
+}
+
+/** An offer from another player, shown to everyone else while it is open. */
+export function IncomingTrade(props: { game: Game }) {
+  const g = props.game;
+  const offer = () => {
+    const v = g.view();
+    return g.me !== null && v.trade && v.current !== g.me ? v.trade : null;
+  };
+  const canAccept = () => g.legal().actions.some((a) => a.type === 'RespondTrade' && a.value.accept);
+  return (
+    <Show when={offer()}>
+      {(o) => {
+        const response = () => o().responses[g.me!];
+        const from = () => g.view().current;
+        return (
+          <div class="panel incoming" role="dialog" aria-label="交易报价">
+            <p>
+              <SeatDot seat={from()} /> <b>{g.name(from())}</b> 想和你交易
+            </p>
+            <p class="offer">
+              你得到 <SetView set={o().give} />，你给出 <SetView set={o().get} />
+            </p>
+            <Show
+              when={response() === 'Pending'}
+              fallback={
+                <div class="row">
+                  <span class="muted">{response() === 'Accepted' ? '你已接受，等待对方确认' : '你已拒绝'}</span>
+                  <Show when={response() === 'Accepted'}>
+                    <button onClick={() => g.act((a) => a.type === 'RespondTrade' && !a.value.accept)}>撤销</button>
+                  </Show>
+                </div>
+              }
+            >
+              <div class="row">
+                <button
+                  class="primary"
+                  disabled={!canAccept()}
+                  title={canAccept() ? '' : '你没有足够的牌'}
+                  onClick={() => g.act((a) => a.type === 'RespondTrade' && a.value.accept)}
+                >
+                  接受
+                </button>
+                <button onClick={() => g.act((a) => a.type === 'RespondTrade' && !a.value.accept)}>拒绝</button>
+              </div>
+            </Show>
+          </div>
+        );
+      }}
+    </Show>
   );
 }
