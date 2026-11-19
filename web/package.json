@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:embed": "tsc --noEmit && VITE_EMBED=1 vite build --base ./ --outDir dist-embed",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -7,6 +7,7 @@ import { JoinPrompt, RoomLobby } from './components/Room';
 import { EngineError, loadEngine, Match, Replay, topology } from './engine';
 import { boardData, createGame, type Game } from './game/controller';
 import { createLocalSource, createOnlineSource, createReplaySource, replayUrl, type LocalOptions } from './game/source';
+import { EMBEDDED } from './embed';
 import { errorText } from './game/text';
 import type { DevCard, ReplayRecord } from './generated/proto';
 import { createConnection, savedName, savedToken, type Connection } from './net/connection';
@@ -74,7 +75,7 @@ export default function App() {
       setStatus('加载 3D 场景…');
       // Three.js lives in its own chunk, loaded after the lobby is on screen.
       const { BoardRenderer } = await import('./board/BoardRenderer');
-      const r = await BoardRenderer.create(stage, params.get('renderer') === 'webgl');
+      const r = await BoardRenderer.create(stage, EMBEDDED || params.get('renderer') === 'webgl');
       r.onBackendChange = setBackend;
       setBackend(r.backend);
       setRenderer(r);

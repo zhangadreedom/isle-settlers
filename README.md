@@ -106,6 +106,12 @@ node web/e2e/play-through.cjs
 
 在浏览器 URL 后加 `?renderer=webgl` 可以强制使用 WebGL2；加 `?debug` 会暴露测试钩子 `window.__isle`。
 
+只要单机版、不需要服务器时，可以构建一个可放在任意静态托管或沙箱网页里的版本（资源用相对路径，隐藏联机和下载按钮，固定使用 WebGL2），输出到 `web/dist-embed`：
+
+```bash
+pnpm build:wasm && pnpm --filter @isle/web build:embed
+```
+
 ## 联机对战
 
 服务器只有一个二进制，同时提供前端静态文件（默认 `web/dist`）和 `/api/ws` 游戏协议：

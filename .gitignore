@@ -4,6 +4,7 @@
 # Node / web
 node_modules/
 web/dist/
+web/dist-embed/
 web/src/wasm/
 
 # Editors / OS

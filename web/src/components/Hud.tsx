@@ -1,5 +1,6 @@
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import type { Game } from '../game/controller';
+import { EMBEDDED } from '../embed';
 import type { ReplayControls } from '../game/source';
 import { BOT_LEVEL_NAME, COSTS, DEV_CARDS, DEV_HELP, DEV_NAME, RESOURCES, RESOURCE_CSS, RESOURCE_SHORT } from '../game/text';
 import type { DevCard } from '../generated/proto';
@@ -407,7 +408,9 @@ export function ReplayBar(props: { game: Game; replay: ReplayControls }) {
             </button>
           )}
         </Show>
-        <button onClick={() => downloadReplay(r.record)}>下载</button>
+        <Show when={!EMBEDDED}>
+          <button onClick={() => downloadReplay(r.record)}>下载</button>
+        </Show>
       </div>
     </div>
   );

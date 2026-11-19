@@ -3,6 +3,7 @@ import type { Game } from '../game/controller';
 import type { ReplayRecord, ResourceSet, TradeResponse } from '../generated/proto';
 import { RESOURCES, RESOURCE_NAME, setTotal } from '../game/text';
 import { Modal, ResIcon, SeatDot, SetView, Stepper } from './bits';
+import { EMBEDDED } from '../embed';
 import { downloadReplay } from './Hud';
 
 const empty = (): ResourceSet => [0, 0, 0, 0, 0];
@@ -318,9 +319,11 @@ export function GameOverModal(props: {
                   </button>
                 )}
               </Show>
-              <button disabled={busy()} onClick={() => void withRecord(downloadReplay)}>
-                下载回放
-              </button>
+              <Show when={!EMBEDDED}>
+                <button disabled={busy()} onClick={() => void withRecord(downloadReplay)}>
+                  下载回放
+                </button>
+              </Show>
             </div>
           );
         }}

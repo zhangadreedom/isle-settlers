@@ -1,4 +1,5 @@
 import { createSignal, For, Show } from 'solid-js';
+import { EMBEDDED } from '../embed';
 import type { BotKind } from '../engine';
 import type { BotLevel } from '../generated/proto';
 import type { LocalOptions } from '../game/source';
@@ -55,14 +56,16 @@ export function Lobby(props: {
         <h1>Isle Settlers</h1>
         <p class="muted">在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，每回合结束后其他人可以特殊建造。</p>
 
-        <div class="tabs">
-          <button classList={{ on: tab() === 'local' }} onClick={() => setTab('local')}>
-            单机 · 对战 AI
-          </button>
-          <button classList={{ on: tab() === 'online' }} onClick={() => setTab('online')}>
-            联机对战
-          </button>
-        </div>
+        <Show when={!EMBEDDED}>
+          <div class="tabs">
+            <button classList={{ on: tab() === 'local' }} onClick={() => setTab('local')}>
+              单机 · 对战 AI
+            </button>
+            <button classList={{ on: tab() === 'online' }} onClick={() => setTab('online')}>
+              联机对战
+            </button>
+          </div>
+        </Show>
 
         <div class="field">
           <span>人数</span>
