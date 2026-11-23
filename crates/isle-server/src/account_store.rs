@@ -51,7 +51,10 @@ const SCHEMA: &str = "
 CREATE TABLE accounts (
     id            INTEGER PRIMARY KEY,
     username      TEXT    NOT NULL UNIQUE COLLATE NOCASE
-                  CHECK (length(username) BETWEEN 1 AND 32 AND username = lower(username)),
+                  -- The column's NOCASE collation would make this check
+                  -- always true, so it compares bytes explicitly.
+                  CHECK (length(username) BETWEEN 1 AND 32
+                         AND username = lower(username) COLLATE BINARY),
     password_hash TEXT    NOT NULL CHECK (password_hash LIKE '$argon2id$%'),
     created_at    INTEGER NOT NULL
 ) STRICT;
@@ -378,7 +381,11 @@ impl AccountStore {
         }
     }
 
-    fn create_session_at(&self, account: Account, now: i64) -> Result<NewSession, AccountStoreError> {
+    fn create_session_at(
+        &self,
+        account: Account,
+        now: i64,
+    ) -> Result<NewSession, AccountStoreError> {
         let mut raw = [0u8; TOKEN_BYTES];
         getrandom::fill(&mut raw).map_err(|_| AccountStoreError::Rng)?;
         let token_hash = hash_token(&raw);
@@ -660,7 +667,8 @@ mod tests {
     /// Minimal-cost Argon2id so tests stay fast.
     fn cheap_hash(password: &str) -> Result<String, CredentialError> {
         let params = argon2::Params::new(8, 1, 1, None).expect("params");
-        let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+        let argon =
+            argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         accounts::hash_with(&argon, password)
     }
 
@@ -750,7 +758,10 @@ mod tests {
             store.register("  ALICE ", "another password"),
             Err(AccountStoreError::UsernameTaken)
         ));
-        assert_eq!(store.login("aLiCe", PW).expect("login").session.account, account);
+        assert_eq!(
+            store.login("aLiCe", PW).expect("login").session.account,
+            account
+        );
         assert_eq!(store.find_account("ALICE").expect("find"), Some(account));
         assert_eq!(store.find_account("bob").expect("find"), None);
         assert_eq!(store.find_account("not valid!").expect("find"), None);
@@ -766,7 +777,9 @@ mod tests {
         ));
         assert!(matches!(
             store.register("bad name", PW),
-            Err(AccountStoreError::InvalidUsername(UsernameError::InvalidChar(' ')))
+            Err(AccountStoreError::InvalidUsername(
+                UsernameError::InvalidChar(' ')
+            ))
         ));
         assert!(matches!(
             store.register(&"a".repeat(33), PW),
@@ -778,14 +791,22 @@ mod tests {
     fn registration_validates_password_length_in_bytes() {
         let tmp = TempDir::new();
         let store = open(&tmp.0);
-        assert!(matches!(store.register("a", ""), Err(AccountStoreError::PasswordTooShort)));
+        assert!(matches!(
+            store.register("a", ""),
+            Err(AccountStoreError::PasswordTooShort)
+        ));
         assert!(matches!(
             store.register("a", "abcdefghijk"),
             Err(AccountStoreError::PasswordTooShort)
         ));
-        store.register("b", "abcdefghijkl").expect("12 bytes is enough");
+        store
+            .register("b", "abcdefghijkl")
+            .expect("12 bytes is enough");
         // 5 two-byte characters = 10 bytes; 6 = 12 bytes.
-        assert!(matches!(store.register("c", "ééééé"), Err(AccountStoreError::PasswordTooShort)));
+        assert!(matches!(
+            store.register("c", "ééééé"),
+            Err(AccountStoreError::PasswordTooShort)
+        ));
         store.register("d", "éééééé").expect("12 bytes is enough");
         assert!(matches!(
             store.register("e", &"x".repeat(MAX_PASSWORD_LEN + 1)),
@@ -809,7 +830,10 @@ mod tests {
             ("alice", &"x".repeat(MAX_PASSWORD_LEN + 1)),
         ] {
             assert!(
-                matches!(store.login(user, pw), Err(AccountStoreError::InvalidCredentials)),
+                matches!(
+                    store.login(user, pw),
+                    Err(AccountStoreError::InvalidCredentials)
+                ),
                 "{user:?}"
             );
         }
@@ -825,7 +849,11 @@ mod tests {
         let b = store.login("alice", PW).expect("login");
         for t in [&a.token, &b.token] {
             assert_eq!(t.expose().len(), TOKEN_BYTES * 2);
-            assert!(t.expose().bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')));
+            assert!(
+                t.expose()
+                    .bytes()
+                    .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+            );
             assert_eq!(format!("{t:?}"), "SessionToken(<redacted>)");
         }
         assert_ne!(a.token, b.token);
@@ -842,11 +870,22 @@ mod tests {
         let upper = good.to_ascii_uppercase();
         let long = format!("{good}0");
         let non_hex = format!("{}g", &good[..63]);
-        for bad in ["", "abc", &good[..63], long.as_str(), non_hex.as_str(), upper.as_str()] {
+        for bad in [
+            "",
+            "abc",
+            &good[..63],
+            long.as_str(),
+            non_hex.as_str(),
+            upper.as_str(),
+        ] {
             if bad == good {
                 continue; // a token without letters stays unchanged by uppercasing
             }
-            assert_eq!(store.validate_session(bad).expect("validate"), None, "{bad:?}");
+            assert_eq!(
+                store.validate_session(bad).expect("validate"),
+                None,
+                "{bad:?}"
+            );
             assert!(!store.logout(bad).expect("logout"), "{bad:?}");
         }
         assert!(store.validate_session(good).expect("validate").is_some());
@@ -860,9 +899,21 @@ mod tests {
         let a = store.login("alice", PW).expect("login");
         let b = store.login("alice", PW).expect("login");
         assert!(store.logout(a.token.expose()).expect("logout"));
-        assert_eq!(store.validate_session(a.token.expose()).expect("validate"), None);
-        assert!(store.validate_session(b.token.expose()).expect("validate").is_some());
-        assert!(!store.logout(a.token.expose()).expect("second logout is a no-op"));
+        assert_eq!(
+            store.validate_session(a.token.expose()).expect("validate"),
+            None
+        );
+        assert!(
+            store
+                .validate_session(b.token.expose())
+                .expect("validate")
+                .is_some()
+        );
+        assert!(
+            !store
+                .logout(a.token.expose())
+                .expect("second logout is a no-op")
+        );
     }
 
     #[test]
@@ -875,9 +926,20 @@ mod tests {
         let a2 = store.login("alice", PW).expect("login");
         let b = store.login("bob", PW).expect("login");
         assert_eq!(store.logout_all(alice.id).expect("logout all"), 2);
-        assert_eq!(store.validate_session(a1.token.expose()).expect("validate"), None);
-        assert_eq!(store.validate_session(a2.token.expose()).expect("validate"), None);
-        assert!(store.validate_session(b.token.expose()).expect("validate").is_some());
+        assert_eq!(
+            store.validate_session(a1.token.expose()).expect("validate"),
+            None
+        );
+        assert_eq!(
+            store.validate_session(a2.token.expose()).expect("validate"),
+            None
+        );
+        assert!(
+            store
+                .validate_session(b.token.expose())
+                .expect("validate")
+                .is_some()
+        );
     }
 
     #[test]
@@ -888,11 +950,22 @@ mod tests {
         let login = store.login_at("alice", PW, 1_000).expect("login");
         assert_eq!(login.session.expires_at, 1_060);
         let token = login.token.expose();
-        assert!(store.validate_session_at(token, 1_059).expect("validate").is_some());
-        assert_eq!(store.validate_session_at(token, 1_060).expect("validate"), None);
+        assert!(
+            store
+                .validate_session_at(token, 1_059)
+                .expect("validate")
+                .is_some()
+        );
+        assert_eq!(
+            store.validate_session_at(token, 1_060).expect("validate"),
+            None
+        );
         // The expired session was deleted, not just hidden.
         assert_eq!(session_count(&store), 0);
-        assert_eq!(store.validate_session_at(token, 1_000).expect("validate"), None);
+        assert_eq!(
+            store.validate_session_at(token, 1_000).expect("validate"),
+            None
+        );
     }
 
     #[test]
@@ -908,10 +981,12 @@ mod tests {
         assert_eq!(session_count(&store), 2);
         assert_eq!(store.purge_expired_at(1_090).expect("purge"), 1);
         assert_eq!(session_count(&store), 1);
-        assert!(store
-            .validate_session_at(late.token.expose(), 1_090)
-            .expect("validate")
-            .is_some());
+        assert!(
+            store
+                .validate_session_at(late.token.expose(), 1_090)
+                .expect("validate")
+                .is_some()
+        );
     }
 
     #[test]
@@ -919,7 +994,11 @@ mod tests {
         let tmp = TempDir::new();
         for ttl in [Duration::ZERO, MAX_SESSION_TTL + Duration::from_secs(1)] {
             assert!(matches!(
-                AccountStore::open_inner(&tmp.0, AccountStoreConfig { session_ttl: ttl }, cheap_hash),
+                AccountStore::open_inner(
+                    &tmp.0,
+                    AccountStoreConfig { session_ttl: ttl },
+                    cheap_hash
+                ),
                 Err(AccountStoreError::InvalidConfig(_))
             ));
         }
@@ -948,7 +1027,10 @@ mod tests {
         assert!(store.logout(token.expose()).expect("logout"));
         drop(store);
         let store = open(&tmp.0);
-        assert_eq!(store.validate_session(token.expose()).expect("validate"), None);
+        assert_eq!(
+            store.validate_session(token.expose()).expect("validate"),
+            None
+        );
     }
 
     #[test]
@@ -992,11 +1074,17 @@ mod tests {
         let path = tmp.0.join(DB_FILE_NAME);
         let garbage = b"this is definitely not an sqlite database; keep me".to_vec();
         std::fs::write(&path, &garbage).expect("write");
-        assert!(matches!(try_open(&tmp.0), Err(AccountStoreError::Corrupt(_))));
+        assert!(matches!(
+            try_open(&tmp.0),
+            Err(AccountStoreError::Corrupt(_))
+        ));
         assert_eq!(std::fs::read(&path).expect("read"), garbage);
 
         std::fs::write(&path, b"SQLite").expect("write");
-        assert!(matches!(try_open(&tmp.0), Err(AccountStoreError::Corrupt(_))));
+        assert!(matches!(
+            try_open(&tmp.0),
+            Err(AccountStoreError::Corrupt(_))
+        ));
         assert_eq!(std::fs::read(&path).expect("read"), b"SQLite");
     }
 
@@ -1007,7 +1095,10 @@ mod tests {
         let mut damaged = SQLITE_HEADER.to_vec();
         damaged.extend(std::iter::repeat_n(0xFF, 4096 - 16));
         std::fs::write(&path, &damaged).expect("write");
-        assert!(matches!(try_open(&tmp.0), Err(AccountStoreError::Corrupt(_))));
+        assert!(matches!(
+            try_open(&tmp.0),
+            Err(AccountStoreError::Corrupt(_))
+        ));
         assert_eq!(std::fs::read(&path).expect("read"), damaged);
     }
 
@@ -1015,7 +1106,10 @@ mod tests {
     fn refuses_directory_in_place_of_database() {
         let tmp = TempDir::new();
         std::fs::create_dir(tmp.0.join(DB_FILE_NAME)).expect("mkdir");
-        assert!(matches!(try_open(&tmp.0), Err(AccountStoreError::Corrupt(_))));
+        assert!(matches!(
+            try_open(&tmp.0),
+            Err(AccountStoreError::Corrupt(_))
+        ));
     }
 
     #[test]
@@ -1027,7 +1121,10 @@ mod tests {
             conn.execute_batch("CREATE TABLE other (x INTEGER); INSERT INTO other VALUES (42);")
                 .expect("create");
         }
-        assert!(matches!(try_open(&tmp.0), Err(AccountStoreError::Incompatible(_))));
+        assert!(matches!(
+            try_open(&tmp.0),
+            Err(AccountStoreError::Incompatible(_))
+        ));
         let conn = Connection::open(&path).expect("open");
         let x: i64 = conn
             .query_row("SELECT x FROM other", [], |r| r.get(0))
@@ -1041,9 +1138,13 @@ mod tests {
         open(&tmp.0).register("alice", PW).expect("register");
         {
             let conn = Connection::open(tmp.0.join(DB_FILE_NAME)).expect("open");
-            conn.execute_batch("PRAGMA user_version = 99;").expect("bump version");
+            conn.execute_batch("PRAGMA user_version = 99;")
+                .expect("bump version");
         }
-        assert!(matches!(try_open(&tmp.0), Err(AccountStoreError::Incompatible(_))));
+        assert!(matches!(
+            try_open(&tmp.0),
+            Err(AccountStoreError::Incompatible(_))
+        ));
         let conn = Connection::open(tmp.0.join(DB_FILE_NAME)).expect("open");
         let n: i64 = conn
             .query_row("SELECT count(*) FROM accounts", [], |r| r.get(0))
@@ -1059,7 +1160,10 @@ mod tests {
             let conn = Connection::open(tmp.0.join(DB_FILE_NAME)).expect("open");
             conn.execute_batch("DROP TABLE sessions;").expect("drop");
         }
-        assert!(matches!(try_open(&tmp.0), Err(AccountStoreError::Corrupt(_))));
+        assert!(matches!(
+            try_open(&tmp.0),
+            Err(AccountStoreError::Corrupt(_))
+        ));
     }
 
     #[test]
@@ -1069,9 +1173,15 @@ mod tests {
         store.register("alice", PW).expect("register");
         store
             .lock()
-            .execute("UPDATE accounts SET password_hash = '$argon2id$garbage'", [])
+            .execute(
+                "UPDATE accounts SET password_hash = '$argon2id$garbage'",
+                [],
+            )
             .expect("update");
-        assert!(matches!(store.login("alice", PW), Err(AccountStoreError::Corrupt(_))));
+        assert!(matches!(
+            store.login("alice", PW),
+            Err(AccountStoreError::Corrupt(_))
+        ));
         assert_eq!(session_count(&store), 0);
     }
 

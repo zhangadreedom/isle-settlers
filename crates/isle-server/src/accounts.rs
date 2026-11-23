@@ -122,6 +122,11 @@ pub fn verify_password(password: &str, stored: &str) -> Result<bool, CredentialE
     if parsed.algorithm.as_str() != "argon2id" {
         return Err(CredentialError::UnsupportedAlgorithm);
     }
+    // `$argon2id$xyz` parses with `xyz` as the salt and no output; the
+    // verifier would report that as a wrong password rather than damage.
+    if parsed.salt.is_none() || parsed.hash.is_none() {
+        return Err(CredentialError::Hash(password_hash::Error::PhcStringField));
+    }
     if password.is_empty() || password.len() > MAX_PASSWORD_LEN {
         // Such passwords can never have been hashed.
         return Ok(false);
@@ -147,7 +152,10 @@ mod tests {
     #[test]
     fn normalize_lowercases() {
         assert_eq!(normalize_username("Alice_01").as_deref(), Ok("alice_01"));
-        assert_eq!(normalize_username("bob-THE-builder").as_deref(), Ok("bob-the-builder"));
+        assert_eq!(
+            normalize_username("bob-THE-builder").as_deref(),
+            Ok("bob-the-builder")
+        );
     }
 
     #[test]
@@ -177,19 +185,37 @@ mod tests {
 
     #[test]
     fn normalize_rejects_invalid_chars() {
-        assert_eq!(normalize_username("al ice"), Err(UsernameError::InvalidChar(' ')));
-        assert_eq!(normalize_username("bob!"), Err(UsernameError::InvalidChar('!')));
-        assert_eq!(normalize_username("zoë"), Err(UsernameError::InvalidChar('ë')));
+        assert_eq!(
+            normalize_username("al ice"),
+            Err(UsernameError::InvalidChar(' '))
+        );
+        assert_eq!(
+            normalize_username("bob!"),
+            Err(UsernameError::InvalidChar('!'))
+        );
+        assert_eq!(
+            normalize_username("zoë"),
+            Err(UsernameError::InvalidChar('ë'))
+        );
         // Non-ASCII letters that lowercase/uppercase to ASCII are still rejected.
-        assert_eq!(normalize_username("\u{212A}im"), Err(UsernameError::InvalidChar('\u{212A}')));
+        assert_eq!(
+            normalize_username("\u{212A}im"),
+            Err(UsernameError::InvalidChar('\u{212A}'))
+        );
     }
 
     #[test]
     fn hash_and_verify_with_default_params() {
         let hash = hash_password("correct horse battery staple").expect("hash");
         assert!(hash.starts_with("$argon2id$v=19$"));
-        assert_eq!(verify_password("correct horse battery staple", &hash), Ok(true));
-        assert_eq!(verify_password("Correct horse battery staple", &hash), Ok(false));
+        assert_eq!(
+            verify_password("correct horse battery staple", &hash),
+            Ok(true)
+        );
+        assert_eq!(
+            verify_password("Correct horse battery staple", &hash),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -224,6 +250,19 @@ mod tests {
             verify_password("pw", "not a hash"),
             Err(CredentialError::Hash(_))
         ));
+    }
+
+    #[test]
+    fn hash_without_salt_or_output_is_error() {
+        let hash = hash_with(&cheap(Algorithm::Argon2id), "pw").expect("hash");
+        let without_output = &hash[..hash.rfind('$').unwrap()];
+        let without_salt = &without_output[..without_output.rfind('$').unwrap()];
+        for stored in [without_output, without_salt, "$argon2id$garbage"] {
+            assert!(
+                matches!(verify_password("pw", stored), Err(CredentialError::Hash(_))),
+                "{stored}"
+            );
+        }
     }
 
     #[test]
