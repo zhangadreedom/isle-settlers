@@ -3,9 +3,10 @@
   "private": true,
   "packageManager": "pnpm@10.28.0",
   "scripts": {
-    "build:wasm": "bash scripts/build-wasm.sh",
+    "build:wasm": "node scripts/build-wasm.mjs",
     "dev": "pnpm build:wasm && pnpm --filter @isle/web dev",
     "build": "pnpm build:wasm && pnpm --filter @isle/web build",
+    "build:embed": "pnpm build:wasm && pnpm --filter @isle/web build:embed",
     "preview": "pnpm --filter @isle/web preview",
     "test": "cargo test --workspace",
     "bench": "cargo run --release -p isle-sim --"

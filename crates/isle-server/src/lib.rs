@@ -9,6 +9,8 @@
 //! log and rebuilt by replay. Finished games are kept as replays, served at
 //! `/api/replays/{id}`.
 
+pub mod account_store;
+pub mod accounts;
 mod registry;
 mod room;
 mod store;

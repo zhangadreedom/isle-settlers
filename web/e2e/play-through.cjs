@@ -7,7 +7,8 @@
 //
 // Env: E2E_URL (default http://localhost:4173/), E2E_AI=困难 (difficulty), BUILD_ONLY=1 (never trade
 // with players or buy cards; exercises building), E2E_PLAYERS=2..6 (default 4; 5-6 use the
-// extended island and the special building phase), TRACE=1.
+// extended island and the special building phase), TRACE=1. E2E_EMBED=1
+// targets the static embedded build, which can watch but not download replays.
 //
 // After the game it opens the replay from the game-over dialog, scrubs and
 // switches perspective, downloads the replay file and loads it back from the lobby.
@@ -17,7 +18,8 @@ const path = require('path');
 const fs = require('fs');
 const OUT = process.argv[2] || path.join(__dirname, 'out');
 fs.mkdirSync(OUT, { recursive: true });
-const URL = (process.env.E2E_URL || 'http://localhost:4173/') + '?debug&renderer=webgl';
+const EMBED = process.env.E2E_EMBED === '1';
+const URL = (process.env.E2E_URL || 'http://localhost:4173/') + (EMBED ? '?debug' : '?debug&renderer=webgl');
 const BUILD_ONLY = !!process.env.BUILD_ONLY;
 const PLAYERS = Number(process.env.E2E_PLAYERS || 4);
 const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
@@ -31,6 +33,9 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
 
   await page.goto(URL);
   await page.waitForSelector('text=开始游戏');
+  if (EMBED && await page.getByRole('button', { name: '联机对战', exact: true }).count()) {
+    throw new Error('embedded lobby exposes online play');
+  }
   await page.waitForFunction(() => !document.querySelector('.lobby button.primary')?.disabled);
   await page.click(`.seg >> text=${PLAYERS} 人`);
   await page.waitForTimeout(300);
@@ -279,6 +284,7 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
   }
 
   const final = await state();
+  if (final?.view.winner == null) await fail(new Error('match did not reach a winner before the deadline'));
   await page.waitForTimeout(800);
   await page.screenshot({ path: `${OUT}/p1-${P}gameover.png` });
   console.log('winner:', final.view.winner, 'me:', final.view.me.seat, 'turn:', final.view.turn, 'points:', JSON.stringify(final.view.finalPoints));
@@ -287,12 +293,17 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
   if (PLAYERS > 4 && stats.specialPasses + stats.specialBuilds === 0) errors.push('never saw a special building phase');
 
   // ---- replay ----
-  const [download] = await Promise.all([page.waitForEvent('download'), page.click('.modal >> text=下载回放')]);
   const file = path.join(OUT, `replay-${P}game.json`);
-  await download.saveAs(file);
-  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
-  console.log('replay file:', fs.statSync(file).size, 'bytes,', record.players.length, 'players, winner', record.winner);
-  if (record.winner !== final.view.winner) errors.push('replay winner differs');
+  if (EMBED) {
+    await page.locator('.modal').getByRole('button', { name: '观看回放', exact: true }).waitFor();
+    if (await page.getByRole('button', { name: '下载回放', exact: true }).count()) errors.push('embedded game exposes replay download');
+  } else {
+    const [download] = await Promise.all([page.waitForEvent('download'), page.click('.modal >> text=下载回放')]);
+    await download.saveAs(file);
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    console.log('replay file:', fs.statSync(file).size, 'bytes,', record.players.length, 'players, winner', record.winner);
+    if (record.winner !== final.view.winner) errors.push('replay winner differs');
+  }
   await page.click('.modal >> text=观看回放');
   await page.waitForSelector('.replay-bar');
   const total = await page.evaluate(() => window.__isle.game().replay.length);
@@ -318,11 +329,26 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
 
   // Load the downloaded file from the lobby.
   await page.click('text=← 大厅');
-  await page.setInputFiles('.file-link input', file);
+  if (!EMBED) {
+    await page.setInputFiles('.file-link input', file);
+    await page.waitForSelector('.replay-bar');
+    const loaded = await page.evaluate(() => window.__isle.game().replay.length);
+    if (loaded !== total) errors.push(`loaded replay has ${loaded} actions, expected ${total}`);
+    await page.click('text=← 大厅');
+  }
+
+  // The finished local match survives reload without downloading a file.
+  await page.reload();
+  await page.getByText('本机回放', { exact: true }).click({ timeout: 8000 });
+  const search = page.getByRole('searchbox', { name: '搜索回放' });
+  await search.fill('no-such-replay');
+  await page.getByText('没有匹配的回放', { exact: true }).waitFor();
+  await search.fill(`${PLAYERS} 人`);
+  await page.getByRole('button', { name: '打开本机回放' }).click();
   await page.waitForSelector('.replay-bar');
-  const loaded = await page.evaluate(() => window.__isle.game().replay.length);
-  if (loaded !== total) errors.push(`loaded replay has ${loaded} actions, expected ${total}`);
-  await page.click('text=← 大厅');
+  const savedLength = await page.evaluate(() => window.__isle.game().replay.length);
+  if (savedLength !== total) errors.push(`saved replay has ${savedLength} actions, expected ${total}`);
+  console.log('local replay history: reload/search/open ok');
 
   const mobile = await browser.newPage({ ...devices['iPhone 13'] });
   mobile.on('pageerror', (e) => errors.push(`mobile pageerror: ${e.message}`));

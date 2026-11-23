@@ -9,6 +9,7 @@ import { boardData, createGame, type Game } from './game/controller';
 import { createLocalSource, createOnlineSource, createReplaySource, replayUrl, type LocalOptions } from './game/source';
 import { EMBEDDED } from './embed';
 import { errorText } from './game/text';
+import { saveLocalReplay } from './game/replay-history';
 import type { DevCard, ReplayRecord } from './generated/proto';
 import { createConnection, savedName, savedToken, type Connection } from './net/connection';
 
@@ -121,7 +122,7 @@ export default function App() {
     game()?.dispose();
     setGame(null);
     setTradeOpen(false);
-    const source = await createLocalSource(o);
+    const source = await createLocalSource(o, saveLocalReplay);
     setGame(createGame(source, r));
   }
 

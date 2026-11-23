@@ -86,7 +86,7 @@ export interface LocalOptions {
  * replies arrive in request order and carry the full state, so applying
  * them as they come keeps everything consistent.
  */
-export async function createLocalSource(opts: LocalOptions): Promise<GameSource> {
+export async function createLocalSource(opts: LocalOptions, onFinished?: (record: ReplayRecord) => void): Promise<GameSource> {
   const worker = new WorkerMatch();
   const first = await worker.create(opts.players, opts.seed, opts.humanSeat, opts.bot);
   const [thinking, setThinking] = createSignal(-1);
@@ -96,10 +96,21 @@ export async function createLocalSource(opts: LocalOptions): Promise<GameSource>
   let humanBusy = false;
   let botBusy = false;
   let disposed = false;
+  let recorded = false;
+
+  function localRecord() {
+    const record = current.replay;
+    return record ? { ...record, players: record.players.map((p) => (p.bot ? p : { ...p, name: '玩家' })) } : null;
+  }
 
   function emit(state: MatchState, resync = false) {
     if (disposed || !handlers) return;
     current = state;
+    if (!recorded && state.replay && state.view.winner !== null) {
+      recorded = true;
+      const record = localRecord();
+      if (record) onFinished?.(record);
+    }
     handlers.state({ view: state.view, legal: state.legal, events: state.events, resync });
     schedule();
   }
@@ -173,9 +184,7 @@ export async function createLocalSource(opts: LocalOptions): Promise<GameSource>
       return true;
     },
     async exportReplay() {
-      const record = current.replay;
-      if (!record) return null;
-      return { ...record, players: record.players.map((p) => (p.bot ? p : { ...p, name: '玩家' })) };
+      return localRecord();
     },
     dispose() {
       disposed = true;

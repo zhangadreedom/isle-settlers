@@ -4,6 +4,7 @@ import type { BotKind } from '../engine';
 import type { BotLevel } from '../generated/proto';
 import type { LocalOptions } from '../game/source';
 import { saveName, savedName } from '../net/connection';
+import { ReplayHistory } from './ReplayHistory';
 
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 
@@ -149,6 +150,7 @@ export function Lobby(props: {
             />
             打开回放文件…
           </label>
+          <ReplayHistory ready={props.ready} onOpen={props.onOpenReplay} />
         </Show>
 
         <Show when={tab() === 'online'}>
