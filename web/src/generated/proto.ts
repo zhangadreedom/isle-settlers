@@ -61,7 +61,11 @@ numbers: Array<number>,
 /**
  * Harbor per harbor slot.
  */
-harbors: Array<HarborKind>, };
+harbors: Array<HarborKind>, 
+/**
+ * Island per tile: 0 for the sea, from 1 (the home island) on.
+ */
+islands: Array<number>, };
 
 export type PlayerPublic = { seat: number, resourceCount: number, 
 /**
@@ -71,9 +75,13 @@ devCardCount: number,
 /**
  * Development cards played face up, indexed by `DevCard`.
  */
-playedDevCards: [number, number, number, number, number], roadsLeft: number, settlementsLeft: number, citiesLeft: number, longestRoad: number, 
+playedDevCards: [number, number, number, number, number], roadsLeft: number, shipsLeft: number, settlementsLeft: number, citiesLeft: number, 
 /**
- * Points from buildings, longest road and largest army.
+ * Islands that earned the settling bonus (bit `i` = island `i`).
+ */
+islands: number, longestRoad: number, 
+/**
+ * Points from buildings, longest road, largest army and islands.
  */
 publicVictoryPoints: number, 
 /**
@@ -108,7 +116,15 @@ viewer: number | null, phase: Phase, current: number,
  * Seat expected to act next (during discards: lowest seat still owing;
  * during a special building phase: the builder).
  */
-toMove: number | null, turn: number, dice: [number, number] | null, devCardPlayed: boolean, robber: number, bank: ResourceSet, devDeckLen: number, 
+toMove: number | null, turn: number, dice: [number, number] | null, devCardPlayed: boolean, robber: number, 
+/**
+ * Seafaring: the pirate's sea tile.
+ */
+pirate: number | null, 
+/**
+ * Seafaring: the current player has moved a ship this turn.
+ */
+shipMoved: boolean, bank: ResourceSet, devDeckLen: number, 
 /**
  * Per vertex: `EMPTY`, owner seat, or owner | `CITY_FLAG`.
  */
@@ -116,11 +132,19 @@ buildings: Array<number>,
 /**
  * Per edge: `EMPTY` or owner seat.
  */
-roads: Array<number>, players: Array<PlayerPublic>, me: PrivateInfo | null, 
+roads: Array<number>, 
+/**
+ * Per edge: `EMPTY` or the owner of a ship there.
+ */
+ships: Array<number>, players: Array<PlayerPublic>, me: PrivateInfo | null, 
 /**
  * Cards each seat still has to discard after a 7.
  */
-pendingDiscard: Array<number>, trade: TradeOffer | null, longestRoadOwner: number | null, largestArmyOwner: number | null, winner: number | null, 
+pendingDiscard: Array<number>, 
+/**
+ * Gold picks each seat still has to make.
+ */
+pendingGold: Array<number>, trade: TradeOffer | null, longestRoadOwner: number | null, largestArmyOwner: number | null, winner: number | null, 
 /**
  * Total points per seat, revealed once the game is over.
  */
@@ -173,7 +197,7 @@ ranked: boolean,
 /**
  * Rating changes once a ranked game is over and rated.
  */
-rating: Array<RatingChange>, };
+rating: Array<RatingChange>, scenario: Scenario, };
 
 export type LegalActions = { version: number, actions: Array<Action>, };
 
@@ -199,7 +223,11 @@ export type ClientMsg = { "type": "Create", "value": { players: number, bots: Bo
 /**
  * Ranked room (see [`RoomInfo::ranked`]).
  */
-ranked: boolean, session?: string | null, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, session?: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "SetRanked", "value": { ranked: boolean, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
+ranked: boolean, 
+/**
+ * Classic or a seafaring map (2–4 seats); absent means classic.
+ */
+scenario: Scenario, session?: string | null, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, session?: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "SetRanked", "value": { ranked: boolean, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
 
 export type ServerMsg = { "type": "Joined", "value": { room: string, seat: number | null, token: string | null, } } | { "type": "Room", "value": RoomInfo } | { "type": "Snapshot", "value": Snapshot } | { "type": "Update", "value": Update } | { "type": "Chat", "value": ChatLine } | { "type": "Error", "value": { code: string, } };
 

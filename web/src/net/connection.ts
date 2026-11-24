@@ -2,13 +2,13 @@
 // (rejoining with the seat token kept in localStorage) and message fan-out.
 
 import { createSignal } from 'solid-js';
-import type { BotLevel, ChatLine, ClientMsg, RoomInfo, ServerMsg, Snapshot, Update } from '../generated/proto';
+import type { BotLevel, ChatLine, ClientMsg, RoomInfo, Scenario, ServerMsg, Snapshot, Update } from '../generated/proto';
 import { forgetSession, sessionToken } from './account';
 
 export type ConnStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
 
 export type Hello =
-  | { type: 'Create'; players: number; bots: BotLevel; name: string; ranked: boolean }
+  | { type: 'Create'; players: number; bots: BotLevel; name: string; ranked: boolean; scenario: Scenario }
   | { type: 'Join'; room: string; name: string };
 
 export const NAME_KEY = 'isle:name';
@@ -98,7 +98,7 @@ export function createConnection(hello: Hello) {
       const first: ClientMsg | null = roomId
         ? { type: 'Join', value: { room: roomId, name: hello.name, token, session } }
         : hello.type === 'Create'
-          ? { type: 'Create', value: { players: hello.players, bots: hello.bots, name: hello.name, ranked: hello.ranked, session } }
+          ? { type: 'Create', value: { players: hello.players, bots: hello.bots, name: hello.name, ranked: hello.ranked, scenario: hello.scenario, session } }
           : null;
       if (first) socket.send(JSON.stringify(first));
     };

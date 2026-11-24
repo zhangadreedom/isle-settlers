@@ -3,13 +3,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use isle_proto::net::BotLevel;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::ServerConfig;
 use crate::auth::Accounts;
 use crate::ids;
-use crate::room::{Attached, Outbox, Room, RoomCmd};
+use crate::room::{Attached, Outbox, Room, RoomCmd, RoomOptions};
 use crate::store::{ReplayArchive, SeatAccount, Store};
 
 pub type RoomSender = mpsc::Sender<RoomCmd>;
@@ -78,14 +77,13 @@ impl Registry {
     /// Creates a room and attaches the creator to seat 0.
     pub(crate) async fn create(
         &self,
-        players: u8,
-        bots: BotLevel,
-        ranked: bool,
+        options: RoomOptions,
         name: String,
         account: Option<SeatAccount>,
         out: Outbox,
     ) -> Result<(RoomSender, Attached), String> {
-        if !(2..=isle_core::MAX_PLAYERS as u8).contains(&players) {
+        let players = options.players;
+        if !(2..=options.scenario.max_players()).contains(&players) {
             return Err("BadMessage".into());
         }
         let id = {
@@ -100,15 +98,8 @@ impl Registry {
                 }
             }
         };
-        let (room, token) = Room::new_lobby(
-            id.clone(),
-            players,
-            bots,
-            ranked,
-            name.clone(),
-            account.clone(),
-            self,
-        );
+        let (room, token) =
+            Room::new_lobby(id.clone(), options, name.clone(), account.clone(), self);
         let tx = self.spawn(id.clone(), room);
         tracing::info!(room = %id, players, "room created");
         self.attach(tx, name, Some(token), account, out).await

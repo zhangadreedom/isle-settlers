@@ -2,7 +2,9 @@
 //! can be tested natively; `lib.rs` wraps it for JavaScript.
 
 use isle_ai::{Bot, bot_by_name};
-use isle_core::{Action, Event, GameConfig, GameState, Phase, ResourceSet, TradeResponse};
+use isle_core::{
+    Action, Event, GameConfig, GameState, Phase, ResourceSet, Scenario, TradeResponse,
+};
 use isle_proto::net::BotLevel;
 use isle_proto::{ReplayPlayer, ReplayRecord};
 
@@ -57,11 +59,9 @@ impl MatchHost {
         seed: u64,
         human: Option<u8>,
         bot: &str,
+        scenario: Scenario,
     ) -> Result<MatchHost, HostError> {
-        let config = GameConfig {
-            num_players,
-            ..GameConfig::default()
-        };
+        let config = GameConfig::scenario(scenario, num_players);
         let state =
             GameState::new(config, seed).map_err(|e| HostError::Config(format!("{e:?}")))?;
         let human = human.filter(|&h| h < num_players);
@@ -208,7 +208,7 @@ mod tests {
 
     /// Drives the human seat with a bot through the host API only.
     fn play_through_host(seed: u64, human: u8) -> MatchHost {
-        let mut host = MatchHost::new(4, seed, Some(human), "greedy").unwrap();
+        let mut host = MatchHost::new(4, seed, Some(human), "greedy", Scenario::Classic).unwrap();
         let mut stand_in = GreedyBot::new(seed);
         let mut proposed_this_turn = false;
         for _ in 0..20_000 {
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn stale_indices_are_rejected() {
-        let mut host = MatchHost::new(3, 5, Some(1), "greedy").unwrap();
+        let mut host = MatchHost::new(3, 5, Some(1), "greedy", Scenario::Classic).unwrap();
         assert!(host.step_bot().is_some()); // seat 0 places
         let old = host.version - 1;
         host.legal_actions();
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn bot_events_hide_private_details() {
-        let mut host = MatchHost::new(4, 9, Some(0), "greedy").unwrap();
+        let mut host = MatchHost::new(4, 9, Some(0), "greedy", Scenario::Classic).unwrap();
         let mut stand_in = GreedyBot::new(1);
         for _ in 0..5_000 {
             if host.state.phase == Phase::GameOver {
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn spectator_matches_run_bots_only() {
-        let mut host = MatchHost::new(4, 3, None, "greedy").unwrap();
+        let mut host = MatchHost::new(4, 3, None, "greedy", Scenario::Classic).unwrap();
         assert!(host.legal_actions().is_empty());
         let mut steps = 0;
         while host.step_bot().is_some() {

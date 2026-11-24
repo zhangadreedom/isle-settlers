@@ -26,6 +26,9 @@ pub struct RoomRecord {
     /// Ranked room (absent in records from before ranking: casual).
     #[serde(default)]
     pub ranked: bool,
+    /// Absent in records from before seafaring: classic.
+    #[serde(default)]
+    pub scenario: isle_core::Scenario,
 }
 
 impl RoomRecord {

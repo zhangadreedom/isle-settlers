@@ -111,6 +111,7 @@ impl Client {
             bots: BotLevel::Normal,
             name: name.into(),
             ranked,
+            scenario: Default::default(),
             session: session.map(str::to_owned),
         })
         .await;

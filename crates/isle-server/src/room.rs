@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use isle_ai::{Bot, bot_by_name};
-use isle_core::{Action, Event, GameConfig, GameState, Phase, TradeResponse};
+use isle_core::{Action, Event, GameConfig, GameState, Phase, Scenario, TradeResponse};
 use isle_proto::net::{
     BotLevel, ChatLine, ClientMsg, LegalActions, RoomInfo, SeatView, ServerMsg, Snapshot, Update,
     clean_chat, clean_name,
@@ -25,6 +25,16 @@ use crate::store::{ReplayArchive, RoomRecord, SeatAccount, SeatRecord, Store};
 use crate::{ServerConfig, ids};
 
 pub type ConnId = u64;
+
+/// What the creator chose for a new room.
+#[derive(Clone, Copy, Debug)]
+pub struct RoomOptions {
+    pub players: u8,
+    /// Level of the bots filling free seats.
+    pub bots: BotLevel,
+    pub ranked: bool,
+    pub scenario: Scenario,
+}
 
 /// Frames queued for one connection's writer task.
 #[derive(Debug)]
@@ -163,6 +173,7 @@ pub struct Room {
     accounts: Option<Arc<Accounts>>,
     /// The game counts for ratings (with two or more signed-in players).
     ranked: bool,
+    scenario: Scenario,
     /// Rating changes of the finished ranked game.
     rating: Vec<RatingChange>,
     /// When to (re)read or compute the ratings of a finished ranked game.
@@ -185,13 +196,17 @@ impl Room {
     /// A fresh lobby with the creator on seat 0. Returns the creator's token.
     pub fn new_lobby(
         id: String,
-        players: u8,
-        bots: BotLevel,
-        ranked: bool,
+        options: RoomOptions,
         creator: String,
         account: Option<SeatAccount>,
         registry: &Registry,
     ) -> (Room, String) {
+        let RoomOptions {
+            players,
+            bots,
+            ranked,
+            scenario,
+        } = options;
         let token = ids::token();
         let name = display_name(&creator, account.as_ref(), "玩家 1");
         let now = Instant::now();
@@ -215,6 +230,7 @@ impl Room {
             replay_id: None,
             accounts: registry.accounts().cloned(),
             ranked,
+            scenario,
             rating: Vec::new(),
             rate_due: None,
             seed: ids::seed(),
@@ -266,10 +282,7 @@ impl Room {
             return Err("invalid seats".into());
         }
         let game = if record.started {
-            let config = GameConfig {
-                num_players: seats.len() as u8,
-                ..GameConfig::default()
-            };
+            let config = GameConfig::scenario(record.scenario, seats.len() as u8);
             let state = GameState::new(config, record.seed).map_err(|e| format!("{e:?}"))?;
             let mut game = Game::new(state, &seats, record.seed, registry.config());
             let mut events = Vec::new();
@@ -292,6 +305,7 @@ impl Room {
             replay_id: record.replay,
             accounts: registry.accounts().cloned(),
             ranked: record.ranked,
+            scenario: record.scenario,
             rating: Vec::new(),
             rate_due: None,
             seed: record.seed,
@@ -696,10 +710,7 @@ impl Room {
                         s.kind = SeatKind::Bot(self.bot_level);
                     }
                 }
-                let config = GameConfig {
-                    num_players: self.seats.len() as u8,
-                    ..GameConfig::default()
-                };
+                let config = GameConfig::scenario(self.scenario, self.seats.len() as u8);
                 let state = GameState::new(config, self.seed).map_err(|e| format!("{e:?}"))?;
                 self.game = Some(Game::new(state, &self.seats, self.seed, &self.config));
                 tracing::info!(room = %self.id, "game started");
@@ -929,6 +940,7 @@ impl Room {
             replay: self.replay_id.clone(),
             ranked: self.ranked,
             rating: self.rating.clone(),
+            scenario: self.scenario,
         }
     }
 
@@ -1043,6 +1055,7 @@ impl Room {
                 .unwrap_or_default(),
             replay: self.replay_id.clone(),
             ranked: self.ranked,
+            scenario: self.scenario,
         }
     }
 

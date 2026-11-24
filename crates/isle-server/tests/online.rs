@@ -364,6 +364,7 @@ async fn hard_bots_play_on_the_blocking_pool() {
         bots: BotLevel::Hard,
         name: "Alice".into(),
         ranked: false,
+        scenario: Default::default(),
         session: None,
     })
     .await;
@@ -482,6 +483,77 @@ async fn finished_games_are_archived_as_replays() {
     let (status, again) = http_get(server.addr, &format!("/api/replays/{id}")).await;
     assert!(status.contains("200"), "{status}");
     assert_eq!(again, body);
+    server.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn archipelago_rooms_play_out_and_restore() {
+    let dir = temp_dir("archipelago");
+    let config = ServerConfig {
+        data_dir: Some(dir.clone()),
+        ..fast_config()
+    };
+    let server = Server::start(config.clone()).await;
+    // Seafaring seats at most four.
+    let mut too_big = Client::connect(server.addr).await;
+    too_big
+        .send(&ClientMsg::Create {
+            players: 5,
+            bots: BotLevel::Normal,
+            name: "A".into(),
+            ranked: false,
+            scenario: isle_core::Scenario::Archipelago,
+            session: None,
+        })
+        .await;
+    too_big.until(|c| !c.errors.is_empty()).await;
+    assert_eq!(too_big.errors, ["BadMessage"]);
+
+    let mut host = Client::connect(server.addr).await;
+    host.send(&ClientMsg::Create {
+        players: 3,
+        bots: BotLevel::Normal,
+        name: "Ann".into(),
+        ranked: false,
+        scenario: isle_core::Scenario::Archipelago,
+        session: None,
+    })
+    .await;
+    host.until(|c| c.room.is_some()).await;
+    assert_eq!(
+        host.room.as_ref().unwrap().scenario,
+        isle_core::Scenario::Archipelago
+    );
+    host.send(&ClientMsg::Start).await;
+    host.until(|c| c.view.is_some()).await;
+    let view = host.view.clone().unwrap();
+    assert!(view.pirate.is_some());
+    assert_eq!(view.ships.len(), view.roads.len());
+    // A restart rebuilds the seafaring game.
+    let (room, token) = (host.room_id.clone(), host.token.clone());
+    drop(host);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    server.stop().await;
+    let server = Server::start(config).await;
+    let back = Client::join(server.addr, &room, "x", token).await;
+    let back = timeout(Duration::from_secs(60), async {
+        let mut c = back;
+        c.until(|c| c.view.is_some()).await;
+        c
+    })
+    .await
+    .unwrap();
+    assert_eq!(back.view.as_ref().unwrap(), &view);
+    let end = timeout(Duration::from_secs(120), play_to_end(back))
+        .await
+        .expect("finished");
+    let view = end.view.as_ref().unwrap();
+    assert!(view.winner.is_some());
+    assert_eq!(
+        end.room.as_ref().unwrap().scenario,
+        isle_core::Scenario::Archipelago
+    );
     server.stop().await;
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, interval, timeout};
 
 use crate::AppState;
-use crate::room::{Out, RoomCmd};
+use crate::room::{Out, RoomCmd, RoomOptions};
 use crate::store::SeatAccount;
 
 /// Largest accepted client frame; real messages are a few hundred bytes.
@@ -94,12 +94,19 @@ async fn serve(socket: WebSocket, state: AppState) {
             bots,
             name,
             ranked,
+            scenario,
             session,
         }))) => match seat_account(&state, session).await {
             Ok(account) => {
+                let options = RoomOptions {
+                    players,
+                    bots,
+                    ranked,
+                    scenario,
+                };
                 state
                     .registry
-                    .create(players, bots, ranked, name, account, out.clone())
+                    .create(options, name, account, out.clone())
                     .await
             }
             Err(code) => Err(code),

@@ -1,6 +1,6 @@
 // Typed wrapper around the WebAssembly match host.
 import init, * as wasm from './wasm/isle_wasm.js';
-import type { Action, BoardInfo, BoardLayout, Event, PlayerView, ReplayRecord, ResourceSet } from './generated/proto';
+import type { Action, BoardInfo, BoardLayout, Event, PlayerView, ReplayRecord, ResourceSet, Scenario } from './generated/proto';
 import type { MatchState, WorkerReply, WorkerRequest } from './game/worker';
 
 /** Owner value meaning "nobody" in per-spot arrays. */
@@ -52,8 +52,8 @@ export class Match {
   private readonly inner: wasm.LocalMatch;
   readonly board: BoardInfo;
 
-  constructor(players: number, seed: number, humanSeat: number | null, bot: BotKind) {
-    this.inner = new wasm.LocalMatch(players, seed >>> 0, humanSeat ?? -1, bot);
+  constructor(players: number, seed: number, humanSeat: number | null, bot: BotKind, scenario: Scenario = 'Classic') {
+    this.inner = new wasm.LocalMatch(players, seed >>> 0, humanSeat ?? -1, bot, scenario);
     this.board = call(() => this.inner.board());
   }
 
@@ -111,8 +111,8 @@ export class WorkerMatch {
     });
   }
 
-  create(players: number, seed: number, humanSeat: number | null, bot: BotKind) {
-    return this.call({ op: 'create', players, seed, humanSeat, bot });
+  create(players: number, seed: number, humanSeat: number | null, bot: BotKind, scenario: Scenario) {
+    return this.call({ op: 'create', players, seed, humanSeat, bot, scenario });
   }
 
   apply(version: number, index: number) {
@@ -187,7 +187,9 @@ export class Replay {
     if (record.format !== 1) throw new EngineError('UnsupportedReplay');
     if (record.players.length !== c.numPlayers) throw new EngineError('BadReplayConfig');
     try {
-      this.inner = new wasm.Replay(c.numPlayers, c.victoryPoints, c.balancedBoard, record.seed, Uint8Array.from(record.actions));
+      // Replays from before seafaring have no scenario: classic.
+      const scenario = c.scenario ?? 'Classic';
+      this.inner = new wasm.Replay(c.numPlayers, c.victoryPoints, c.balancedBoard, scenario, record.seed, Uint8Array.from(record.actions));
     } catch (e) {
       throw new EngineError(e instanceof Error ? e.message : String(e));
     }

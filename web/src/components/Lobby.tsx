@@ -1,7 +1,7 @@
 import { createSignal, For, Show } from 'solid-js';
 import { EMBEDDED } from '../embed';
 import type { BotKind } from '../engine';
-import type { BotLevel } from '../generated/proto';
+import type { BotLevel, Scenario } from '../generated/proto';
 import type { LocalOptions } from '../game/source';
 import { account, accountsEnabled } from '../net/account';
 import { saveName, savedName } from '../net/connection';
@@ -16,13 +16,19 @@ export interface CreateRoom {
   bots: BotLevel;
   name: string;
   ranked: boolean;
+  scenario: Scenario;
 }
+
+/** Seats each scenario can be played with. */
+const MAX_SEATS: Record<Scenario, number> = { Classic: 6, Archipelago: 4 };
 
 export function Lobby(props: {
   ready: boolean;
   seed: number;
   players: number;
   onPlayers: (players: number) => void;
+  scenario: Scenario;
+  onScenario: (scenario: Scenario) => void;
   onSeed: (seed: number) => void;
   onOpenReplay: (json: string) => void;
   onStartLocal: (o: LocalOptions) => void;
@@ -32,6 +38,11 @@ export function Lobby(props: {
   const [tab, setTab] = createSignal<'local' | 'online' | 'rank'>('local');
   const players = () => props.players;
   const setPlayers = (n: number) => props.onPlayers(n);
+  const scenario = () => props.scenario;
+  const setScenario = (s: Scenario) => {
+    props.onScenario(s);
+    if (players() > MAX_SEATS[s]) setPlayers(MAX_SEATS[s]);
+  };
   const [bot, setBot] = createSignal<BotKind>('greedy');
   const [seat, setSeat] = createSignal<'random' | number>('random');
   const [fast, setFast] = createSignal(false);
@@ -43,7 +54,7 @@ export function Lobby(props: {
     const n = players();
     const s = seat();
     const humanSeat = spectate ? null : s === 'random' ? Math.floor(Math.random() * n) : Math.min(s, n - 1);
-    props.onStartLocal({ players: n, humanSeat, bot: bot(), seed: props.seed, fast: fast() });
+    props.onStartLocal({ players: n, humanSeat, bot: bot(), seed: props.seed, fast: fast(), scenario: scenario() });
   };
 
   const createRoom = () => {
@@ -51,7 +62,7 @@ export function Lobby(props: {
     const n = signedIn ?? (name().trim() || '玩家');
     if (!signedIn) saveName(n);
     const level: Record<string, BotLevel> = { weighted: 'Easy', greedy: 'Normal', mcts: 'Hard' };
-    props.onCreateRoom({ players: players(), bots: level[bot()] ?? 'Normal', name: n, ranked: ranked() });
+    props.onCreateRoom({ players: players(), bots: level[bot()] ?? 'Normal', name: n, ranked: ranked(), scenario: scenario() });
   };
 
   // Accept a bare code or a pasted invite link.
@@ -85,11 +96,31 @@ export function Lobby(props: {
 
         <Show when={tab() !== 'rank'}>
           <div class="field">
+            <span>玩法</span>
+            <div class="seg">
+              <button classList={{ on: scenario() === 'Classic' }} onClick={() => setScenario('Classic')}>
+                经典
+              </button>
+              <button
+                classList={{ on: scenario() === 'Archipelago' }}
+                onClick={() => setScenario('Archipelago')}
+                title="航海扩展：造船出海，登上新岛屿得奖励分，2–4 人"
+              >
+                航海 · 群岛
+              </button>
+            </div>
+          </div>
+          <div class="field">
             <span>人数</span>
             <div class="seg">
               <For each={[2, 3, 4, 5, 6]}>
                 {(n) => (
-                  <button classList={{ on: players() === n }} onClick={() => setPlayers(n)}>
+                  <button
+                    classList={{ on: players() === n }}
+                    disabled={n > MAX_SEATS[scenario()]}
+                    title={n > MAX_SEATS[scenario()] ? '群岛地图最多 4 人' : undefined}
+                    onClick={() => setPlayers(n)}
+                  >
                     {n} 人
                   </button>
                 )}

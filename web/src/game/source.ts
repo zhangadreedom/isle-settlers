@@ -4,7 +4,7 @@
 import { createSignal, type Accessor } from 'solid-js';
 import { EngineError, WorkerMatch, type BotKind, type Replay } from '../engine';
 import type { MatchState } from './worker';
-import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, ReplayPlayer, ReplayRecord, Snapshot } from '../generated/proto';
+import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, ReplayPlayer, ReplayRecord, Scenario, Snapshot } from '../generated/proto';
 import type { Connection } from '../net/connection';
 
 export interface SeatMeta {
@@ -76,6 +76,7 @@ export interface GameSource {
 
 export interface LocalOptions {
   players: number;
+  scenario: Scenario;
   /** Human seat, or null to watch bots play. */
   humanSeat: number | null;
   bot: BotKind;
@@ -90,7 +91,7 @@ export interface LocalOptions {
  */
 export async function createLocalSource(opts: LocalOptions, onFinished?: (record: ReplayRecord) => void): Promise<GameSource> {
   const worker = new WorkerMatch();
-  const first = await worker.create(opts.players, opts.seed, opts.humanSeat, opts.bot);
+  const first = await worker.create(opts.players, opts.seed, opts.humanSeat, opts.bot, opts.scenario);
   const [thinking, setThinking] = createSignal(-1);
   let handlers: SourceHandlers | null = null;
   let current: MatchState = first;

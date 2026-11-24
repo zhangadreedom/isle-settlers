@@ -10,7 +10,7 @@ import { createLocalSource, createOnlineSource, createReplaySource, replayUrl, t
 import { EMBEDDED } from './embed';
 import { errorText } from './game/text';
 import { saveLocalReplay } from './game/replay-history';
-import type { DevCard, ReplayRecord } from './generated/proto';
+import type { DevCard, ReplayRecord, Scenario } from './generated/proto';
 import { initAccounts } from './net/account';
 import { createConnection, savedName, savedToken, type Connection } from './net/connection';
 
@@ -65,6 +65,7 @@ export default function App() {
   const [backend, setBackend] = createSignal('');
   const [previewSeed, setPreviewSeed] = createSignal(randomSeed());
   const [previewPlayers, setPreviewPlayers] = createSignal(4);
+  const [previewScenario, setPreviewScenario] = createSignal<Scenario>('Classic');
   const [tradeOpen, setTradeOpen] = createSignal(false);
   const [devModal, setDevModal] = createSignal<'YearOfPlenty' | 'Monopoly' | null>(null);
   // The log (with chat) starts open on wide screens and as a toggle on phones.
@@ -214,8 +215,9 @@ export default function App() {
     const r = renderer();
     const seed = previewSeed();
     const players = previewPlayers();
+    const scenario = previewScenario();
     if (!r || game()) return;
-    const m = new Match(players, seed, null, 'greedy');
+    const m = new Match(players, seed, null, 'greedy', scenario);
     r.setBoard(boardData(m.board), topology(m.board.layout));
     const v = m.view();
     r.setPieces({ buildings: v.buildings, roads: v.roads, robber: v.robber }, false);
@@ -303,6 +305,8 @@ export default function App() {
               seed={previewSeed()}
               players={previewPlayers()}
               onPlayers={setPreviewPlayers}
+              scenario={previewScenario()}
+              onScenario={setPreviewScenario}
               onOpenReplay={(json) => openReplay(json)}
               onSeed={setPreviewSeed}
               onStartLocal={startLocal}

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ranking::{RatingChange, SeatRating};
 use crate::{BoardInfo, PlayerView};
+use isle_core::Scenario;
 
 /// Maximum length of a player name, in characters.
 pub const MAX_NAME_CHARS: usize = 16;
@@ -88,6 +89,7 @@ pub struct RoomInfo {
     pub ranked: bool,
     /// Rating changes once a ranked game is over and rated.
     pub rating: Vec<RatingChange>,
+    pub scenario: Scenario,
 }
 
 /// Legal actions for the receiving seat, tagged with the state version they
@@ -145,6 +147,9 @@ pub enum ClientMsg {
         /// Ranked room (see [`RoomInfo::ranked`]).
         #[serde(default)]
         ranked: bool,
+        /// Classic or a seafaring map (2–4 seats); absent means classic.
+        #[serde(default)]
+        scenario: Scenario,
         #[serde(default)]
         #[cfg_attr(feature = "ts", ts(optional = nullable))]
         session: Option<String>,
@@ -261,6 +266,7 @@ mod tests {
                 bots: BotLevel::Normal,
                 name: "A".into(),
                 ranked: true,
+                scenario: Scenario::Archipelago,
                 session: Some("ab".repeat(32)),
             },
             ClientMsg::Join {

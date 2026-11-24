@@ -43,6 +43,8 @@ pub struct BoardInfo {
     pub numbers: Vec<u8>,
     /// Harbor per harbor slot.
     pub harbors: Vec<HarborKind>,
+    /// Island per tile: 0 for the sea, from 1 (the home island) on.
+    pub islands: Vec<u8>,
 }
 
 /// Public information about a seat.
@@ -57,10 +59,13 @@ pub struct PlayerPublic {
     /// Development cards played face up, indexed by `DevCard`.
     pub played_dev_cards: [u8; 5],
     pub roads_left: u8,
+    pub ships_left: u8,
     pub settlements_left: u8,
     pub cities_left: u8,
+    /// Islands that earned the settling bonus (bit `i` = island `i`).
+    pub islands: u8,
     pub longest_road: u8,
-    /// Points from buildings, longest road and largest army.
+    /// Points from buildings, longest road, largest army and islands.
     pub public_victory_points: u8,
     /// Harbor access bits: 1 << resource for 2:1 harbors, 1 << 5 for 3:1.
     pub harbors: u8,
@@ -99,16 +104,24 @@ pub struct PlayerView {
     pub dice: Option<(u8, u8)>,
     pub dev_card_played: bool,
     pub robber: u8,
+    /// Seafaring: the pirate's sea tile.
+    pub pirate: Option<u8>,
+    /// Seafaring: the current player has moved a ship this turn.
+    pub ship_moved: bool,
     pub bank: ResourceSet,
     pub dev_deck_len: u8,
     /// Per vertex: `EMPTY`, owner seat, or owner | `CITY_FLAG`.
     pub buildings: Vec<u8>,
     /// Per edge: `EMPTY` or owner seat.
     pub roads: Vec<u8>,
+    /// Per edge: `EMPTY` or the owner of a ship there.
+    pub ships: Vec<u8>,
     pub players: Vec<PlayerPublic>,
     pub me: Option<PrivateInfo>,
     /// Cards each seat still has to discard after a 7.
     pub pending_discard: Vec<u8>,
+    /// Gold picks each seat still has to make.
+    pub pending_gold: Vec<u8>,
     pub trade: Option<TradeOffer>,
     pub longest_road_owner: Option<u8>,
     pub largest_army_owner: Option<u8>,
@@ -124,6 +137,7 @@ pub fn board_info(state: &GameState) -> BoardInfo {
         terrain: state.board.tiles().to_vec(),
         numbers: state.board.numbers[..state.topo().num_tiles].to_vec(),
         harbors: state.board.harbor_kinds().to_vec(),
+        islands: state.board.tile_island[..state.topo().num_tiles].to_vec(),
     }
 }
 
@@ -133,6 +147,7 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
     let topo = state.topo();
     let mut buildings = vec![EMPTY; topo.num_vertices];
     let mut roads = vec![EMPTY; topo.num_edges];
+    let mut ships = vec![EMPTY; topo.num_edges];
     for p in 0..n {
         for v in vertices_in(state.settlements[p]) {
             buildings[v as usize] = p as u8;
@@ -142,6 +157,9 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
         }
         for e in edges_in(state.roads[p]) {
             roads[e as usize] = p as u8;
+        }
+        for e in edges_in(state.ships[p]) {
+            ships[e as usize] = p as u8;
         }
     }
     let players = (0..n as u8)
@@ -153,8 +171,10 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
                 dev_card_count: ps.dev_card_count() as u8,
                 played_dev_cards: ps.played_dev_cards,
                 roads_left: ps.roads_left,
+                ships_left: ps.ships_left,
                 settlements_left: ps.settlements_left,
                 cities_left: ps.cities_left,
+                islands: ps.islands,
                 longest_road: ps.longest_road,
                 public_victory_points: state.public_victory_points(p),
                 harbors: ps.harbors,
@@ -181,13 +201,17 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
         dice: state.dice,
         dev_card_played: state.dev_card_played,
         robber: state.robber,
+        pirate: (state.pirate != isle_core::topology::NONE).then_some(state.pirate),
+        ship_moved: state.ship_moved,
         bank: state.bank,
         dev_deck_len: state.dev_deck_len,
         buildings,
         roads,
+        ships,
         players,
         me,
         pending_discard: state.pending_discard[..n].to_vec(),
+        pending_gold: state.pending_gold[..n].to_vec(),
         trade: state.trade,
         longest_road_owner: state.longest_road_owner,
         largest_army_owner: state.largest_army_owner,
