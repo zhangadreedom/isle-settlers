@@ -3,16 +3,18 @@
 //! ```text
 //! cargo run --release -p isle-sim -- --games 100000 --bot weighted --threads 4
 //! cargo run --release -p isle-sim -- --games 2000 --bots greedy,weighted,weighted,weighted
+//! cargo run --release -p isle-sim -- --games 500 --scenario archipelago --players 4 --bot greedy
 //! ```
 
 use std::time::Instant;
 
 use isle_ai::{Bot, bot_by_name, play_game};
-use isle_core::{GameConfig, GameState, MAX_PLAYERS};
+use isle_core::{GameConfig, GameState, MAX_PLAYERS, Scenario};
 
 struct Args {
     games: u64,
     players: u8,
+    scenario: Scenario,
     seed: u64,
     threads: usize,
     /// Bot name per seat.
@@ -27,6 +29,7 @@ fn parse_args() -> Args {
     let mut a = Args {
         games: 20_000,
         players: 4,
+        scenario: Scenario::Classic,
         seed: 1,
         threads: std::thread::available_parallelism()
             .map(|n| n.get())
@@ -53,14 +56,21 @@ fn parse_args() -> Args {
             "--max-turns" => {
                 a.max_turns = val().parse().unwrap_or_else(|_| usage("bad --max-turns"))
             }
+            "--scenario" => {
+                a.scenario = match val().as_str() {
+                    "classic" => Scenario::Classic,
+                    "archipelago" => Scenario::Archipelago,
+                    _ => usage("--scenario must be classic or archipelago"),
+                }
+            }
             "--check" => a.check = true,
             "--rotate" => a.rotate = true,
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown flag {other}")),
         }
     }
-    if !(2..=MAX_PLAYERS as u8).contains(&a.players) {
-        usage("--players must be 2-6");
+    if !(2..=a.scenario.max_players()).contains(&a.players) {
+        usage("--players must be 2-6 (2-4 on the archipelago)");
     }
     if a.bots.is_empty() {
         a.bots = vec![bot; a.players as usize];
@@ -80,7 +90,8 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: isle-sim [--games N] [--players 2-6] [--seed S] [--threads T]\n\
+        "usage: isle-sim [--games N] [--players 2-6] [--scenario classic|archipelago]\n\
+         \x20               [--seed S] [--threads T]\n\
          \x20               [--bot NAME | --bots NAME,NAME,...] [--rotate] [--max-turns N] [--check]\n\
          bots: random, weighted, greedy, mcts, mcts:N (N iterations), mcts:N/key=value/..."
     );
@@ -96,14 +107,15 @@ struct Stats {
     wins: [u64; MAX_PLAYERS],
     /// Wins per lineup entry (equals `wins` unless rotating).
     wins_by_bot: [u64; MAX_PLAYERS],
+    /// Seafaring: island bonuses earned and ships on the board at the end,
+    /// summed over players.
+    islands: u64,
+    ships: u64,
 }
 
 fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
     let mut s = Stats::default();
-    let config = GameConfig {
-        num_players: args.players,
-        ..GameConfig::default()
-    };
+    let config = GameConfig::scenario(args.scenario, args.players);
     for i in 0..count {
         let game_seed = args
             .seed
@@ -124,6 +136,10 @@ fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
             .collect();
         let mut bots: Vec<&mut dyn Bot> = b.iter_mut().map(|b| &mut **b as &mut dyn Bot).collect();
         let outcome = play_game(&mut g, &mut bots, args.max_turns, args.check);
+        for p in 0..n {
+            s.islands += g.players[p].islands.count_ones() as u64;
+            s.ships += g.ships[p].count_ones() as u64;
+        }
         s.games += 1;
         s.turns += outcome.turns as u64;
         s.actions += outcome.actions;
@@ -161,6 +177,8 @@ fn main() {
         total.finished += s.finished;
         total.turns += s.turns;
         total.actions += s.actions;
+        total.islands += s.islands;
+        total.ships += s.ships;
         for p in 0..MAX_PLAYERS {
             total.wins[p] += s.wins[p];
             total.wins_by_bot[p] += s.wins_by_bot[p];
@@ -169,6 +187,7 @@ fn main() {
     let g = total.games.max(1) as f64;
     println!("bots            {}", args.bots.join(", "));
     println!("players         {}", args.players);
+    println!("scenario        {:?}", args.scenario);
     println!("threads         {}", args.threads);
     println!(
         "invariants      {}",
@@ -193,6 +212,17 @@ fn main() {
     println!("actions/s       {:.0}", total.actions as f64 / secs);
     println!("avg turns       {:.1}", total.turns as f64 / g);
     println!("avg actions     {:.1}", total.actions as f64 / g);
+    if args.scenario != Scenario::Classic {
+        let per_player = g * args.players as f64;
+        println!(
+            "island bonuses  {:.2} per player",
+            total.islands as f64 / per_player
+        );
+        println!(
+            "ships at end    {:.2} per player",
+            total.ships as f64 / per_player
+        );
+    }
     let wins: Vec<String> = (0..args.players as usize)
         .map(|p| {
             format!(

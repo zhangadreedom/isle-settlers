@@ -70,6 +70,7 @@ impl MctsConfig {
             "wr" => w.road = value,
             "wp" => w.harbor = value,
             "wb" => w.build = value,
+            "wa" => w.sea = value,
             "wt" => w.temperature = value,
             _ => return None,
         }
@@ -390,7 +391,22 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
                 Action::RollDice
             }
         }
-        Phase::Gold { .. } => pick(rng),
+        // Pick what the next city or settlement still lacks.
+        Phase::Gold { .. } => {
+            let hand = s.players[p as usize].hand;
+            best_of(legal, |a| match a {
+                Action::ChooseGold(set) => {
+                    let after = hand + *set;
+                    Some(
+                        -(missing(after, cost::CITY) as f32)
+                            - missing(after, cost::SETTLEMENT) as f32
+                            + rng.below(10) as f32 * 0.01,
+                    )
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| pick(rng))
+        }
         Phase::Main if p != s.current => Action::RespondTrade { accept: false },
         Phase::Main | Phase::SpecialBuild { .. } => main_policy(s, p, legal, rng),
         Phase::GameOver => legal[0],
@@ -432,6 +448,19 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
                 return *t;
             }
         }
+    }
+    // Seafaring: sail towards islands when ships lead somewhere.
+    if s.board.layout.has_ships()
+        && rng.below(2) == 0
+        && let Some(a) = best_of(legal, |a| match a {
+            Action::BuildShip(e) => {
+                let v = crate::sea::ship_value(s, p, *e);
+                (v > 1.0).then_some(v)
+            }
+            _ => None,
+        })
+    {
+        return a;
     }
     if legal.contains(&Action::BuyDevCard) && rng.below(2) == 0 {
         return Action::BuyDevCard;

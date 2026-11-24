@@ -7,9 +7,10 @@
 use isle_core::board::PIPS;
 use isle_core::resources::cost;
 use isle_core::topology::{NONE, vertices_in};
-use isle_core::{Action, GameState, Phase, Resource, ResourceSet, Rng};
+use isle_core::{Action, GameState, Phase, Resource, ResourceSet, Rng, Terrain};
 
 use crate::Bot;
+use crate::sea::{best_sea_target, island_bonus_value, move_value, ship_value};
 
 /// What the bot is saving up for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +18,8 @@ enum Target {
     City,
     Settlement,
     Road,
+    /// Seafaring: sail towards a spot out of reach by road.
+    Ship,
     DevCard,
 }
 
@@ -26,10 +29,17 @@ impl Target {
             Target::City => cost::CITY,
             Target::Settlement => cost::SETTLEMENT,
             Target::Road => cost::ROAD,
+            Target::Ship => cost::SHIP,
             Target::DevCard => cost::DEV_CARD,
         }
     }
 }
+
+/// A gold field's pips count as this much of a regular resource (any).
+const GOLD_WEIGHT: f32 = 1.15;
+
+/// Sea target value above which ships take priority over cities.
+const SEA_PRIORITY: f32 = 4.0;
 
 /// Relative value of each resource when settling.
 const BASE_WEIGHT: [f32; 5] = [1.0, 1.0, 0.85, 1.0, 1.0];
@@ -60,7 +70,7 @@ impl Bot for GreedyBot {
                 Action::BuildSettlement(v) => Some(spot_value(s, p, *v)),
                 _ => None,
             }),
-            Phase::SetupRoad { .. } | Phase::RoadBuilding { .. } => best_road(s, p, legal),
+            Phase::SetupRoad { .. } | Phase::RoadBuilding { .. } => best_route(s, p, legal),
             Phase::PreRoll => pre_roll(s, p, legal),
             Phase::Discard => best_by(legal, |a| match a {
                 Action::Discard(d) => Some(hand_value(s, p, s.players[p as usize].hand - *d)),
@@ -123,9 +133,19 @@ pub(crate) fn production(s: &GameState, q: u8) -> [f32; 5] {
                 if t == NONE {
                     break;
                 }
-                if let Some(r) = s.board.terrain[t as usize].resource() {
-                    let blocked = if t == s.robber { 0.3 } else { 1.0 };
-                    out[r.index()] += tile_pips(s, t) * mult * blocked;
+                let blocked = if t == s.robber { 0.3 } else { 1.0 };
+                match s.board.terrain[t as usize] {
+                    // Gold is any resource: spread it.
+                    Terrain::Gold => {
+                        for x in &mut out {
+                            *x += tile_pips(s, t) * mult * blocked * 0.2;
+                        }
+                    }
+                    terrain => {
+                        if let Some(r) = terrain.resource() {
+                            out[r.index()] += tile_pips(s, t) * mult * blocked;
+                        }
+                    }
                 }
             }
         }
@@ -169,6 +189,9 @@ pub(crate) fn spot_value(s: &GameState, p: u8, v: u8) -> f32 {
                 kinds += 1;
             }
             gained[i] += pips;
+        } else if s.board.terrain[t as usize] == Terrain::Gold {
+            value += tile_pips(s, t) * GOLD_WEIGHT;
+            kinds += 1;
         }
     }
     value += kinds as f32 * 0.6;
@@ -181,7 +204,7 @@ pub(crate) fn spot_value(s: &GameState, p: u8, v: u8) -> f32 {
             value += 0.35 * (own[r] + gained[r]);
         }
     }
-    value
+    value + island_bonus_value(s, p, v)
 }
 
 /// Settlement spots reachable from vertex `from` within two road segments
@@ -198,8 +221,14 @@ fn frontier_value(s: &GameState, p: u8, from: u8, legal_spots: u128) -> f32 {
         if d == 2 || blocked & (1 << v) != 0 {
             continue;
         }
-        for &n in &s.topo().vertex_vertices[v as usize] {
-            if n != NONE && seen & (1 << n) == 0 {
+        // Roads stay on land.
+        let topo = s.topo();
+        for k in 0..3 {
+            let n = topo.vertex_vertices[v as usize][k];
+            if n != NONE
+                && seen & (1 << n) == 0
+                && s.board.land_edges & (1 << topo.vertex_edges[v as usize][k]) != 0
+            {
                 seen |= 1 << n;
                 frontier.push((n, d + 1));
             }
@@ -231,6 +260,34 @@ fn best_road(s: &GameState, p: u8, legal: &[Action]) -> Option<Action> {
     })
 }
 
+/// Best road or ship (setup, Road Building).
+fn best_route(s: &GameState, p: u8, legal: &[Action]) -> Option<Action> {
+    best_by(legal, |a| match a {
+        Action::BuildRoad(e) => Some(road_value(s, p, *e)),
+        Action::BuildShip(e) => Some(ship_value(s, p, *e)),
+        _ => None,
+    })
+}
+
+fn best_ship(s: &GameState, p: u8, legal: &[Action], min: f32) -> Option<Action> {
+    best_by(legal, |a| match a {
+        Action::BuildShip(e) => {
+            let v = ship_value(s, p, *e);
+            (v > min).then_some(v)
+        }
+        _ => None,
+    })
+}
+
+/// Best land frontier value of `p`'s road network (0 if none).
+fn land_room(s: &GameState, p: u8) -> f32 {
+    let spots = s.settlement_spots(p, false);
+    let reach = s.buildings_of(p) | s.topo().endpoints_of(s.roads[p as usize]);
+    vertices_in(reach)
+        .map(|v| frontier_value(s, p, v, spots))
+        .fold(0.0, f32::max)
+}
+
 pub(crate) fn missing(hand: ResourceSet, need: ResourceSet) -> u32 {
     (0..5)
         .map(|i| need.0[i].saturating_sub(hand.0[i]) as u32)
@@ -256,8 +313,35 @@ fn choose_target(s: &GameState, p: u8, hand: ResourceSet) -> Target {
                 Target::City
             }
         }
+        // Seafaring: an island settlement (with its bonus) beats a city
+        // when ships can get there.
+        (true, false)
+            if s.board.layout.has_ships()
+                && ps.settlements_left > 0
+                && missing(hand, cost::SHIP) <= missing(hand, cost::CITY)
+                && best_sea_target(s, p) > SEA_PRIORITY =>
+        {
+            Target::Ship
+        }
         (true, false) => Target::City,
         (false, true) => Target::Settlement,
+        (false, false) if s.board.layout.has_ships() && ps.settlements_left > 0 => {
+            // Seafaring: by road where there is room, by sea where it
+            // leads somewhere better (new islands score a bonus).
+            let land = if ps.roads_left > 0 {
+                land_room(s, p)
+            } else {
+                0.0
+            };
+            let sea = best_sea_target(s, p);
+            if sea > 0.0 && sea > land * 0.8 {
+                Target::Ship
+            } else if land > 0.0 {
+                Target::Road
+            } else {
+                Target::DevCard
+            }
+        }
         (false, false)
             if ps.roads_left > 0 && ps.settlements_left > 0 && has_expansion_room(s, p) =>
         {
@@ -276,6 +360,9 @@ fn hand_value(s: &GameState, p: u8, hand: ResourceSet) -> f32 {
 }
 
 pub(crate) fn robber_value(s: &GameState, p: u8, tile: u8, victim: Option<u8>) -> f32 {
+    if s.board.is_sea(tile) {
+        return pirate_value(s, p, tile, victim);
+    }
     let pips = tile_pips(s, tile);
     let tv = s.topo().tile_vertex_mask[tile as usize];
     let mut value = 0.0;
@@ -286,6 +373,26 @@ pub(crate) fn robber_value(s: &GameState, p: u8, tile: u8, victim: Option<u8>) -
             value -= weight * pips * 4.0;
         } else {
             value += weight * pips * (1.0 + s.public_victory_points(q) as f32 / 4.0);
+        }
+    }
+    if let Some(q) = victim {
+        value += 1.0
+            + 0.3 * s.players[q as usize].hand.total() as f32
+            + 0.5 * s.public_victory_points(q) as f32;
+    }
+    value
+}
+
+/// The pirate blocks ships around its tile and robs their owners.
+fn pirate_value(s: &GameState, p: u8, tile: u8, victim: Option<u8>) -> f32 {
+    let te = s.topo().tile_edge_mask(tile);
+    let mut value = 0.0;
+    for q in 0..s.num_players() as u8 {
+        let ships = (s.ships[q as usize] & te).count_ones() as f32;
+        if q == p {
+            value -= ships * 2.0;
+        } else {
+            value += ships * (0.5 + s.public_victory_points(q) as f32 / 8.0);
         }
     }
     if let Some(q) = victim {
@@ -364,7 +471,9 @@ fn main_turn(s: &GameState, p: u8, legal: &[Action]) -> Option<Action> {
         {
             return Some(Action::PlayKnight);
         }
-        if legal.contains(&Action::PlayRoadBuilding) && target == Target::Road {
+        if legal.contains(&Action::PlayRoadBuilding)
+            && matches!(target, Target::Road | Target::Ship)
+        {
             return Some(Action::PlayRoadBuilding);
         }
         if let Some(a) = best_by(legal, |a| match a {
@@ -393,6 +502,11 @@ fn main_turn(s: &GameState, p: u8, legal: &[Action]) -> Option<Action> {
         match target {
             Target::Road => {
                 if let Some(a) = best_road(s, p, legal) {
+                    return Some(a);
+                }
+            }
+            Target::Ship => {
+                if let Some(a) = best_ship(s, p, legal, 0.0) {
                     return Some(a);
                 }
             }
@@ -435,6 +549,23 @@ fn main_turn(s: &GameState, p: u8, legal: &[Action]) -> Option<Action> {
         })
     {
         return Some(a);
+    }
+    if s.board.layout.has_ships() {
+        if (spare_after(cost::SHIP) || (hand.total() > 7 && hand.contains(&cost::SHIP)))
+            && let Some(a) = best_ship(s, p, legal, 2.0)
+        {
+            return Some(a);
+        }
+        // Re-aim an idle ship at something better.
+        if let Some(a) = best_by(legal, |a| match a {
+            Action::MoveShip { from, to } => {
+                let gain = move_value(s, p, *from, *to);
+                (gain > 1.0).then_some(gain)
+            }
+            _ => None,
+        }) {
+            return Some(a);
+        }
     }
 
     Some(Action::EndTurn)

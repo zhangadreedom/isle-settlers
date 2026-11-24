@@ -12,6 +12,7 @@ pub mod determinize;
 pub mod eval;
 mod greedy;
 mod mcts;
+mod sea;
 
 pub use greedy::GreedyBot;
 use isle_core::{Action, GameState, Rng};
@@ -69,7 +70,7 @@ impl WeightedRandomBot {
             Action::BuildCity(_) => 10_000,
             Action::BuildSettlement(_) => 1_000,
             Action::BuyDevCard => 100,
-            Action::BuildRoad(_) => 10,
+            Action::BuildRoad(_) | Action::BuildShip(_) => 10,
             _ => 1,
         }
     }
@@ -181,6 +182,24 @@ mod tests {
             }
         }
         assert!(finished >= 45, "{finished}/50 finished");
+    }
+
+    #[test]
+    fn greedy_bots_sail_to_the_islands() {
+        let (mut finished, mut islands) = (0, 0);
+        for seed in 0..40 {
+            let config = GameConfig::scenario(isle_core::Scenario::Archipelago, 4);
+            let mut g = GameState::new(config, seed).unwrap();
+            let mut b: Vec<GreedyBot> = (0..4).map(|i| GreedyBot::new(seed * 10 + i)).collect();
+            let mut bots: Vec<&mut dyn Bot> = b.iter_mut().map(|b| b as &mut dyn Bot).collect();
+            let out = play_game(&mut g, &mut bots, 1000, true);
+            finished += out.winner.is_some() as u32;
+            islands += (0..4)
+                .map(|p| g.players[p].islands.count_ones())
+                .sum::<u32>();
+        }
+        assert_eq!(finished, 40);
+        assert!(islands >= 40, "only {islands} island bonuses in 40 games");
     }
 
     /// Plays `games` games with a fixed lineup; returns wins per seat.

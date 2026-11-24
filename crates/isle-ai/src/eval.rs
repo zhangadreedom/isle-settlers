@@ -3,7 +3,7 @@
 
 use isle_core::board::PIPS;
 use isle_core::topology::{NONE, vertices_in};
-use isle_core::{DevCard, GameState, MAX_PLAYERS};
+use isle_core::{DevCard, GameState, MAX_PLAYERS, Terrain};
 
 /// Tunable weights of the evaluation.
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +28,9 @@ pub struct Weights {
     pub harbor: f32,
     /// How close the hand is to the next city / settlement / card.
     pub build: f32,
+    /// Seafaring: how close the fleet is to an island bonus (1 = a spot
+    /// in reach now).
+    pub sea: f32,
     /// Sharpness of the win-probability estimate (per point of lead).
     pub temperature: f32,
 }
@@ -45,6 +48,7 @@ impl Default for Weights {
             road: 0.08,
             harbor: 0.2,
             build: 0.0,
+            sea: 0.8,
             temperature: 1.3,
         }
     }
@@ -63,10 +67,20 @@ pub fn income(s: &GameState, q: u8) -> [f32; 5] {
                 if t == NONE {
                     break;
                 }
-                if let Some(r) = s.board.terrain[t as usize].resource() {
-                    let pips = PIPS[s.board.numbers[t as usize] as usize] as f32;
-                    let robbed = if t == s.robber { 0.35 } else { 1.0 };
-                    out[r.index()] += pips / 36.0 * mult * robbed;
+                let pips = PIPS[s.board.numbers[t as usize] as usize] as f32;
+                let robbed = if t == s.robber { 0.35 } else { 1.0 };
+                match s.board.terrain[t as usize] {
+                    // Gold is any resource.
+                    Terrain::Gold => {
+                        for x in &mut out {
+                            *x += pips / 36.0 * mult * robbed * 0.2;
+                        }
+                    }
+                    terrain => {
+                        if let Some(r) = terrain.resource() {
+                            out[r.index()] += pips / 36.0 * mult * robbed;
+                        }
+                    }
                 }
             }
         }
@@ -126,6 +140,9 @@ pub fn scores(s: &GameState, w: &Weights, out: &mut [f32; MAX_PLAYERS]) {
         }
         if s.longest_road_owner != Some(q) {
             score += w.road * ps.longest_road.min(6) as f32;
+        }
+        if w.sea != 0.0 && s.board.layout.island_bonus() > 0 {
+            score += w.sea * crate::sea::island_progress(s, q);
         }
         out[q as usize] = score;
     }
