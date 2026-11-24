@@ -1,4 +1,5 @@
 import { createMemo, createSignal, For, Show } from 'solid-js';
+import { Verified } from './Account';
 import type { Game } from '../game/controller';
 import { EMBEDDED } from '../embed';
 import type { ReplayControls } from '../game/source';
@@ -28,6 +29,9 @@ export function PlayerList(props: { game: Game }) {
               <div class="seat-head">
                 <SeatDot seat={p.seat} />
                 <span class="seat-name">{g.name(p.seat)}</span>
+                <Show when={g.online && g.seat(p.seat).registered}>
+                  <Verified />
+                </Show>
                 <Show when={g.replay && g.seat(p.seat).bot}>
                   <span class="presence bot" title={`${BOT_LEVEL_NAME[g.replay!.players[p.seat]?.bot ?? 'Normal']} AI`}>
                     AI

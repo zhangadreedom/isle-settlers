@@ -11,6 +11,7 @@ import { EMBEDDED } from './embed';
 import { errorText } from './game/text';
 import { saveLocalReplay } from './game/replay-history';
 import type { DevCard, ReplayRecord } from './generated/proto';
+import { initAccounts } from './net/account';
 import { createConnection, savedName, savedToken, type Connection } from './net/connection';
 
 declare global {
@@ -71,6 +72,8 @@ export default function App() {
   let lastLocal: LocalOptions | null = null;
 
   onMount(async () => {
+    // Accounts belong to the server; the embedded build has none.
+    if (!EMBEDDED) void initAccounts();
     try {
       await loadEngine();
       setStatus('加载 3D 场景…');

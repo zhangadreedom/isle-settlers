@@ -12,6 +12,8 @@ export interface SeatMeta {
   bot: boolean;
   connected: boolean;
   autopilot: boolean;
+  /** Online: signed in with an account (the name is its username). */
+  registered?: boolean;
 }
 
 export interface SourceState {
@@ -213,7 +215,8 @@ export function createOnlineSource(conn: Connection, first: Snapshot): GameSourc
     online: true,
     seat(s) {
       const info = conn.room()?.seats[s];
-      if (info?.type === 'Human') return { name: info.value.name, bot: false, connected: info.value.connected, autopilot: info.value.autopilot };
+      if (info?.type === 'Human')
+        return { name: info.value.name, bot: false, connected: info.value.connected, autopilot: info.value.autopilot, registered: info.value.registered };
       return { name: `AI ${s + 1}`, bot: true, connected: true, autopilot: false };
     },
     thinking() {

@@ -2,45 +2,63 @@ import { createSignal, For, Show } from 'solid-js';
 import { PLAYER_CSS } from '../board/palette';
 import type { BotLevel, SeatView } from '../generated/proto';
 import { errorText } from '../game/text';
+import { account, accountsEnabled } from '../net/account';
 import { inviteLink, savedName, saveName, type Connection } from '../net/connection';
+import { AccountPanel, Verified } from './Account';
 
 /** Name prompt shown when opening an invite link for the first time. */
 export function JoinPrompt(props: { room: string; onJoin: (name: string) => void; onCancel: () => void }) {
   const [name, setName] = createSignal(savedName());
   const submit = (e: Event) => {
     e.preventDefault();
+    const signedIn = account();
+    if (signedIn) return props.onJoin(signedIn.username);
     const n = name().trim() || '玩家';
     saveName(n);
     props.onJoin(n);
   };
   return (
     <div class="lobby-wrap">
-      <form class="panel lobby" onSubmit={submit}>
-        <h1>加入房间</h1>
-        <p class="muted">
-          房间 <code class="seed">{props.room}</code>
-        </p>
-        <div class="field">
-          <span>昵称</span>
-          <input
-            class="grow"
-            value={name()}
-            maxLength={16}
-            placeholder="你的名字"
-            onInput={(e) => setName(e.currentTarget.value)}
-            aria-label="昵称"
-            autofocus
-          />
-        </div>
-        <div class="row lobby-actions">
-          <button class="primary big" type="submit">
-            加入
-          </button>
-          <button type="button" onClick={props.onCancel}>
-            返回
-          </button>
-        </div>
-      </form>
+      <div class="lobby-stack">
+        <form class="panel lobby" onSubmit={submit}>
+          <h1>加入房间</h1>
+          <p class="muted">
+            房间 <code class="seed">{props.room}</code>
+          </p>
+          <Show
+            when={account()}
+            fallback={
+              <div class="field">
+                <span>昵称</span>
+                <input
+                  class="grow"
+                  value={name()}
+                  maxLength={16}
+                  placeholder="你的名字"
+                  onInput={(e) => setName(e.currentTarget.value)}
+                  aria-label="昵称"
+                  autofocus
+                />
+              </div>
+            }
+          >
+            {(a) => <p class="muted">以账号 <b>{a().username}</b> 的身份加入。</p>}
+          </Show>
+          <div class="row lobby-actions">
+            <button class="primary big" type="submit">
+              加入
+            </button>
+            <button type="button" onClick={props.onCancel}>
+              返回
+            </button>
+          </div>
+        </form>
+        <Show when={accountsEnabled()}>
+          <div class="panel lobby">
+            <AccountPanel />
+          </div>
+        </Show>
+      </div>
     </div>
   );
 }
@@ -111,6 +129,9 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                       <span class="dot" style={{ background: PLAYER_CSS[i()] }} />
                       <span class="seat-label">
                         {seatLabel(s)}
+                        <Show when={s.type === 'Human' && s.value.registered}>
+                          <Verified />
+                        </Show>
                         {i() === c.seat() ? '（你）' : ''}
                         {i() === room().host ? ' · 房主' : ''}
                       </span>

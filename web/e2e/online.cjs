@@ -9,6 +9,11 @@
 // Env: E2E_URL (default http://localhost:8080/), E2E_AI=困难 (bot level),
 // E2E_PLAYERS=2..6 (room size, default 3; 5-6 seats use the extended island).
 //
+// When the server has accounts (run it with --data-dir), the host registers,
+// logs out, fails and then succeeds to log in, keeps the login across a
+// reload and plays signed in; a fresh browser ("phone") signs in on the
+// invite page and gets the host's seat back mid-game.
+//
 // At the end the guest opens the stored replay from the game-over dialog and
 // a third browser opens the shared replay link.
 // Requires `playwright`.
@@ -24,13 +29,26 @@ const RES = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'];
 const PLAYERS = Number(process.env.E2E_PLAYERS || 3);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const PASSWORD = 'e2e password 12345';
+
+/** Fills and submits the login / registration form. */
+async function signIn(page, mode, username, password) {
+  if (!(await page.$('details.account[open]'))) await page.click('details.account summary');
+  await page.click(`.account-form .seg >> text=${mode === 'register' ? '注册' : '登录'}`);
+  await page.fill('.account-form input[name=username]', username);
+  await page.fill('.account-form input[name=password]', password);
+  await page.click('.account-form button.primary');
+}
 
 async function player(browser, name, errors) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await context.newPage();
+  // `allow`: console errors expected right now (the browser logs every
+  // 4xx response, e.g. the 401 of a deliberately wrong password).
+  const p = { name, page, context, allow: null, stats: { actions: 0, offers: 0, deals: 0, responses: 0, reloads: 0 } };
   page.on('pageerror', (e) => errors.push(`${name}: ${e.message}`));
-  page.on('console', (m) => m.type() === 'error' && errors.push(`${name} console: ${m.text()}`));
-  return { name, page, context, stats: { actions: 0, offers: 0, deals: 0, responses: 0, reloads: 0 } };
+  page.on('console', (m) => m.type() === 'error' && !p.allow?.test(m.text()) && errors.push(`${name} console: ${m.text()}`));
+  return p;
 }
 
 const state = (page) =>
@@ -234,11 +252,36 @@ async function playLoop(p, other, shared, deadline) {
   const host = await player(browser, 'host', errors);
   const guest = await player(browser, 'guest', errors);
 
-  // Host creates a 3-seat room.
+  // Host creates a 3-seat room, signed in when the server has accounts.
   await host.page.goto(BASE + QUERY);
   await host.page.waitForFunction(() => !document.querySelector('.lobby button.primary')?.disabled);
+  const accounts = (await (await host.page.request.get(BASE + 'api/health')).json()).accounts === true;
+  const username = `e2e_${Date.now().toString(36)}`;
+  const hostName = accounts ? username : 'Alice';
   await host.page.click('.tabs >> text=联机对战');
-  await host.page.fill('input[aria-label="昵称"]', 'Alice');
+  if (accounts) {
+    await signIn(host.page, 'register', username, PASSWORD);
+    await host.page.waitForSelector('.account-bar');
+    await host.page.click('.account-bar >> text=退出登录');
+    host.allow = /status of 401/;
+    await signIn(host.page, 'login', username, 'not the password');
+    await host.page.waitForSelector('.form-error');
+    host.allow = null;
+    const wrong = await host.page.textContent('.form-error');
+    if (!wrong.includes('不对')) errors.push(`unexpected login error: ${wrong}`);
+    await signIn(host.page, 'login', username.toUpperCase(), PASSWORD);
+    await host.page.waitForSelector('.account-bar');
+    await host.page.reload();
+    await host.page.waitForFunction(() => !document.querySelector('.lobby button.primary')?.disabled);
+    await host.page.click('.tabs >> text=联机对战');
+    await host.page.waitForSelector('.account-bar');
+    if (await host.page.$('input[aria-label="昵称"]')) errors.push('nickname field shown while signed in');
+    await host.page.screenshot({ path: `${OUT}/p2-host-signed-in.png` });
+    console.log('accounts: registered, logged out and in, kept across reload as', username);
+  } else {
+    console.log('accounts: off on this server (run it with --data-dir to test them)');
+    await host.page.fill('input[aria-label="昵称"]', 'Alice');
+  }
   await host.page.click(`.seg >> text=${PLAYERS} 人`);
   // E2E_AI=简单|普通|困难 sets the level of the bot filling the free seat.
   if (process.env.E2E_AI) await host.page.click(`.seg >> text=${process.env.E2E_AI}`);
@@ -256,11 +299,33 @@ async function playLoop(p, other, shared, deadline) {
   await guest.page.click('button[type="submit"] >> text=加入');
   await guest.page.waitForSelector('.seats');
   await host.page.waitForFunction(() => document.querySelector('.seats')?.textContent.includes('Bob'));
+  const seat0 = await guest.page.textContent('.seats li');
+  if (!seat0.includes(hostName)) errors.push(`seat 0 shows ${seat0}`);
+  const marks = await guest.page.$$eval('.seats li .verified', (els) => els.length);
+  if (marks !== (accounts ? 1 : 0)) errors.push(`${marks} seats marked as signed in`);
   await host.page.screenshot({ path: `${OUT}/p2-room-host.png` });
   await guest.page.screenshot({ path: `${OUT}/p2-room-guest.png` });
 
   await host.page.click('button:has-text("开始游戏")');
   for (const p of [host, guest]) await p.page.waitForFunction(() => window.__isle?.game()?.view(), null, { timeout: 30000 });
+
+  if (accounts) {
+    // The account's seat from another device: no seat token, just a login.
+    const phone = await player(browser, 'phone', errors);
+    await phone.page.goto(BASE + QUERY + `#/r/${roomId}`);
+    await phone.page.waitForSelector('text=加入房间');
+    await signIn(phone.page, 'login', username, PASSWORD);
+    await phone.page.waitForSelector(`text=以账号 ${username} 的身份加入`);
+    await phone.page.click('button[type="submit"] >> text=加入');
+    await phone.page.waitForFunction(() => window.__isle?.game()?.view(), null, { timeout: 30000 });
+    const seat = await phone.page.evaluate(() => window.__isle.game().me);
+    if (seat !== 0) errors.push(`signed-in second device got seat ${seat}`);
+    const badge = await guest.page.$('#seat-0 .verified');
+    if (!badge) errors.push('signed-in player not marked in the game');
+    await phone.page.screenshot({ path: `${OUT}/p2-phone-seat.png` });
+    await phone.context.close();
+    console.log('accounts: second device got seat', seat);
+  }
 
   // Chat.
   await host.page.fill('.chat-form input', '大家好，有木头可以换吗？');

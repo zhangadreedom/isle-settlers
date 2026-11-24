@@ -3,7 +3,9 @@ import { EMBEDDED } from '../embed';
 import type { BotKind } from '../engine';
 import type { BotLevel } from '../generated/proto';
 import type { LocalOptions } from '../game/source';
+import { account } from '../net/account';
 import { saveName, savedName } from '../net/connection';
+import { AccountPanel } from './Account';
 import { ReplayHistory } from './ReplayHistory';
 
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
@@ -42,8 +44,9 @@ export function Lobby(props: {
   };
 
   const createRoom = () => {
-    const n = name().trim() || '玩家';
-    saveName(n);
+    const signedIn = account()?.username;
+    const n = signedIn ?? (name().trim() || '玩家');
+    if (!signedIn) saveName(n);
     const level: Record<string, BotLevel> = { weighted: 'Easy', greedy: 'Normal', mcts: 'Hard' };
     props.onCreateRoom({ players: players(), bots: level[bot()] ?? 'Normal', name: n });
   };
@@ -154,17 +157,20 @@ export function Lobby(props: {
         </Show>
 
         <Show when={tab() === 'online'}>
-          <div class="field">
-            <span>昵称</span>
-            <input
-              class="grow"
-              value={name()}
-              maxLength={16}
-              placeholder="你的名字"
-              onInput={(e) => setName(e.currentTarget.value)}
-              aria-label="昵称"
-            />
-          </div>
+          <AccountPanel />
+          <Show when={!account()}>
+            <div class="field">
+              <span>昵称</span>
+              <input
+                class="grow"
+                value={name()}
+                maxLength={16}
+                placeholder="你的名字"
+                onInput={(e) => setName(e.currentTarget.value)}
+                aria-label="昵称"
+              />
+            </div>
+          </Show>
           <p class="muted small">创建房间后把邀请链接发给朋友；没人坐的位置开局时由 AI 补上。</p>
           <div class="row lobby-actions">
             <button class="primary big" disabled={!props.ready} onClick={createRoom}>

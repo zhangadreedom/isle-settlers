@@ -3,6 +3,7 @@
 
 import { createSignal } from 'solid-js';
 import type { BotLevel, ChatLine, ClientMsg, RoomInfo, ServerMsg, Snapshot, Update } from '../generated/proto';
+import { forgetSession, sessionToken } from './account';
 
 export type ConnStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
 
@@ -63,7 +64,7 @@ function serverUrl(): string {
 }
 
 /** Errors during the handshake that retrying cannot fix. */
-const FATAL = new Set(['RoomNotFound', 'TooManyRooms', 'BadMessage']);
+const FATAL = new Set(['RoomNotFound', 'TooManyRooms', 'BadMessage', 'SessionExpired', 'AccountsDisabled']);
 
 export function createConnection(hello: Hello) {
   const [status, setStatus] = createSignal<ConnStatus>('connecting');
@@ -90,9 +91,12 @@ export function createConnection(hello: Hello) {
     const socket = new WebSocket(serverUrl());
     ws = socket;
     socket.onopen = () => {
+      // Signed in: the seat is bound to the account (and found again by it
+      // from other devices). A seat token alone is enough to come back.
+      const session = token ? null : sessionToken();
       const first: ClientMsg = roomId
-        ? { type: 'Join', value: { room: roomId, name: hello.name, token } }
-        : { type: 'Create', value: { players: (hello as { players: number }).players, bots: (hello as { bots: BotLevel }).bots, name: hello.name } };
+        ? { type: 'Join', value: { room: roomId, name: hello.name, token, session } }
+        : { type: 'Create', value: { players: (hello as { players: number }).players, bots: (hello as { bots: BotLevel }).bots, name: hello.name, session } };
       socket.send(JSON.stringify(first));
     };
     socket.onmessage = (e) => handle(JSON.parse(e.data as string) as ServerMsg);
@@ -135,6 +139,7 @@ export function createConnection(hello: Hello) {
         break;
       case 'Error':
         if (!joined && FATAL.has(msg.value.code)) {
+          if (msg.value.code === 'SessionExpired' || msg.value.code === 'AccountsDisabled') forgetSession();
           setFatal(msg.value.code);
           ws?.close();
         } else {

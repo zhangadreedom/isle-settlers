@@ -143,6 +143,28 @@ cargo run --release -p isle-server -- --addr 0.0.0.0:8080 --data-dir data
 | `--data-dir` | `$ISLE_DATA_DIR`，否则不持久化 | 房间存档目录，重启后通过重放恢复对局；回放存在其中的 `replays/` 子目录（不设时只在内存里保留最近 256 局） |
 | `--bot-delay` | `1.0` | AI 出手间隔的倍率，0 表示立即出手 |
 | `--autopilot-secs` | `30` | 玩家掉线多久后由 AI 代打 |
+| `--no-accounts` | 有 `--data-dir` 时开启账号 | 关闭账号功能 |
+| `--session-days` | `30` | 登录有效天数（1–366） |
+| `--client-ip-header` | 无 | 放在反向代理后面时，从这个请求头取客户端地址用于登录限流（如 `X-Forwarded-For`，取最后一个地址）。只在代理会覆盖或追加这个头时设置，否则客户端可以伪造 |
+
+### 账号
+
+服务器带 `--data-dir` 时提供可选账号（存在 `accounts.sqlite3` 里，密码用 Argon2id 哈希）。不登录也能玩；登录后：
+
+- 用户名就是你在房间里的名字，座位旁有 ✓ 标记，别人改昵称冒充不了；
+- 座位绑定账号，在另一台设备（或清空浏览器后）登录并打开邀请链接，就能回到自己的座位。
+
+用户名为字母、数字、`_`、`-`，不区分大小写，最长 32 位；密码至少 12 个字符。注册和登录每个地址先给 10 次，之后每 6 秒恢复一次（IPv6 按 /64 计）。接口（请求体和返回值的类型见 `crates/isle-proto/src/account.rs`，前端类型在 `web/src/generated/proto.ts`）：
+
+| 请求 | 说明 |
+|---|---|
+| `POST /api/accounts` `{username, password}` | 注册并登录，返回 `{account, token, expiresAt}` |
+| `POST /api/sessions` `{username, password}` | 登录，返回同上 |
+| `GET /api/session` | 当前登录信息，需要 `Authorization: Bearer <token>` |
+| `DELETE /api/session` | 退出登录 |
+| `DELETE /api/sessions` | 退出所有设备 |
+
+失败时返回 `{error}`，错误码列在 `ApiError` 的注释里。`GET /api/health` 的 `accounts` 字段表示服务器是否开启了账号。
 
 也可以用 Docker 部署：
 
@@ -154,7 +176,7 @@ docker build -t isle-settlers .
 docker run -p 8080:8080 -v isle-data:/data isle-settlers
 ```
 
-联机端到端测试：两个相互隔离的浏览器分别扮演房主和客人，建房、加入、聊天、交易、刷新重连，一直打到终局。需要先启动服务器：
+联机端到端测试：两个相互隔离的浏览器分别扮演房主和客人，建房、加入、聊天、交易、刷新重连，一直打到终局。服务器开了账号时（带 `--data-dir`），房主还会注册、退出、输错密码、重新登录、刷新后保持登录，并用第三个浏览器登录同一账号、从邀请链接回到房主的座位。需要先启动服务器：
 
 ```bash
 node web/e2e/online.cjs
@@ -166,4 +188,4 @@ node web/e2e/online.cjs
 - [x] P1：浏览器内人机对局（大厅、点击建造、交易、发展卡、弃牌与强盗、动画、观战模式、嵌入单人版 `build:embed`）
 - [x] P2：联机对战（WebSocket 服务器、房间与邀请链接、断线重连、掉线托管、聊天、持久化、Docker）
 - [x] P3：困难 AI（确定化 + ISMCTS + 评估函数，锦标赛调参；浏览器端跑在 Web Worker 里）
-- [ ] P4：5–6 人扩展 ✅、回放与本机回放列表 ✅、服务端账号与会话存储（SQLite + Argon2id）✅、账号接口与排位、扩展包
+- [ ] P4：5–6 人扩展 ✅、回放与本机回放列表 ✅、账号（注册登录接口、前端登录、座位绑定账号、登录限流）✅、排位、扩展包

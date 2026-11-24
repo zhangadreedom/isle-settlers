@@ -77,6 +77,22 @@ const SERVER_ERRORS: Record<string, string> = {
   BadReplaySeed: '回放文件已损坏',
   BadReplayConfig: '回放文件已损坏',
   ReplayNotFound: '回放不存在或已过期',
+  // Accounts
+  MissingCredentials: '请输入用户名和密码',
+  InvalidUsername: '用户名只能用字母、数字、_ 和 -，最长 32 位',
+  PasswordTooShort: '密码至少需要 12 个字符',
+  PasswordTooLong: '密码太长了',
+  UsernameTaken: '这个用户名已经有人用了',
+  InvalidCredentials: '用户名或密码不对',
+  TooManyAttempts: '尝试次数太多，请稍后再试',
+  Busy: '服务器繁忙，请稍后再试',
+  AccountsDisabled: '这个服务器没有开启账号功能',
+  SessionExpired: '登录已失效，请重新登录后再加入',
+  NotLoggedIn: '登录已失效，请重新登录',
+  BadRequest: '请求无效',
+  Internal: '服务器出错了，请稍后再试',
+  ServerError: '服务器出错了，正在重试…',
+  NetworkError: '网络连接失败',
 };
 
 export function errorText(code: string): string {
