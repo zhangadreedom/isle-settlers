@@ -94,11 +94,23 @@ impl Client {
         name: &str,
         session: Option<&str>,
     ) -> Client {
+        Client::create_room(addr, players, name, session, false).await
+    }
+
+    /// Creates a ranked or casual room.
+    pub async fn create_room(
+        addr: SocketAddr,
+        players: u8,
+        name: &str,
+        session: Option<&str>,
+        ranked: bool,
+    ) -> Client {
         let mut c = Client::connect(addr).await;
         c.send(&ClientMsg::Create {
             players,
             bots: BotLevel::Normal,
             name: name.into(),
+            ranked,
             session: session.map(str::to_owned),
         })
         .await;

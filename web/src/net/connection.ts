@@ -8,7 +8,7 @@ import { forgetSession, sessionToken } from './account';
 export type ConnStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
 
 export type Hello =
-  | { type: 'Create'; players: number; bots: BotLevel; name: string }
+  | { type: 'Create'; players: number; bots: BotLevel; name: string; ranked: boolean }
   | { type: 'Join'; room: string; name: string };
 
 export const NAME_KEY = 'isle:name';
@@ -94,10 +94,13 @@ export function createConnection(hello: Hello) {
       // Signed in: the seat is bound to the account (and found again by it
       // from other devices). A seat token alone is enough to come back.
       const session = token ? null : sessionToken();
-      const first: ClientMsg = roomId
+      // After `Joined`, a created room is rejoined like any other.
+      const first: ClientMsg | null = roomId
         ? { type: 'Join', value: { room: roomId, name: hello.name, token, session } }
-        : { type: 'Create', value: { players: (hello as { players: number }).players, bots: (hello as { bots: BotLevel }).bots, name: hello.name, session } };
-      socket.send(JSON.stringify(first));
+        : hello.type === 'Create'
+          ? { type: 'Create', value: { players: hello.players, bots: hello.bots, name: hello.name, ranked: hello.ranked, session } }
+          : null;
+      if (first) socket.send(JSON.stringify(first));
     };
     socket.onmessage = (e) => handle(JSON.parse(e.data as string) as ServerMsg);
     socket.onclose = () => {

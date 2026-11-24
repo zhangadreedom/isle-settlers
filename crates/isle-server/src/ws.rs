@@ -61,11 +61,8 @@ async fn seat_account(
     let Some(accounts) = &state.accounts else {
         return Err("AccountsDisabled".into());
     };
-    match accounts.session(token).await {
-        Ok(Some(s)) => Ok(Some(SeatAccount {
-            id: s.account.id,
-            username: s.account.username,
-        })),
+    match accounts.seat_account(token).await {
+        Ok(Some(account)) => Ok(Some(account)),
         Ok(None) => Err("SessionExpired".into()),
         Err(e) => {
             tracing::error!("session check failed: {e}");
@@ -96,12 +93,13 @@ async fn serve(socket: WebSocket, state: AppState) {
             players,
             bots,
             name,
+            ranked,
             session,
         }))) => match seat_account(&state, session).await {
             Ok(account) => {
                 state
                     .registry
-                    .create(players, bots, name, account, out.clone())
+                    .create(players, bots, ranked, name, account, out.clone())
                     .await
             }
             Err(code) => Err(code),

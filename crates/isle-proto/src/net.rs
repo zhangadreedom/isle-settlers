@@ -10,6 +10,7 @@
 use isle_core::{Action, Event};
 use serde::{Deserialize, Serialize};
 
+use crate::ranking::{RatingChange, SeatRating};
 use crate::{BoardInfo, PlayerView};
 
 /// Maximum length of a player name, in characters.
@@ -56,6 +57,8 @@ pub enum SeatView {
         name: String,
         /// Signed in: `name` is the account's username.
         registered: bool,
+        /// Rating of a signed-in player.
+        rating: Option<SeatRating>,
         connected: bool,
         /// A bot is playing for this player while they are disconnected.
         autopilot: bool,
@@ -80,6 +83,11 @@ pub struct RoomInfo {
     pub spectators: u32,
     /// Id of the finished game's replay (`/api/replays/{id}`).
     pub replay: Option<String>,
+    /// Ranked room: the game counts for the ratings of signed-in players
+    /// when at least two of them play.
+    pub ranked: bool,
+    /// Rating changes once a ranked game is over and rated.
+    pub rating: Vec<RatingChange>,
 }
 
 /// Legal actions for the receiving seat, tagged with the state version they
@@ -134,6 +142,9 @@ pub enum ClientMsg {
         players: u8,
         bots: BotLevel,
         name: String,
+        /// Ranked room (see [`RoomInfo::ranked`]).
+        #[serde(default)]
+        ranked: bool,
         #[serde(default)]
         #[cfg_attr(feature = "ts", ts(optional = nullable))]
         session: Option<String>,
@@ -160,6 +171,10 @@ pub enum ClientMsg {
     SetSeat {
         seat: u8,
         bot: Option<BotLevel>,
+    },
+    /// Host only, before the start: make the room ranked or casual.
+    SetRanked {
+        ranked: bool,
     },
     /// Host only: start the game. Open seats are filled with bots.
     Start,
@@ -245,6 +260,7 @@ mod tests {
                 players: 4,
                 bots: BotLevel::Normal,
                 name: "A".into(),
+                ranked: true,
                 session: Some("ab".repeat(32)),
             },
             ClientMsg::Join {
@@ -261,6 +277,7 @@ mod tests {
                 seat: 2,
                 bot: Some(BotLevel::Easy),
             },
+            ClientMsg::SetRanked { ranked: false },
             ClientMsg::Start,
         ];
         for m in msgs {

@@ -14,6 +14,7 @@ export interface CreateRoom {
   players: number;
   bots: BotLevel;
   name: string;
+  ranked: boolean;
 }
 
 export function Lobby(props: {
@@ -35,6 +36,7 @@ export function Lobby(props: {
   const [fast, setFast] = createSignal(false);
   const [name, setName] = createSignal(savedName());
   const [code, setCode] = createSignal('');
+  const [ranked, setRanked] = createSignal(true);
 
   const startLocal = (spectate: boolean) => {
     const n = players();
@@ -48,7 +50,7 @@ export function Lobby(props: {
     const n = signedIn ?? (name().trim() || '玩家');
     if (!signedIn) saveName(n);
     const level: Record<string, BotLevel> = { weighted: 'Easy', greedy: 'Normal', mcts: 'Hard' };
-    props.onCreateRoom({ players: players(), bots: level[bot()] ?? 'Normal', name: n });
+    props.onCreateRoom({ players: players(), bots: level[bot()] ?? 'Normal', name: n, ranked: ranked() });
   };
 
   // Accept a bare code or a pasted invite link.
@@ -171,7 +173,21 @@ export function Lobby(props: {
               />
             </div>
           </Show>
-          <p class="muted small">创建房间后把邀请链接发给朋友；没人坐的位置开局时由 AI 补上。</p>
+          <div class="field">
+            <span>模式</span>
+            <div class="seg">
+              <button classList={{ on: ranked() }} onClick={() => setRanked(true)} title="至少两名登录玩家时计入排位分">
+                排位
+              </button>
+              <button classList={{ on: !ranked() }} onClick={() => setRanked(false)}>
+                休闲
+              </button>
+            </div>
+          </div>
+          <p class="muted small">
+            创建房间后把邀请链接发给朋友；没人坐的位置开局时由 AI 补上。
+            <Show when={ranked()}>排位局在至少两名登录玩家参加时计分，AI 和游客不计。</Show>
+          </p>
           <div class="row lobby-actions">
             <button class="primary big" disabled={!props.ready} onClick={createRoom}>
               创建房间

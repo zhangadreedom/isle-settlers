@@ -363,6 +363,7 @@ async fn hard_bots_play_on_the_blocking_pool() {
         players: 4,
         bots: BotLevel::Hard,
         name: "Alice".into(),
+        ranked: false,
         session: None,
     })
     .await;

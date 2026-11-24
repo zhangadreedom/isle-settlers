@@ -7,6 +7,9 @@
 //! Password hashing (Argon2id, deliberately slow and memory hungry) runs on
 //! the blocking pool with at most half the cores at a time, and register /
 //! login attempts are rate limited per client address (IPv6 per /64).
+//!
+//! Also serves the public ranking pages: `GET /api/leaderboard` and
+//! `GET /api/players/{username}`.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -14,11 +17,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Path, RawQuery, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use isle_proto::account::{AccountInfo, ApiError, Credentials, SessionGrant, SessionInfo};
+use isle_proto::ranking::{RatingChange, SeatRating};
 use serde::Serialize;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
@@ -26,6 +30,8 @@ use tokio::time::Instant;
 use crate::account_store::{
     Account, AccountStore, AccountStoreConfig, AccountStoreError, NewSession, Session,
 };
+use crate::ranking::MatchEntry;
+use crate::store::SeatAccount;
 use crate::{AppState, ServerConfig};
 
 /// Largest accepted request body (credentials are a few hundred bytes).
@@ -41,7 +47,14 @@ pub struct Accounts {
     hashing: Arc<Semaphore>,
     limiter: RateLimiter,
     ip_header: Option<HeaderName>,
+    placement_games: u32,
 }
+
+/// Leaderboard page size limits.
+const DEFAULT_PAGE: u32 = 50;
+const MAX_PAGE: u32 = 100;
+/// Ranked games listed on a profile.
+const PROFILE_RECENT: u32 = 20;
 
 impl Accounts {
     /// Opens the store in the data directory. `Ok(None)` when accounts are
@@ -69,6 +82,7 @@ impl Accounts {
             hashing: Arc::new(Semaphore::new(slots)),
             limiter: RateLimiter::new(config.auth_burst, config.auth_refill),
             ip_header,
+            placement_games: config.placement_games,
         }))
     }
 
@@ -78,6 +92,59 @@ impl Accounts {
         tokio::task::spawn_blocking(move || store.validate_session(&token))
             .await
             .unwrap_or_else(|e| Err(AccountStoreError::Corrupt(format!("task failed: {e}"))))
+    }
+
+    /// The account behind `token` with its current rating, for seating a
+    /// player; `Ok(None)` if the session is unknown, expired or revoked.
+    pub async fn seat_account(
+        &self,
+        token: String,
+    ) -> Result<Option<SeatAccount>, AccountStoreError> {
+        let store = self.store.clone();
+        let placement = self.placement_games;
+        tokio::task::spawn_blocking(move || {
+            let Some(session) = store.validate_session(&token)? else {
+                return Ok(None);
+            };
+            let rating = store.seat_rating(session.account.id, placement)?;
+            Ok(Some(SeatAccount {
+                id: session.account.id,
+                username: session.account.username,
+                rating: Some(rating),
+            }))
+        })
+        .await
+        .unwrap_or_else(|e| Err(AccountStoreError::Corrupt(format!("task failed: {e}"))))
+    }
+
+    /// Rates a finished ranked game once (see
+    /// [`AccountStore::record_match`]); returns each player's change and new
+    /// seat rating.
+    pub async fn record_match(
+        &self,
+        id: String,
+        seats: u8,
+        entries: Vec<MatchEntry>,
+    ) -> Result<Vec<(RatingChange, SeatRating)>, AccountStoreError> {
+        let store = self.store.clone();
+        let placement = self.placement_games;
+        tokio::task::spawn_blocking(move || {
+            let changes = store.record_match(&id, seats, &entries)?;
+            changes
+                .into_iter()
+                .map(|c| {
+                    let account = entries
+                        .iter()
+                        .find(|e| e.seat == c.seat)
+                        .map(|e| e.account_id)
+                        .ok_or_else(|| AccountStoreError::Corrupt("match seat mismatch".into()))?;
+                    let rating = store.seat_rating(account, placement)?;
+                    Ok((c, rating))
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_else(|e| Err(AccountStoreError::Corrupt(format!("task failed: {e}"))))
     }
 
     /// Runs a quick store operation on the blocking pool (SQLite with
@@ -160,6 +227,50 @@ pub fn routes() -> Router<AppState> {
         .route("/api/accounts", post(register))
         .route("/api/sessions", post(login).delete(logout_all))
         .route("/api/session", get(current).delete(logout))
+        .route("/api/leaderboard", get(leaderboard))
+        .route("/api/players/{username}", get(profile))
+}
+
+/// `GET /api/leaderboard?limit=&offset=`: placed players, best first.
+async fn leaderboard(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, Fail> {
+    let accounts = enabled(&state)?;
+    let (mut limit, mut offset) = (DEFAULT_PAGE, 0u32);
+    for (key, value) in query
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+    {
+        let bad = Fail::new(StatusCode::BAD_REQUEST, "BadRequest");
+        match key {
+            "limit" => limit = value.parse().map_err(|_| bad)?,
+            "offset" => offset = value.parse().map_err(|_| bad)?,
+            _ => {}
+        }
+    }
+    let limit = limit.clamp(1, MAX_PAGE);
+    let placement = accounts.placement_games;
+    let board = accounts
+        .blocking(move |store| store.leaderboard(placement, limit, offset))
+        .await?;
+    Ok(json(StatusCode::OK, &board))
+}
+
+/// `GET /api/players/{username}`: rating, rank and recent ranked games.
+async fn profile(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Response, Fail> {
+    let accounts = enabled(&state)?;
+    let placement = accounts.placement_games;
+    accounts
+        .blocking(move |store| store.profile(&username, placement, PROFILE_RECENT))
+        .await?
+        .map(|p| json(StatusCode::OK, &p))
+        .ok_or(Fail::new(StatusCode::NOT_FOUND, "PlayerNotFound"))
 }
 
 /// `POST /api/accounts`: create an account and log it in.

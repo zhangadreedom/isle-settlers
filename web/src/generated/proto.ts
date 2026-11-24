@@ -122,11 +122,25 @@ finalPoints: Array<number> | null, };
 
 export type BotLevel = "Easy" | "Normal" | "Hard";
 
+export type Tier = "Bronze" | "Silver" | "Gold" | "Platinum" | "Diamond" | "Master";
+
+export type SeatRating = { rating: number, 
+/**
+ * `None` during placement games.
+ */
+tier: Tier | null, };
+
+export type RatingChange = { seat: number, username: string, before: number, after: number, };
+
 export type SeatView = { "type": "Open" } | { "type": "Human", "value": { name: string, 
 /**
  * Signed in: `name` is the account's username.
  */
-registered: boolean, connected: boolean, 
+registered: boolean, 
+/**
+ * Rating of a signed-in player.
+ */
+rating: SeatRating | null, connected: boolean, 
 /**
  * A bot is playing for this player while they are disconnected.
  */
@@ -144,7 +158,16 @@ you: number | null, started: boolean, seats: Array<SeatView>, spectators: number
 /**
  * Id of the finished game's replay (`/api/replays/{id}`).
  */
-replay: string | null, };
+replay: string | null, 
+/**
+ * Ranked room: the game counts for the ratings of signed-in players
+ * when at least two of them play.
+ */
+ranked: boolean, 
+/**
+ * Rating changes once a ranked game is over and rated.
+ */
+rating: Array<RatingChange>, };
 
 export type LegalActions = { version: number, actions: Array<Action>, };
 
@@ -166,7 +189,11 @@ export type ChatLine = {
  */
 seat: number | null, name: string, text: string, };
 
-export type ClientMsg = { "type": "Create", "value": { players: number, bots: BotLevel, name: string, session?: string | null, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, session?: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
+export type ClientMsg = { "type": "Create", "value": { players: number, bots: BotLevel, name: string, 
+/**
+ * Ranked room (see [`RoomInfo::ranked`]).
+ */
+ranked: boolean, session?: string | null, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, session?: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "SetRanked", "value": { ranked: boolean, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
 
 export type ServerMsg = { "type": "Joined", "value": { room: string, seat: number | null, token: string | null, } } | { "type": "Room", "value": RoomInfo } | { "type": "Snapshot", "value": Snapshot } | { "type": "Update", "value": Update } | { "type": "Chat", "value": ChatLine } | { "type": "Error", "value": { code: string, } };
 
@@ -220,4 +247,52 @@ export type SessionInfo = { account: AccountInfo,
 expiresAt: number, };
 
 export type ApiError = { error: string, };
+
+export type LeaderboardEntry = { 
+/**
+ * 1-based; players with equal ratings share a rank.
+ */
+rank: number, username: string, rating: number, tier: Tier, games: number, wins: number, };
+
+export type Leaderboard = { entries: Array<LeaderboardEntry>, 
+/**
+ * Placed players in total.
+ */
+total: number, };
+
+export type MatchSummary = { 
+/**
+ * Replay id (`#/replay/{id}`, `/api/replays/{id}`).
+ */
+id: string, 
+/**
+ * Unix seconds.
+ */
+finishedAt: number, 
+/**
+ * Seats in the game, bots and guests included.
+ */
+seats: number, 
+/**
+ * 1-based finishing place among all seats.
+ */
+place: number, points: number, before: number, after: number, };
+
+export type PlayerProfile = { username: string, rating: number, 
+/**
+ * `None` during placement games.
+ */
+tier: Tier | null, 
+/**
+ * Leaderboard rank, once placed.
+ */
+rank: number | null, games: number, wins: number, 
+/**
+ * Placement games still to play (0 once placed).
+ */
+placementLeft: number, 
+/**
+ * Most recent ranked games, newest first.
+ */
+recent: Array<MatchSummary>, };
 

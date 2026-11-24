@@ -13,10 +13,13 @@ use isle_proto::net::{
     BotLevel, ChatLine, ClientMsg, LegalActions, RoomInfo, SeatView, ServerMsg, Snapshot, Update,
     clean_chat, clean_name,
 };
+use isle_proto::ranking::RatingChange;
 use isle_proto::{ReplayPlayer, ReplayRecord, board_info, player_view};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
+use crate::auth::Accounts;
+use crate::ranking::MatchEntry;
 use crate::registry::Registry;
 use crate::store::{ReplayArchive, RoomRecord, SeatAccount, SeatRecord, Store};
 use crate::{ServerConfig, ids};
@@ -157,6 +160,13 @@ pub struct Room {
     replays: Arc<ReplayArchive>,
     /// Set once the game is over and archived.
     replay_id: Option<String>,
+    accounts: Option<Arc<Accounts>>,
+    /// The game counts for ratings (with two or more signed-in players).
+    ranked: bool,
+    /// Rating changes of the finished ranked game.
+    rating: Vec<RatingChange>,
+    /// When to (re)read or compute the ratings of a finished ranked game.
+    rate_due: Option<Instant>,
     seed: u64,
     bot_level: BotLevel,
     host: u8,
@@ -177,6 +187,7 @@ impl Room {
         id: String,
         players: u8,
         bots: BotLevel,
+        ranked: bool,
         creator: String,
         account: Option<SeatAccount>,
         registry: &Registry,
@@ -202,6 +213,10 @@ impl Room {
             store: registry.store().cloned(),
             replays: registry.replays().clone(),
             replay_id: None,
+            accounts: registry.accounts().cloned(),
+            ranked,
+            rating: Vec::new(),
+            rate_due: None,
             seed: ids::seed(),
             bot_level: bots,
             host: 0,
@@ -275,6 +290,10 @@ impl Room {
             store: registry.store().cloned(),
             replays: registry.replays().clone(),
             replay_id: record.replay,
+            accounts: registry.accounts().cloned(),
+            ranked: record.ranked,
+            rating: Vec::new(),
+            rate_due: None,
             seed: record.seed,
             bot_level: record.bot_level,
             host: record.host,
@@ -288,6 +307,11 @@ impl Room {
             idle_since: Some(now),
         };
         room.archive_if_finished();
+        // A finished ranked game: read back (or, after a crash, compute)
+        // its rating changes.
+        if room.ranked && room.replay_id.is_some() {
+            room.rate_due = Some(now);
+        }
         Ok(room)
     }
 
@@ -333,6 +357,7 @@ impl Room {
         let mut wake = [
             self.bot_due,
             self.save_due,
+            self.rate_due,
             self.idle_deadline(),
             self.next_autopilot(),
         ];
@@ -375,6 +400,9 @@ impl Room {
             self.autopilot_shown = autopilot;
             self.broadcast_room(now);
             self.reschedule(now);
+        }
+        if self.rate_due.is_some_and(|t| t <= now) {
+            self.rate().await;
         }
         if self.save_due.is_some_and(|t| t <= now) {
             self.save().await;
@@ -643,6 +671,19 @@ impl Room {
                 Ok(())
             }
 
+            ClientMsg::SetRanked { ranked } => {
+                if seat != Some(self.host) {
+                    return Err("NotHost".into());
+                }
+                if self.game.is_some() {
+                    return Err("AlreadyStarted".into());
+                }
+                self.ranked = ranked;
+                self.mark_dirty(now);
+                self.broadcast_room(now);
+                Ok(())
+            }
+
             ClientMsg::Start => {
                 if seat != Some(self.host) {
                     return Err("NotHost".into());
@@ -784,8 +825,79 @@ impl Room {
         self.replays.put(&id, &record);
         tracing::info!(room = %self.id, replay = %id, "replay archived");
         self.replay_id = Some(id);
+        if self.ranked {
+            self.rate_due = Some(Instant::now());
+        }
         self.save_due.get_or_insert(Instant::now());
         true
+    }
+
+    /// Rates a finished ranked game (or reads back its stored result) and
+    /// tells everyone. Games with fewer than two signed-in players are not
+    /// rated. Places: the winner first, then by points, ties shared.
+    async fn rate(&mut self) {
+        self.rate_due = None;
+        let (Some(accounts), Some(game), Some(id)) = (
+            self.accounts.clone(),
+            self.game.as_ref(),
+            self.replay_id.clone(),
+        ) else {
+            return;
+        };
+        let Some(winner) = game.state.winner.map(usize::from) else {
+            return;
+        };
+        let n = self.seats.len();
+        let points: Vec<u8> = (0..n as u8).map(|p| game.state.victory_points(p)).collect();
+        let place = |p: usize| -> u8 {
+            if p == winner {
+                1
+            } else {
+                2 + (0..n)
+                    .filter(|&q| q != winner && points[q] > points[p])
+                    .count() as u8
+            }
+        };
+        let entries: Vec<MatchEntry> = self
+            .seats
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| match &s.kind {
+                SeatKind::Human {
+                    account: Some(a), ..
+                } => Some(MatchEntry {
+                    account_id: a.id,
+                    seat: i as u8,
+                    place: place(i),
+                    points: points[i],
+                }),
+                _ => None,
+            })
+            .collect();
+        if entries.len() < 2 {
+            return;
+        }
+        match accounts.record_match(id.clone(), n as u8, entries).await {
+            Ok(results) => {
+                tracing::info!(room = %self.id, replay = %id, players = results.len(), "game rated");
+                self.rating = results.iter().map(|(c, _)| c.clone()).collect();
+                for (change, rating) in results {
+                    if let SeatKind::Human {
+                        account: Some(a), ..
+                    } = &mut self.seats[change.seat as usize].kind
+                    {
+                        a.rating = Some(rating);
+                    }
+                }
+                self.mark_dirty(Instant::now());
+                self.broadcast_room(Instant::now());
+            }
+            Err(e) => {
+                tracing::error!(room = %self.id, "could not rate the game: {e}");
+                // Recording is idempotent: try again later.
+                self.rate_due = Some(Instant::now() + Duration::from_secs(30));
+            }
+        }
     }
 
     // ------------------------------------------------------------- messages
@@ -801,6 +913,7 @@ impl Room {
                 SeatKind::Human { name, account, .. } => SeatView::Human {
                     name: name.clone(),
                     registered: account.is_some(),
+                    rating: account.as_ref().and_then(|a| a.rating),
                     connected: s.connections > 0,
                     autopilot: self.on_autopilot(i as u8, now),
                 },
@@ -814,6 +927,8 @@ impl Room {
             seats,
             spectators: self.conns.values().filter(|c| c.seat.is_none()).count() as u32,
             replay: self.replay_id.clone(),
+            ranked: self.ranked,
+            rating: self.rating.clone(),
         }
     }
 
@@ -927,6 +1042,7 @@ impl Room {
                 .map(|g| g.actions.clone())
                 .unwrap_or_default(),
             replay: self.replay_id.clone(),
+            ranked: self.ranked,
         }
     }
 

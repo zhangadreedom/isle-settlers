@@ -43,8 +43,10 @@ pub const MAX_SESSION_TTL: Duration = Duration::from_secs(366 * 24 * 60 * 60);
 
 /// `PRAGMA application_id` marking our databases ("ISLE").
 const APPLICATION_ID: i32 = 0x4953_4C45;
-/// `PRAGMA user_version` of the current schema.
-const SCHEMA_VERSION: i32 = 1;
+/// `PRAGMA user_version` of the current schema: 1 = accounts and sessions,
+/// 2 = adds ratings and ranked match history. Older versions are migrated
+/// in place when opened.
+const SCHEMA_VERSION: i32 = 2;
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 const SCHEMA: &str = "
@@ -68,9 +70,40 @@ CREATE INDEX sessions_account ON sessions(account_id);
 CREATE INDEX sessions_expiry ON sessions(expires_at);
 ";
 
+/// Version 2: ratings (see `rating`) and ranked games.
+const SCHEMA_V2: &str = "
+CREATE TABLE ratings (
+    account_id INTEGER NOT NULL PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    mu         REAL    NOT NULL,
+    sigma      REAL    NOT NULL CHECK (sigma > 0),
+    games      INTEGER NOT NULL CHECK (games >= 0),
+    wins       INTEGER NOT NULL CHECK (wins BETWEEN 0 AND games),
+    updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE matches (
+    id          TEXT    NOT NULL PRIMARY KEY,
+    finished_at INTEGER NOT NULL,
+    seats       INTEGER NOT NULL CHECK (seats BETWEEN 2 AND 6)
+) STRICT;
+CREATE TABLE match_players (
+    match_id   TEXT    NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    seat       INTEGER NOT NULL CHECK (seat BETWEEN 0 AND 5),
+    place      INTEGER NOT NULL CHECK (place BETWEEN 1 AND 6),
+    points     INTEGER NOT NULL CHECK (points >= 0),
+    before     INTEGER NOT NULL,
+    after      INTEGER NOT NULL,
+    PRIMARY KEY (match_id, account_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX match_players_account ON match_players(account_id);
+CREATE INDEX matches_finished ON matches(finished_at);
+";
+
 #[derive(Debug)]
 pub enum AccountStoreError {
     InvalidConfig(String),
+    /// A game result that cannot be recorded (see `ranking`).
+    InvalidMatch(String),
     InvalidUsername(UsernameError),
     PasswordTooShort,
     PasswordTooLong,
@@ -92,6 +125,7 @@ impl fmt::Display for AccountStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AccountStoreError::InvalidConfig(m) => write!(f, "invalid account store config: {m}"),
+            AccountStoreError::InvalidMatch(m) => write!(f, "invalid match result: {m}"),
             AccountStoreError::InvalidUsername(e) => write!(f, "{e}"),
             AccountStoreError::PasswordTooShort => {
                 write!(f, "password is shorter than {MIN_PASSWORD_LEN} bytes")
@@ -254,12 +288,19 @@ impl AccountStore {
         })
     }
 
+    /// A store that hashes with minimal Argon2 cost, for fast tests.
+    #[cfg(test)]
+    pub(crate) fn open_for_tests(dir: &Path) -> AccountStore {
+        AccountStore::open_inner(dir, AccountStoreConfig::default(), tests::cheap_hash)
+            .expect("open store")
+    }
+
     /// Path of the database file.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    fn lock(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Connection> {
         // SQLite rolls back unfinished transactions, so the connection is
         // still consistent after a panic elsewhere.
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
@@ -508,7 +549,7 @@ impl AccountStore {
     }
 }
 
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
@@ -545,49 +586,55 @@ fn check_file(path: &Path) -> Result<(), AccountStoreError> {
     Ok(())
 }
 
-/// Reads identity markers: `Some(true)` = empty new database,
-/// `Some(false)` = our current schema, error otherwise.
-fn identify(conn: &Connection) -> Result<bool, AccountStoreError> {
+/// Reads identity markers: `None` = empty new database, `Some(v)` = our
+/// schema at version `v` (current or older), error otherwise.
+fn identify(conn: &Connection) -> Result<Option<i32>, AccountStoreError> {
     let app_id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let objects: i64 = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0))?;
     if app_id == 0 && version == 0 && objects == 0 {
-        return Ok(true);
+        return Ok(None);
     }
     if app_id != APPLICATION_ID {
         return Err(AccountStoreError::Incompatible(format!(
             "not an isle-settlers account database (application_id {app_id:#x})"
         )));
     }
-    if version != SCHEMA_VERSION {
+    if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(AccountStoreError::Incompatible(format!(
             "unsupported account schema version {version} (expected {SCHEMA_VERSION})"
         )));
     }
-    Ok(false)
+    Ok(Some(version))
 }
 
 /// Validates an existing database (read-only checks first) or initializes
 /// an empty one.
 fn prepare_database(conn: &mut Connection) -> Result<(), AccountStoreError> {
     integrity_check(conn)?;
-    let fresh = identify(conn)?;
+    let found = identify(conn)?;
     // Only now that the file is known to be ours (or empty) do we write.
     // WAL may be unavailable on some filesystems; the rollback journal
     // SQLite then keeps is atomic too.
     let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     conn.execute_batch("PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;")?;
-    if fresh {
+    if found != Some(SCHEMA_VERSION) {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Another process may have initialized it meanwhile.
-        if identify(&tx)? {
-            tx.execute_batch(SCHEMA)?;
-            tx.execute_batch(&format!(
-                "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {SCHEMA_VERSION};"
-            ))?;
+        // Another process may have initialized or migrated it meanwhile.
+        let start = match identify(&tx)? {
+            None => {
+                tx.execute_batch(SCHEMA)?;
+                tx.execute_batch(&format!("PRAGMA application_id = {APPLICATION_ID};"))?;
+                1
+            }
+            Some(v) => v,
+        };
+        if start < 2 {
+            tx.execute_batch(SCHEMA_V2)?;
         }
+        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         tx.commit()?;
-        if identify(conn)? {
+        if identify(conn)? != Some(SCHEMA_VERSION) {
             return Err(AccountStoreError::Corrupt(
                 "schema initialization did not persist".into(),
             ));
@@ -615,6 +662,9 @@ fn verify_schema(conn: &Connection) -> Result<(), AccountStoreError> {
     for sql in [
         "SELECT id, username, password_hash, created_at FROM accounts LIMIT 0",
         "SELECT token_hash, account_id, created_at, expires_at FROM sessions LIMIT 0",
+        "SELECT account_id, mu, sigma, games, wins, updated_at FROM ratings LIMIT 0",
+        "SELECT id, finished_at, seats FROM matches LIMIT 0",
+        "SELECT match_id, account_id, seat, place, points, before, after FROM match_players LIMIT 0",
     ] {
         conn.prepare(sql)
             .map_err(|e| AccountStoreError::Corrupt(format!("schema mismatch: {e}")))?;
@@ -630,7 +680,7 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
     )
 }
 
-fn check_canonical(username: &str) -> Result<(), AccountStoreError> {
+pub(crate) fn check_canonical(username: &str) -> Result<(), AccountStoreError> {
     match accounts::normalize_username(username) {
         Ok(n) if n == username => Ok(()),
         _ => Err(AccountStoreError::Corrupt(format!(
@@ -671,13 +721,13 @@ fn parse_token(token: &str) -> Option<[u8; TOKEN_BYTES]> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const PW: &str = "correct horse battery";
 
     /// Minimal-cost Argon2id so tests stay fast.
-    fn cheap_hash(password: &str) -> Result<String, CredentialError> {
+    pub(crate) fn cheap_hash(password: &str) -> Result<String, CredentialError> {
         let params = argon2::Params::new(8, 1, 1, None).expect("params");
         let argon =
             argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
@@ -685,10 +735,10 @@ mod tests {
     }
 
     /// Unique directory under the OS temp dir, removed on drop.
-    struct TempDir(PathBuf);
+    pub(crate) struct TempDir(pub(crate) PathBuf);
 
     impl TempDir {
-        fn new() -> TempDir {
+        pub(crate) fn new() -> TempDir {
             let mut bytes = [0u8; 8];
             getrandom::fill(&mut bytes).expect("rng");
             let dir = std::env::temp_dir().join(format!("isle-account-store-{}", to_hex(&bytes)));

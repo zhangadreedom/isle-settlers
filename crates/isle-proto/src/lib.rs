@@ -19,6 +19,7 @@ pub use isle_core::{Action, DevCard, Event, RuleError, TradeResponse};
 
 pub mod account;
 pub mod net;
+pub mod ranking;
 pub mod replay;
 
 pub use replay::{ReplayError, ReplayPlayer, ReplayRecord};

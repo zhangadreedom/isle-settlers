@@ -81,8 +81,8 @@ pub struct SessionInfo {
 /// `PasswordTooShort` (400), `PasswordTooLong` (400), `UsernameTaken` (409),
 /// `InvalidCredentials` (401, unknown user or wrong password),
 /// `NotLoggedIn` (401, missing, expired or revoked token),
-/// `TooManyAttempts` (429, with `Retry-After`), `Busy` (503) or
-/// `Internal` (500).
+/// `TooManyAttempts` (429, with `Retry-After`), `PlayerNotFound` (404),
+/// `Busy` (503) or `Internal` (500).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ApiError {

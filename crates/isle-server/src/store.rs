@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use isle_core::Action;
 use isle_proto::net::BotLevel;
+use isle_proto::ranking::SeatRating;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -22,6 +23,9 @@ pub struct RoomRecord {
     /// Replay id once the game is over.
     #[serde(default)]
     pub replay: Option<String>,
+    /// Ranked room (absent in records from before ranking: casual).
+    #[serde(default)]
+    pub ranked: bool,
 }
 
 impl RoomRecord {
@@ -50,6 +54,9 @@ pub enum SeatRecord {
 pub struct SeatAccount {
     pub id: i64,
     pub username: String,
+    /// Rating when they sat down, refreshed after a ranked game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<SeatRating>,
 }
 
 /// One JSON file per room in `dir`, replaced atomically on every save.

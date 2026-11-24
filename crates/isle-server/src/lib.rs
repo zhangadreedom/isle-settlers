@@ -14,6 +14,8 @@
 pub mod account_store;
 pub mod accounts;
 mod auth;
+pub mod ranking;
+pub mod rating;
 mod registry;
 mod room;
 mod store;
@@ -66,6 +68,8 @@ pub struct ServerConfig {
     /// Header a trusted reverse proxy puts the client address in (e.g.
     /// `X-Forwarded-For`); rate limits use the peer address otherwise.
     pub client_ip_header: Option<String>,
+    /// Ranked games before a player gets a tier and a leaderboard rank.
+    pub placement_games: u32,
 }
 
 impl Default for ServerConfig {
@@ -85,6 +89,7 @@ impl Default for ServerConfig {
             auth_burst: 10,
             auth_refill: Duration::from_secs(6),
             client_ip_header: None,
+            placement_games: isle_proto::ranking::PLACEMENT_GAMES,
         }
     }
 }
@@ -103,7 +108,7 @@ impl AppState {
     pub fn new(config: ServerConfig) -> Result<AppState, String> {
         let accounts = Accounts::open(&config)?.map(Arc::new);
         Ok(AppState {
-            registry: Registry::new(config),
+            registry: Registry::new(config, accounts.clone()),
             accounts,
             started: Instant::now(),
         })

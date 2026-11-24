@@ -7,6 +7,7 @@ use isle_proto::net::BotLevel;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::ServerConfig;
+use crate::auth::Accounts;
 use crate::ids;
 use crate::room::{Attached, Outbox, Room, RoomCmd};
 use crate::store::{ReplayArchive, SeatAccount, Store};
@@ -15,6 +16,7 @@ pub type RoomSender = mpsc::Sender<RoomCmd>;
 
 pub struct Registry {
     config: ServerConfig,
+    accounts: Option<Arc<Accounts>>,
     store: Option<Store>,
     replays: Arc<ReplayArchive>,
     rooms: Mutex<HashMap<String, RoomSender>>,
@@ -23,11 +25,12 @@ pub struct Registry {
 
 impl Registry {
     /// Creates the registry and restores rooms from the data directory.
-    pub fn new(config: ServerConfig) -> Arc<Registry> {
+    pub fn new(config: ServerConfig, accounts: Option<Arc<Accounts>>) -> Arc<Registry> {
         let store = config.data_dir.as_ref().map(|d| Store::open(d.clone()));
         let replays = Arc::new(ReplayArchive::new(config.data_dir.as_deref()));
         let registry = Arc::new_cyclic(|me| Registry {
             config,
+            accounts,
             store,
             replays,
             rooms: Mutex::new(HashMap::new()),
@@ -60,6 +63,10 @@ impl Registry {
         self.store.as_ref()
     }
 
+    pub(crate) fn accounts(&self) -> Option<&Arc<Accounts>> {
+        self.accounts.as_ref()
+    }
+
     pub fn replays(&self) -> &Arc<ReplayArchive> {
         &self.replays
     }
@@ -73,6 +80,7 @@ impl Registry {
         &self,
         players: u8,
         bots: BotLevel,
+        ranked: bool,
         name: String,
         account: Option<SeatAccount>,
         out: Outbox,
@@ -96,6 +104,7 @@ impl Registry {
             id.clone(),
             players,
             bots,
+            ranked,
             name.clone(),
             account.clone(),
             self,
