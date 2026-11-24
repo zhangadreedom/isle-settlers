@@ -38,7 +38,7 @@ pub use board::Board;
 pub use resources::{HarborKind, Resource, ResourceSet, Terrain};
 pub use rng::Rng;
 pub use state::{
-    ConfigError, DevCard, GameConfig, GameState, MAX_PLAYERS, Phase, PlayerState, TradeOffer,
-    TradeResponse,
+    ConfigError, DevCard, GameConfig, GameState, MAX_PLAYERS, MAX_SHIPS, Phase, PlayerState,
+    Scenario, TradeOffer, TradeResponse,
 };
 pub use topology::{BoardLayout, Topology};

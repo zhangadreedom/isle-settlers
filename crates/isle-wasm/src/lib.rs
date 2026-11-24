@@ -168,6 +168,7 @@ impl Replay {
             num_players,
             victory_points,
             balanced_board,
+            ..GameConfig::default()
         };
         let start = GameState::new(config, seed).map_err(|_| fail(ReplayError::Config))?;
         let actions = decode_actions(actions).map_err(fail)?;

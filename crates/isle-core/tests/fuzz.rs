@@ -5,7 +5,8 @@
 //! * rejected actions leave the state untouched.
 
 use isle_core::{
-    Action, Event, GameConfig, GameState, Phase, Resource, ResourceSet, Rng, TradeResponse,
+    Action, Event, GameConfig, GameState, Phase, Resource, ResourceSet, Rng, Scenario,
+    TradeResponse,
 };
 
 fn random_set(rng: &mut Rng, max_total: u32) -> ResourceSet {
@@ -23,7 +24,13 @@ fn random_resource(rng: &mut Rng) -> Resource {
 
 /// Arbitrary (often illegal) action, excluding open-ended trade proposals.
 fn random_action(rng: &mut Rng) -> Action {
-    match rng.below(17) {
+    match rng.below(20) {
+        17 => Action::BuildShip(rng.below(125) as u8),
+        18 => Action::MoveShip {
+            from: rng.below(125) as u8,
+            to: rng.below(125) as u8,
+        },
+        19 => Action::ChooseGold(random_set(rng, 3)),
         0 => Action::RollDice,
         1 => Action::BuildRoad(rng.below(115) as u8),
         2 => Action::BuildSettlement(rng.below(85) as u8),
@@ -61,7 +68,8 @@ fn weight(a: &Action) -> u32 {
     match a {
         Action::BuildCity(_) | Action::BuildSettlement(_) => 1000,
         Action::BuyDevCard => 100,
-        Action::BuildRoad(_) => 20,
+        Action::BuildRoad(_) | Action::BuildShip(_) => 20,
+        Action::MoveShip { .. } => 3,
         Action::EndTurn => 5,
         _ => 1,
     }
@@ -94,10 +102,16 @@ fn assert_round_trip(a: Action) {
 }
 
 fn play_one(seed: u64, players: u8, cross_check: bool) -> (GameState, usize) {
-    let config = GameConfig {
-        num_players: players,
-        ..GameConfig::default()
-    };
+    play_scenario(Scenario::Classic, seed, players, cross_check)
+}
+
+fn play_scenario(
+    scenario: Scenario,
+    seed: u64,
+    players: u8,
+    cross_check: bool,
+) -> (GameState, usize) {
+    let config = GameConfig::scenario(scenario, players);
     let mut g = GameState::new(config, seed).unwrap();
     let mut rng = Rng::new(seed ^ 0xDEAD_BEEF);
     let mut legal = Vec::new();
@@ -216,4 +230,45 @@ fn five_and_six_player_games_finish() {
             "only {finished}/150 random {players}-player games finished"
         );
     }
+}
+
+#[test]
+fn archipelago_games_with_cross_checking() {
+    for seed in 0..60 {
+        play_scenario(Scenario::Archipelago, seed, 2 + (seed % 3) as u8, true);
+    }
+}
+
+#[test]
+fn archipelago_games_finish_and_use_the_sea() {
+    let (mut finished, mut ships, mut islands, mut gold) = (0, 0, 0, 0);
+    for seed in 700..900 {
+        let (g, _) = play_scenario(Scenario::Archipelago, seed, 3 + (seed % 2) as u8, false);
+        if let Some(w) = g.winner {
+            finished += 1;
+            assert!(g.victory_points(w) >= g.config.victory_points);
+        }
+        let n = g.num_players();
+        ships += (0..n).filter(|&p| g.ships[p] != 0).count();
+        islands += (0..n).filter(|&p| g.players[p].islands != 0).count();
+        gold += (0..n)
+            .filter(|&p| {
+                let tiles = g.board.tiles();
+                (0..tiles.len()).any(|t| {
+                    tiles[t] == isle_core::Terrain::Gold
+                        && g.buildings_of(p as u8) & g.topo().tile_vertex_mask[t] != 0
+                })
+            })
+            .count();
+        let (again, _) = play_scenario(Scenario::Archipelago, seed, 3 + (seed % 2) as u8, false);
+        assert_eq!(g, again);
+    }
+    assert!(
+        finished > 150,
+        "only {finished}/200 archipelago games finished"
+    );
+    assert!(
+        ships > 300 && islands > 50 && gold > 20,
+        "ships {ships} islands {islands} gold {gold}"
+    );
 }

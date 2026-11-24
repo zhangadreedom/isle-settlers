@@ -390,6 +390,7 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
                 Action::RollDice
             }
         }
+        Phase::Gold { .. } => pick(rng),
         Phase::Main if p != s.current => Action::RespondTrade { accept: false },
         Phase::Main | Phase::SpecialBuild { .. } => main_policy(s, p, legal, rng),
         Phase::GameOver => legal[0],

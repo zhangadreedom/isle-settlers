@@ -59,6 +59,12 @@ const ERRORS: Record<RuleError, string> = {
   PartnerHasNotAccepted: '对方还没有接受',
   WrongDiscardAmount: '必须正好弃掉一半手牌',
   NothingToDiscard: '你不需要弃牌',
+  WrongGround: '道路修在陆地边上，船造在临海的边上',
+  PirateBlocks: '海盗挡住了那里',
+  ShipAlreadyMoved: '每回合只能移动一艘船',
+  ShipCannotMove: '这艘船不能移动',
+  NoGoldOwed: '你没有要选的金矿资源',
+  WrongGoldAmount: '要选够金矿给你的数量',
 };
 
 const SERVER_ERRORS: Record<string, string> = {
@@ -159,8 +165,19 @@ export function describe(e: Event, name: (seat: number) => string): string | nul
       return e.value.owner === null ? '最长道路暂时无人持有' : `${name(e.value.owner)} 获得【最长道路】`;
     case 'LargestArmyChanged':
       return e.value.owner === null ? '最大骑士暂时无人持有' : `${name(e.value.owner)} 获得【最大骑士】`;
+    case 'ShipBuilt':
+      return `${name(e.value.player)} 造了一艘船`;
+    case 'ShipMoved':
+      return `${name(e.value.player)} 移动了一艘船`;
+    case 'PirateMoved':
+      return `${name(e.value.player)} 移动了海盗`;
+    case 'GoldChosen':
+      return `${name(e.value.player)} 从金矿选取 ${setText(e.value.resources)}`;
+    case 'IslandSettled':
+      return `${name(e.value.player)} 登上新的岛屿，奖励 ${e.value.points} 分`;
     case 'TurnEnded':
     case 'SpecialBuildPassed':
+    case 'GoldOwed':
       return null;
     case 'GameWon':
       return `${name(e.value.player)} 以 ${e.value.points} 分获胜！`;

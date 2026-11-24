@@ -33,6 +33,7 @@ impl GameState {
                         out.push(Action::RespondTrade { accept: false });
                     }
                 }
+                Phase::Gold { .. } => self.push_gold_choices(player, out),
                 _ => {}
             }
             return;
@@ -40,17 +41,22 @@ impl GameState {
 
         match self.phase {
             Phase::SetupSettlement => {
-                for v in vertices_in(self.settlement_spots(player, false)) {
+                for v in vertices_in(self.setup_spots()) {
                     out.push(Action::BuildSettlement(v));
                 }
             }
             Phase::SetupRoad { vertex } => {
-                for e in
-                    edges_in(self.topo().vertex_edge_mask[vertex as usize] & !self.occupied_edges())
-                {
+                let free = self.topo().vertex_edge_mask[vertex as usize] & !self.occupied_edges();
+                for e in edges_in(free & self.board.land_edges) {
                     out.push(Action::BuildRoad(e));
                 }
+                if self.board.layout.has_ships() {
+                    for e in edges_in(free & self.board.sea_edges & !self.pirate_edges()) {
+                        out.push(Action::BuildShip(e));
+                    }
+                }
             }
+            Phase::Gold { .. } => self.push_gold_choices(player, out),
             Phase::PreRoll => {
                 out.push(Action::RollDice);
                 self.push_dev_card_plays(player, out);
@@ -61,8 +67,12 @@ impl GameState {
                 }
             }
             Phase::MoveRobber => {
+                // Land tiles move the robber, sea tiles the pirate.
                 for tile in 0..self.topo().num_tiles as u8 {
-                    if tile == self.robber {
+                    if tile == self.robber || tile == self.pirate {
+                        continue;
+                    }
+                    if self.board.is_sea(tile) && self.pirate == NONE {
                         continue;
                     }
                     let victims = self.robber_victims(tile, player);
@@ -82,6 +92,13 @@ impl GameState {
             }
             Phase::Main => {
                 self.push_builds(player, out);
+                if !self.ship_moved {
+                    for from in edges_in(self.movable_ships(player)) {
+                        for to in edges_in(self.ship_moves(player, from)) {
+                            out.push(Action::MoveShip { from, to });
+                        }
+                    }
+                }
                 self.push_dev_card_plays(player, out);
                 for give in Resource::ALL {
                     if ps.hand[give] >= self.trade_ratio(player, give) {
@@ -105,8 +122,15 @@ impl GameState {
                 }
             }
             Phase::RoadBuilding { .. } => {
-                for e in edges_in(self.road_spots(player)) {
-                    out.push(Action::BuildRoad(e));
+                if ps.roads_left > 0 {
+                    for e in edges_in(self.road_spots(player)) {
+                        out.push(Action::BuildRoad(e));
+                    }
+                }
+                if ps.ships_left > 0 {
+                    for e in edges_in(self.ship_spots(player)) {
+                        out.push(Action::BuildShip(e));
+                    }
                 }
             }
             Phase::SpecialBuild { .. } => self.push_builds(player, out),
@@ -121,6 +145,11 @@ impl GameState {
         if ps.roads_left > 0 && ps.hand.contains(&cost::ROAD) {
             for e in edges_in(self.road_spots(player)) {
                 out.push(Action::BuildRoad(e));
+            }
+        }
+        if ps.ships_left > 0 && ps.hand.contains(&cost::SHIP) {
+            for e in edges_in(self.ship_spots(player)) {
+                out.push(Action::BuildShip(e));
             }
         }
         if ps.settlements_left > 0 && ps.hand.contains(&cost::SETTLEMENT) {
@@ -147,7 +176,9 @@ impl GameState {
         if has(DevCard::Knight) {
             out.push(Action::PlayKnight);
         }
-        if has(DevCard::RoadBuilding) && ps.roads_left > 0 && self.road_spots(player) != 0 {
+        let route = (ps.roads_left > 0 && self.road_spots(player) != 0)
+            || (ps.ships_left > 0 && self.ship_spots(player) != 0);
+        if has(DevCard::RoadBuilding) && route {
             out.push(Action::PlayRoadBuilding);
         }
         if has(DevCard::YearOfPlenty) {
@@ -179,25 +210,54 @@ impl GameState {
     }
 }
 
+impl GameState {
+    /// Every way to pick the gold `player` is owed from the bank.
+    fn push_gold_choices(&self, player: u8, out: &mut Vec<Action>) {
+        let owed = self.pending_gold[player as usize] as u32;
+        if owed == 0 {
+            return;
+        }
+        let want = owed.min(self.bank.total()) as u8;
+        push_subsets(self.bank, want, Action::ChooseGold, out);
+    }
+}
+
 /// Every distinct way to discard `need` cards from `hand`.
 fn push_discards(hand: ResourceSet, need: u8, out: &mut Vec<Action>) {
-    fn rec(i: usize, remaining: u8, hand: &[u8; 5], cur: &mut [u8; 5], out: &mut Vec<Action>) {
+    push_subsets(hand, need, Action::Discard, out);
+}
+
+/// Every distinct set of `need` cards taken from `from`.
+fn push_subsets(
+    from: ResourceSet,
+    need: u8,
+    action: fn(ResourceSet) -> Action,
+    out: &mut Vec<Action>,
+) {
+    fn rec(
+        i: usize,
+        remaining: u8,
+        from: &[u8; 5],
+        cur: &mut [u8; 5],
+        action: fn(ResourceSet) -> Action,
+        out: &mut Vec<Action>,
+    ) {
         if i == 4 {
-            if remaining <= hand[4] {
+            if remaining <= from[4] {
                 cur[4] = remaining;
-                out.push(Action::Discard(ResourceSet(*cur)));
+                out.push(action(ResourceSet(*cur)));
             }
             return;
         }
-        let rest: u8 = hand[i + 1..].iter().sum();
+        let rest: u8 = from[i + 1..].iter().sum();
         let lo = remaining.saturating_sub(rest);
-        let hi = hand[i].min(remaining);
+        let hi = from[i].min(remaining);
         for c in lo..=hi {
             cur[i] = c;
-            rec(i + 1, remaining - c, hand, cur, out);
+            rec(i + 1, remaining - c, from, cur, action, out);
         }
     }
-    rec(0, need, &hand.0, &mut [0; 5], out);
+    rec(0, need, &from.0, &mut [0; 5], action, out);
 }
 
 #[cfg(test)]

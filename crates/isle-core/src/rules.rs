@@ -56,6 +56,23 @@ impl GameState {
                     Err(E::InsufficientResources)
                 };
             }
+            Action::ChooseGold(set) => {
+                if !matches!(self.phase, Phase::Gold { .. }) {
+                    return Err(E::WrongPhase);
+                }
+                let owed = self.pending_gold[player as usize];
+                if owed == 0 {
+                    return Err(E::NoGoldOwed);
+                }
+                if set.total() != (owed as u32).min(self.bank.total()) {
+                    return Err(E::WrongGoldAmount);
+                }
+                return if self.bank.contains(&set) {
+                    Ok(())
+                } else {
+                    Err(E::BankShort)
+                };
+            }
             Action::RespondTrade { accept } => {
                 if self.phase != Phase::Main {
                     return Err(E::WrongPhase);
@@ -88,6 +105,9 @@ impl GameState {
                 let bit = 1u128 << e;
                 if self.occupied_edges() & bit != 0 {
                     return Err(E::Occupied);
+                }
+                if self.board.land_edges & bit == 0 {
+                    return Err(E::WrongGround);
                 }
                 match self.phase {
                     Phase::SetupRoad { vertex } => {
@@ -133,13 +153,90 @@ impl GameState {
                 if ps.settlements_left == 0 {
                     return Err(E::NoPiecesLeft);
                 }
+                let ground = if setup {
+                    self.board.setup_vertices
+                } else {
+                    self.board.land_vertices
+                };
+                if ground & bit == 0 {
+                    return Err(E::WrongGround);
+                }
                 if !setup {
                     if !ps.hand.contains(&cost::SETTLEMENT) {
                         return Err(E::InsufficientResources);
                     }
-                    if topo.vertex_edge_mask[v as usize] & self.roads[player as usize] == 0 {
+                    let route = self.roads[player as usize] | self.ships[player as usize];
+                    if topo.vertex_edge_mask[v as usize] & route == 0 {
                         return Err(E::NotConnected);
                     }
+                }
+                Ok(())
+            }
+
+            Action::BuildShip(e) => {
+                if !self.board.layout.has_ships() {
+                    return Err(E::WrongGround);
+                }
+                if e as usize >= topo.num_edges {
+                    return Err(E::InvalidEdge);
+                }
+                let bit = 1u128 << e;
+                if self.occupied_edges() & bit != 0 {
+                    return Err(E::Occupied);
+                }
+                if self.board.sea_edges & bit == 0 {
+                    return Err(E::WrongGround);
+                }
+                if self.pirate_edges() & bit != 0 {
+                    return Err(E::PirateBlocks);
+                }
+                match self.phase {
+                    Phase::SetupRoad { vertex } => {
+                        if topo.vertex_edge_mask[vertex as usize] & bit == 0 {
+                            return Err(E::NotConnected);
+                        }
+                        Ok(())
+                    }
+                    Phase::Main | Phase::RoadBuilding { .. } | Phase::SpecialBuild { .. } => {
+                        if ps.ships_left == 0 {
+                            return Err(E::NoPiecesLeft);
+                        }
+                        let paid = !matches!(self.phase, Phase::RoadBuilding { .. });
+                        if paid && !ps.hand.contains(&cost::SHIP) {
+                            return Err(E::InsufficientResources);
+                        }
+                        if self.ship_spots(player) & bit == 0 {
+                            return Err(E::NotConnected);
+                        }
+                        Ok(())
+                    }
+                    _ => Err(E::WrongPhase),
+                }
+            }
+
+            Action::MoveShip { from, to } => {
+                self.require_phase(Phase::Main)?;
+                if self.ship_moved {
+                    return Err(E::ShipAlreadyMoved);
+                }
+                if from as usize >= topo.num_edges || to as usize >= topo.num_edges {
+                    return Err(E::InvalidEdge);
+                }
+                let (from_bit, to_bit) = (1u128 << from, 1u128 << to);
+                if self.pirate_edges() & (from_bit | to_bit) != 0 {
+                    return Err(E::PirateBlocks);
+                }
+                if self.movable_ships(player) & from_bit == 0 || from == to {
+                    return Err(E::ShipCannotMove);
+                }
+                if self.occupied_edges() & to_bit != 0 {
+                    return Err(E::Occupied);
+                }
+                if self.board.sea_edges & to_bit == 0 {
+                    return Err(E::WrongGround);
+                }
+                if self.ship_moves(player, from) & to_bit == 0 {
+                    return Err(E::NotConnected);
                 }
                 Ok(())
             }
@@ -179,7 +276,7 @@ impl GameState {
             Action::PlayKnight => self.check_dev_card(player, DevCard::Knight),
             Action::PlayRoadBuilding => {
                 self.check_dev_card(player, DevCard::RoadBuilding)?;
-                if ps.roads_left == 0 || self.road_spots(player) == 0 {
+                if !self.can_build_free_route(player) {
                     return Err(E::NoRoadSpot);
                 }
                 Ok(())
@@ -202,7 +299,8 @@ impl GameState {
                 if tile as usize >= topo.num_tiles {
                     return Err(E::InvalidTile);
                 }
-                if tile == self.robber {
+                // A sea tile moves the pirate, a land tile the robber.
+                if tile == self.robber || tile == self.pirate {
                     return Err(E::RobberMustMove);
                 }
                 let victims = self.robber_victims(tile, player);
@@ -270,7 +368,9 @@ impl GameState {
                 }
             }
 
-            Action::Discard(_) | Action::RespondTrade { .. } => unreachable!("handled above"),
+            Action::Discard(_) | Action::RespondTrade { .. } | Action::ChooseGold(_) => {
+                unreachable!("handled above")
+            }
         }
     }
 
@@ -281,6 +381,13 @@ impl GameState {
         } else {
             Err(E::WrongPhase)
         }
+    }
+
+    /// Somewhere to place a free road or ship (Road Building).
+    fn can_build_free_route(&self, player: u8) -> bool {
+        let ps = &self.players[player as usize];
+        (ps.roads_left > 0 && self.road_spots(player) != 0)
+            || (ps.ships_left > 0 && self.ship_spots(player) != 0)
     }
 
     fn check_dev_card(&self, player: u8, card: DevCard) -> Result<(), RuleError> {
@@ -333,8 +440,11 @@ impl GameState {
                         Phase::MoveRobber
                     };
                 } else {
-                    self.produce(sum, sink);
-                    self.phase = Phase::Main;
+                    self.phase = if self.produce(sum, sink) {
+                        Phase::Gold { vertex: None }
+                    } else {
+                        Phase::Main
+                    };
                 }
             }
 
@@ -350,20 +460,54 @@ impl GameState {
                 self.players[p].roads_left -= 1;
                 sink.emit(Event::RoadBuilt { player, edge: e });
                 self.update_longest_road_after_build(player, sink);
-                match self.phase {
-                    Phase::SetupRoad { .. } => self.advance_setup(),
-                    Phase::RoadBuilding { remaining } => {
-                        let remaining = remaining - 1;
-                        self.phase = if remaining == 0
-                            || self.players[p].roads_left == 0
-                            || self.road_spots(player) == 0
-                        {
-                            self.after_interrupt()
-                        } else {
-                            Phase::RoadBuilding { remaining }
-                        };
-                    }
-                    _ => {}
+                self.after_route_piece(player);
+            }
+
+            Action::BuildShip(e) => {
+                let free = matches!(
+                    self.phase,
+                    Phase::SetupRoad { .. } | Phase::RoadBuilding { .. }
+                );
+                if !free {
+                    self.pay(p, cost::SHIP);
+                }
+                let bit = 1u128 << e;
+                self.ships[p] |= bit;
+                self.players[p].ships_left -= 1;
+                if !self.is_setup() && player == self.current {
+                    self.new_ships |= bit;
+                }
+                sink.emit(Event::ShipBuilt { player, edge: e });
+                self.update_longest_road_after_build(player, sink);
+                self.after_route_piece(player);
+            }
+
+            Action::MoveShip { from, to } => {
+                self.ships[p] = (self.ships[p] & !(1u128 << from)) | (1u128 << to);
+                self.ship_moved = true;
+                sink.emit(Event::ShipMoved { player, from, to });
+                let len = self.compute_longest_road(player);
+                if len != self.players[p].longest_road {
+                    self.players[p].longest_road = len;
+                    self.reassign_longest_road(sink);
+                }
+            }
+
+            Action::ChooseGold(set) => {
+                self.bank -= set;
+                self.players[p].hand += set;
+                self.pending_gold[p] = 0;
+                sink.emit(Event::GoldChosen {
+                    player,
+                    resources: set,
+                });
+                if let Phase::Gold { vertex } = self.phase
+                    && self.pending_gold.iter().all(|&g| g == 0)
+                {
+                    self.phase = match vertex {
+                        Some(vertex) => Phase::SetupRoad { vertex },
+                        None => Phase::Main,
+                    };
                 }
             }
 
@@ -376,15 +520,23 @@ impl GameState {
                 self.players[p].settlements_left -= 1;
                 self.players[p].harbors |= self.board.vertex_harbor[v as usize];
                 sink.emit(Event::SettlementBuilt { player, vertex: v });
+                let island = self.board.vertex_island[v as usize];
                 if setup {
+                    self.players[p].home_islands |= 1 << island;
+                    let mut gold = 0;
                     if self.is_second_setup_round() {
                         let mut got = ResourceSet::EMPTY;
                         for &t in &self.topo().vertex_tiles[v as usize] {
                             if t == NONE {
                                 break;
                             }
-                            if let Some(r) = self.board.terrain[t as usize].resource() {
-                                got[r] += 1;
+                            match self.board.terrain[t as usize] {
+                                crate::Terrain::Gold => gold += 1,
+                                terrain => {
+                                    if let Some(r) = terrain.resource() {
+                                        got[r] += 1;
+                                    }
+                                }
                             }
                         }
                         self.bank -= got;
@@ -394,9 +546,34 @@ impl GameState {
                             resources: got,
                         });
                     }
-                    self.phase = Phase::SetupRoad { vertex: v };
+                    self.phase = if gold > 0 {
+                        self.pending_gold[p] = gold;
+                        let mut owed = [0; MAX_PLAYERS];
+                        owed[p] = gold;
+                        sink.emit(Event::GoldOwed { owed });
+                        Phase::Gold { vertex: Some(v) }
+                    } else {
+                        Phase::SetupRoad { vertex: v }
+                    };
                 } else {
+                    let bonus = self.board.layout.island_bonus();
+                    let bit = 1u8 << island;
+                    let ps = &mut self.players[p];
+                    if bonus > 0 && island != 0 && (ps.home_islands | ps.islands) & bit == 0 {
+                        ps.islands |= bit;
+                        sink.emit(Event::IslandSettled {
+                            player,
+                            island,
+                            points: bonus,
+                        });
+                    }
                     self.update_longest_road_after_break(v, player, sink);
+                    // Roads and ships join at one's own settlement, which
+                    // can lengthen the builder's own route.
+                    let at_v = self.topo().vertex_edge_mask[v as usize];
+                    if self.roads[p] & at_v != 0 && self.ships[p] & at_v != 0 {
+                        self.update_longest_road_after_build(player, sink);
+                    }
                 }
             }
 
@@ -436,8 +613,14 @@ impl GameState {
 
             Action::PlayRoadBuilding => {
                 self.consume_dev_card(player, DevCard::RoadBuilding, sink);
+                let ps = &self.players[p];
+                let ships = if self.board.layout.has_ships() {
+                    ps.ships_left
+                } else {
+                    0
+                };
                 self.phase = Phase::RoadBuilding {
-                    remaining: self.players[p].roads_left.min(2),
+                    remaining: (ps.roads_left + ships).min(2),
                 };
             }
 
@@ -468,8 +651,13 @@ impl GameState {
             }
 
             Action::MoveRobber { tile, victim } => {
-                self.robber = tile;
-                sink.emit(Event::RobberMoved { player, tile });
+                if self.board.is_sea(tile) {
+                    self.pirate = tile;
+                    sink.emit(Event::PirateMoved { player, tile });
+                } else {
+                    self.robber = tile;
+                    sink.emit(Event::RobberMoved { player, tile });
+                }
                 if let Some(q) = victim {
                     let hand = self.players[q as usize].hand;
                     let idx = self.rng.below(hand.total());
@@ -575,6 +763,8 @@ impl GameState {
                         ps.dev_cards[c] += std::mem::take(&mut ps.new_dev_cards[c]);
                     }
                     self.dev_card_played = false;
+                    self.ship_moved = false;
+                    self.new_ships = 0;
                     self.dice = None;
                     self.turn += 1;
                     sink.emit(Event::TurnEnded { player });
@@ -610,7 +800,26 @@ impl GameState {
 
     #[inline]
     pub fn is_setup(&self) -> bool {
-        matches!(self.phase, Phase::SetupSettlement | Phase::SetupRoad { .. })
+        matches!(
+            self.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. } | Phase::Gold { vertex: Some(_) }
+        )
+    }
+
+    /// After a road or ship: setup moves on, Road Building counts down.
+    fn after_route_piece(&mut self, player: u8) {
+        match self.phase {
+            Phase::SetupRoad { .. } => self.advance_setup(),
+            Phase::RoadBuilding { remaining } => {
+                let remaining = remaining - 1;
+                self.phase = if remaining == 0 || !self.can_build_free_route(player) {
+                    self.after_interrupt()
+                } else {
+                    Phase::RoadBuilding { remaining }
+                };
+            }
+            _ => {}
+        }
     }
 
     /// Passes the turn to the next seat.
@@ -657,21 +866,26 @@ impl GameState {
 
     /// Distributes resources for a dice roll. If the bank cannot pay every
     /// claim on a resource, nobody receives it, unless only one player is
-    /// owed that resource, who then receives what is left.
-    fn produce<S: EventSink + ?Sized>(&mut self, roll: u8, sink: &mut S) {
+    /// owed that resource, who then receives what is left. Gold fields owe
+    /// picks instead (see [`Phase::Gold`]); returns whether any are owed.
+    fn produce<S: EventSink + ?Sized>(&mut self, roll: u8, sink: &mut S) -> bool {
         let n = self.num_players();
         let mut owed = [ResourceSet::EMPTY; MAX_PLAYERS];
+        let mut gold = [0u8; MAX_PLAYERS];
         for &t in &self.board.tiles_by_number[roll as usize] {
             if t == NONE || t == self.robber {
                 continue;
             }
-            let Some(r) = self.board.terrain[t as usize].resource() else {
-                continue;
-            };
             let tv = self.topo().tile_vertex_mask[t as usize];
+            let terrain = self.board.terrain[t as usize];
             for q in 0..n {
-                owed[q][r] += (self.settlements[q] & tv).count_ones() as u8
+                let got = (self.settlements[q] & tv).count_ones() as u8
                     + 2 * (self.cities[q] & tv).count_ones() as u8;
+                match terrain.resource() {
+                    Some(r) => owed[q][r] += got,
+                    None if terrain == crate::Terrain::Gold => gold[q] += got,
+                    None => {}
+                }
             }
         }
         for r in Resource::ALL {
@@ -698,6 +912,12 @@ impl GameState {
                 });
             }
         }
+        if gold.iter().all(|&g| g == 0) {
+            return false;
+        }
+        self.pending_gold = gold;
+        sink.emit(Event::GoldOwed { owed: gold });
+        true
     }
 
     fn update_largest_army<S: EventSink + ?Sized>(&mut self, player: u8, sink: &mut S) {
@@ -753,7 +973,8 @@ impl GameState {
         let edges_at_v = self.topo().vertex_edge_mask[v as usize];
         let mut changed = false;
         for q in 0..self.num_players() as u8 {
-            if q != builder && (self.roads[q as usize] & edges_at_v).count_ones() >= 2 {
+            let route = self.roads[q as usize] | self.ships[q as usize];
+            if q != builder && (route & edges_at_v).count_ones() >= 2 {
                 let len = self.compute_longest_road(q);
                 if len != self.players[q as usize].longest_road {
                     self.players[q as usize].longest_road = len;
@@ -761,9 +982,15 @@ impl GameState {
                 }
             }
         }
-        if !changed {
-            return;
+        if changed {
+            self.reassign_longest_road(sink);
         }
+    }
+
+    /// After routes got shorter: the holder keeps the card while still
+    /// (co-)longest with 5+; otherwise it goes to the single longest route
+    /// of 5+, or is set aside on a tie.
+    fn reassign_longest_road<S: EventSink + ?Sized>(&mut self, sink: &mut S) {
         let max = (0..self.num_players())
             .map(|q| self.players[q].longest_road)
             .max()

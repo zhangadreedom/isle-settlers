@@ -5,7 +5,8 @@
 #![cfg(feature = "ts")]
 
 use isle_core::{
-    BoardLayout, GameConfig, HarborKind, Phase, Resource, ResourceSet, Terrain, TradeOffer,
+    BoardLayout, GameConfig, HarborKind, Phase, Resource, ResourceSet, Scenario, Terrain,
+    TradeOffer,
 };
 use isle_proto::account::{AccountInfo, ApiError, Credentials, SessionGrant, SessionInfo};
 use isle_proto::net::{
@@ -29,6 +30,7 @@ fn render() -> String {
         ResourceSet::decl(&cfg),
         DevCard::decl(&cfg),
         BoardLayout::decl(&cfg),
+        Scenario::decl(&cfg),
         GameConfig::decl(&cfg),
         Phase::decl(&cfg),
         TradeResponse::decl(&cfg),

@@ -17,6 +17,9 @@ pub enum BoardLayout {
     Base,
     /// 30 tiles, 11 harbors, special building phase: 5–6 players.
     Extended,
+    /// Seafaring: a home island and two small islands in 33 tiles of land
+    /// and sea, 9 harbors, ships and the pirate: 2–4 players.
+    Archipelago,
 }
 
 impl BoardLayout {
@@ -25,7 +28,24 @@ impl BoardLayout {
         match self {
             BoardLayout::Base => &BASE,
             BoardLayout::Extended => &EXTENDED,
+            BoardLayout::Archipelago => &ARCHIPELAGO,
         }
+    }
+
+    /// Map characters of a seafaring layout, one per tile (`.` and `~` sea,
+    /// letters islands, `M` the home island); `None` for all-land boards.
+    #[inline]
+    pub fn map(self) -> Option<&'static [u8]> {
+        match self {
+            BoardLayout::Archipelago => Some(ARCHIPELAGO_MAP),
+            _ => None,
+        }
+    }
+
+    /// Ships and the pirate are in play.
+    #[inline]
+    pub const fn has_ships(self) -> bool {
+        matches!(self, BoardLayout::Archipelago)
     }
 
     /// The board normally used with `players` seats.
@@ -92,6 +112,14 @@ impl Topology {
         vertices_in(mask).fold(0, |acc, v| acc | self.vertex_edge_mask[v as usize])
     }
 
+    /// The six edges of tile `t`.
+    #[inline]
+    pub fn tile_edge_mask(&self, t: u8) -> u128 {
+        self.tile_edges[t as usize]
+            .iter()
+            .fold(0, |m, &e| m | (1u128 << e))
+    }
+
     /// Union of the endpoints of every edge in `mask`.
     #[inline]
     pub fn endpoints_of(&self, mask: u128) -> u128 {
@@ -138,7 +166,7 @@ pub fn lattice_to_world((x, y): (i16, i16), size: f32) -> (f32, f32) {
 mod tests {
     use super::*;
 
-    const ALL: [&Topology; 2] = [&BASE, &EXTENDED];
+    const ALL: [&Topology; 3] = [&BASE, &EXTENDED, &ARCHIPELAGO];
 
     #[test]
     fn counts() {
@@ -149,6 +177,16 @@ mod tests {
         assert_eq!((BASE.coast_edges.len(), BASE.harbor_edges.len()), (30, 9));
         assert_eq!(EXTENDED.num_tiles, 30);
         assert_eq!(EXTENDED.harbor_edges.len(), 11);
+        assert_eq!(
+            (
+                ARCHIPELAGO.num_tiles,
+                ARCHIPELAGO.num_vertices,
+                ARCHIPELAGO.num_edges
+            ),
+            (33, 90, 122)
+        );
+        assert_eq!(ARCHIPELAGO_MAP.len(), 33);
+        assert_eq!(ARCHIPELAGO.harbor_edges.len(), 9);
         for t in ALL {
             // Euler's formula for a disc tiled by hexes: E = V + F - 1.
             assert_eq!(t.num_edges, t.num_vertices + t.num_tiles - 1);
@@ -232,7 +270,9 @@ mod tests {
         for topo in ALL {
             let mut seen = 0u128;
             for &e in topo.harbor_edges {
-                assert!(topo.coast_edges.contains(&e));
+                // Seafaring harbors may face inner sea; build.rs checks
+                // that they face water.
+                assert!(std::ptr::eq(topo, &ARCHIPELAGO) || topo.coast_edges.contains(&e));
                 let [a, b] = topo.edge_vertices[e as usize];
                 let m = (1u128 << a) | (1u128 << b);
                 assert_eq!(seen & m, 0);

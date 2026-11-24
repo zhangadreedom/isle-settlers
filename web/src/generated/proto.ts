@@ -3,7 +3,7 @@
 
 export type Resource = "Brick" | "Lumber" | "Wool" | "Grain" | "Ore";
 
-export type Terrain = "Hills" | "Forest" | "Pasture" | "Fields" | "Mountains" | "Desert";
+export type Terrain = "Hills" | "Forest" | "Pasture" | "Fields" | "Mountains" | "Desert" | "Sea" | "Gold";
 
 export type HarborKind = { "type": "Generic" } | { "type": "Special", "value": Resource };
 
@@ -11,15 +11,21 @@ export type ResourceSet = [number, number, number, number, number];
 
 export type DevCard = "Knight" | "VictoryPoint" | "RoadBuilding" | "YearOfPlenty" | "Monopoly";
 
-export type BoardLayout = "Base" | "Extended";
+export type BoardLayout = "Base" | "Extended" | "Archipelago";
+
+export type Scenario = "Classic" | "Archipelago";
 
 export type GameConfig = { numPlayers: number, victoryPoints: number, 
 /**
  * Keep 6 and 8 tokens off adjacent tiles when generating the board.
  */
-balancedBoard: boolean, };
+balancedBoard: boolean, 
+/**
+ * Absent in records from before seafaring: classic.
+ */
+scenario: Scenario, };
 
-export type Phase = { "type": "SetupSettlement" } | { "type": "SetupRoad", "value": { vertex: number, } } | { "type": "PreRoll" } | { "type": "Discard" } | { "type": "MoveRobber" } | { "type": "Main" } | { "type": "RoadBuilding", "value": { remaining: number, } } | { "type": "SpecialBuild", "value": { builder: number, } } | { "type": "GameOver" };
+export type Phase = { "type": "SetupSettlement" } | { "type": "SetupRoad", "value": { vertex: number, } } | { "type": "PreRoll" } | { "type": "Discard" } | { "type": "MoveRobber" } | { "type": "Gold", "value": { vertex: number | null, } } | { "type": "Main" } | { "type": "RoadBuilding", "value": { remaining: number, } } | { "type": "SpecialBuild", "value": { builder: number, } } | { "type": "GameOver" };
 
 export type TradeResponse = "Pending" | "Accepted" | "Rejected";
 
@@ -33,11 +39,11 @@ give: ResourceSet,
  */
 get: ResourceSet, responses: [TradeResponse, TradeResponse, TradeResponse, TradeResponse, TradeResponse, TradeResponse], };
 
-export type Action = { "type": "RollDice" } | { "type": "BuildRoad", "value": number } | { "type": "BuildSettlement", "value": number } | { "type": "BuildCity", "value": number } | { "type": "BuyDevCard" } | { "type": "PlayKnight" } | { "type": "PlayRoadBuilding" } | { "type": "PlayYearOfPlenty", "value": ResourceSet } | { "type": "PlayMonopoly", "value": Resource } | { "type": "MoveRobber", "value": { tile: number, victim: number | null, } } | { "type": "Discard", "value": ResourceSet } | { "type": "MaritimeTrade", "value": { give: Resource, get: Resource, } } | { "type": "ProposeTrade", "value": { give: ResourceSet, get: ResourceSet, } } | { "type": "RespondTrade", "value": { accept: boolean, } } | { "type": "ConfirmTrade", "value": { partner: number, } } | { "type": "CancelTrade" } | { "type": "EndTurn" };
+export type Action = { "type": "RollDice" } | { "type": "BuildRoad", "value": number } | { "type": "BuildSettlement", "value": number } | { "type": "BuildCity", "value": number } | { "type": "BuyDevCard" } | { "type": "PlayKnight" } | { "type": "PlayRoadBuilding" } | { "type": "PlayYearOfPlenty", "value": ResourceSet } | { "type": "PlayMonopoly", "value": Resource } | { "type": "MoveRobber", "value": { tile: number, victim: number | null, } } | { "type": "Discard", "value": ResourceSet } | { "type": "MaritimeTrade", "value": { give: Resource, get: Resource, } } | { "type": "ProposeTrade", "value": { give: ResourceSet, get: ResourceSet, } } | { "type": "RespondTrade", "value": { accept: boolean, } } | { "type": "ConfirmTrade", "value": { partner: number, } } | { "type": "CancelTrade" } | { "type": "EndTurn" } | { "type": "BuildShip", "value": number } | { "type": "MoveShip", "value": { from: number, to: number, } } | { "type": "ChooseGold", "value": ResourceSet };
 
-export type Event = { "type": "DiceRolled", "value": { player: number, dice: [number, number], } } | { "type": "ResourcesProduced", "value": { player: number, resources: ResourceSet, } } | { "type": "StartingResources", "value": { player: number, resources: ResourceSet, } } | { "type": "Discarded", "value": { player: number, resources: ResourceSet, } } | { "type": "RobberMoved", "value": { player: number, tile: number, } } | { "type": "Stolen", "value": { thief: number, victim: number, resource: Resource | null, } } | { "type": "RoadBuilt", "value": { player: number, edge: number, } } | { "type": "SettlementBuilt", "value": { player: number, vertex: number, } } | { "type": "CityBuilt", "value": { player: number, vertex: number, } } | { "type": "DevCardBought", "value": { player: number, card: DevCard | null, } } | { "type": "DevCardPlayed", "value": { player: number, card: DevCard, } } | { "type": "YearOfPlentyTaken", "value": { player: number, resources: ResourceSet, } } | { "type": "MonopolyTaken", "value": { player: number, resource: Resource, taken: [number, number, number, number, number, number], } } | { "type": "MaritimeTraded", "value": { player: number, give: ResourceSet, get: Resource, } } | { "type": "TradeProposed", "value": { player: number, give: ResourceSet, get: ResourceSet, } } | { "type": "TradeResponded", "value": { player: number, accept: boolean, } } | { "type": "TradeExecuted", "value": { player: number, partner: number, give: ResourceSet, get: ResourceSet, } } | { "type": "TradeCancelled", "value": { player: number, } } | { "type": "LongestRoadChanged", "value": { owner: number | null, } } | { "type": "LargestArmyChanged", "value": { owner: number | null, } } | { "type": "TurnEnded", "value": { player: number, } } | { "type": "SpecialBuildPassed", "value": { player: number, } } | { "type": "GameWon", "value": { player: number, points: number, } };
+export type Event = { "type": "DiceRolled", "value": { player: number, dice: [number, number], } } | { "type": "ResourcesProduced", "value": { player: number, resources: ResourceSet, } } | { "type": "StartingResources", "value": { player: number, resources: ResourceSet, } } | { "type": "Discarded", "value": { player: number, resources: ResourceSet, } } | { "type": "RobberMoved", "value": { player: number, tile: number, } } | { "type": "Stolen", "value": { thief: number, victim: number, resource: Resource | null, } } | { "type": "RoadBuilt", "value": { player: number, edge: number, } } | { "type": "SettlementBuilt", "value": { player: number, vertex: number, } } | { "type": "CityBuilt", "value": { player: number, vertex: number, } } | { "type": "DevCardBought", "value": { player: number, card: DevCard | null, } } | { "type": "DevCardPlayed", "value": { player: number, card: DevCard, } } | { "type": "YearOfPlentyTaken", "value": { player: number, resources: ResourceSet, } } | { "type": "MonopolyTaken", "value": { player: number, resource: Resource, taken: [number, number, number, number, number, number], } } | { "type": "MaritimeTraded", "value": { player: number, give: ResourceSet, get: Resource, } } | { "type": "TradeProposed", "value": { player: number, give: ResourceSet, get: ResourceSet, } } | { "type": "TradeResponded", "value": { player: number, accept: boolean, } } | { "type": "TradeExecuted", "value": { player: number, partner: number, give: ResourceSet, get: ResourceSet, } } | { "type": "TradeCancelled", "value": { player: number, } } | { "type": "LongestRoadChanged", "value": { owner: number | null, } } | { "type": "LargestArmyChanged", "value": { owner: number | null, } } | { "type": "TurnEnded", "value": { player: number, } } | { "type": "SpecialBuildPassed", "value": { player: number, } } | { "type": "ShipBuilt", "value": { player: number, edge: number, } } | { "type": "ShipMoved", "value": { player: number, from: number, to: number, } } | { "type": "PirateMoved", "value": { player: number, tile: number, } } | { "type": "GoldOwed", "value": { owed: [number, number, number, number, number, number], } } | { "type": "GoldChosen", "value": { player: number, resources: ResourceSet, } } | { "type": "IslandSettled", "value": { player: number, island: number, points: number, } } | { "type": "GameWon", "value": { player: number, points: number, } };
 
-export type RuleError = "GameOver" | "InvalidPlayer" | "NotYourTurn" | "WrongPhase" | "InsufficientResources" | "NoPiecesLeft" | "InvalidVertex" | "InvalidEdge" | "Occupied" | "TooCloseToBuilding" | "NotConnected" | "NotYourSettlement" | "InvalidTile" | "RobberMustMove" | "InvalidVictim" | "NoSuchCard" | "DevCardAlreadyPlayed" | "NoRoadSpot" | "DeckEmpty" | "BankShort" | "InvalidTrade" | "NoOpenTrade" | "PartnerHasNotAccepted" | "WrongDiscardAmount" | "NothingToDiscard";
+export type RuleError = "GameOver" | "InvalidPlayer" | "NotYourTurn" | "WrongPhase" | "InsufficientResources" | "NoPiecesLeft" | "InvalidVertex" | "InvalidEdge" | "Occupied" | "TooCloseToBuilding" | "NotConnected" | "NotYourSettlement" | "InvalidTile" | "RobberMustMove" | "InvalidVictim" | "NoSuchCard" | "DevCardAlreadyPlayed" | "NoRoadSpot" | "DeckEmpty" | "BankShort" | "InvalidTrade" | "NoOpenTrade" | "PartnerHasNotAccepted" | "WrongDiscardAmount" | "NothingToDiscard" | "WrongGround" | "PirateBlocks" | "ShipAlreadyMoved" | "ShipCannotMove" | "NoGoldOwed" | "WrongGoldAmount";
 
 export type BoardInfo = { config: GameConfig, 
 /**

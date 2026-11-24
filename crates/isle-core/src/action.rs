@@ -52,6 +52,16 @@ pub enum Action {
     },
     CancelTrade,
     EndTurn,
+    /// Seafaring: a ship on a sea edge. Free during setup and Road Building.
+    BuildShip(u8),
+    /// Seafaring: move one open ship once per turn.
+    MoveShip {
+        from: u8,
+        to: u8,
+    },
+    /// Seafaring: resources for gold fields, as many as owed (fewer if the
+    /// bank runs short).
+    ChooseGold(ResourceSet),
 }
 
 impl Action {
@@ -87,6 +97,12 @@ impl Action {
             Action::ConfirmTrade { partner } => out.extend([14, partner]),
             Action::CancelTrade => out.push(15),
             Action::EndTurn => out.push(16),
+            Action::BuildShip(e) => out.extend([17, e]),
+            Action::MoveShip { from, to } => out.extend([18, from, to]),
+            Action::ChooseGold(set) => {
+                out.push(19);
+                out.extend(set.0);
+            }
         }
     }
 
@@ -143,6 +159,15 @@ impl Action {
             14 => (Action::ConfirmTrade { partner: arg(0)? }, 1),
             15 => (Action::CancelTrade, 0),
             16 => (Action::EndTurn, 0),
+            17 => (Action::BuildShip(arg(0)?), 1),
+            18 => (
+                Action::MoveShip {
+                    from: arg(0)?,
+                    to: arg(1)?,
+                },
+                2,
+            ),
+            19 => (Action::ChooseGold(set(0)?), 5),
             _ => return None,
         };
         Some((action, 1 + operands))
@@ -248,6 +273,33 @@ pub enum Event {
     SpecialBuildPassed {
         player: u8,
     },
+    ShipBuilt {
+        player: u8,
+        edge: u8,
+    },
+    ShipMoved {
+        player: u8,
+        from: u8,
+        to: u8,
+    },
+    PirateMoved {
+        player: u8,
+        tile: u8,
+    },
+    /// Gold fields produced this many picks for these players.
+    GoldOwed {
+        owed: [u8; crate::MAX_PLAYERS],
+    },
+    GoldChosen {
+        player: u8,
+        resources: ResourceSet,
+    },
+    /// First settlement on a new island: bonus points.
+    IslandSettled {
+        player: u8,
+        island: u8,
+        points: u8,
+    },
     GameWon {
         player: u8,
         points: u8,
@@ -323,6 +375,13 @@ pub enum RuleError {
     PartnerHasNotAccepted,
     WrongDiscardAmount,
     NothingToDiscard,
+    /// Roads go on land, ships on the sea.
+    WrongGround,
+    PirateBlocks,
+    ShipAlreadyMoved,
+    ShipCannotMove,
+    NoGoldOwed,
+    WrongGoldAmount,
 }
 
 impl fmt::Display for RuleError {
@@ -353,6 +412,12 @@ impl fmt::Display for RuleError {
             RuleError::PartnerHasNotAccepted => "that player has not accepted",
             RuleError::WrongDiscardAmount => "you must discard exactly half of your hand",
             RuleError::NothingToDiscard => "you do not need to discard",
+            RuleError::WrongGround => "roads go on land, ships on the sea",
+            RuleError::PirateBlocks => "the pirate blocks that spot",
+            RuleError::ShipAlreadyMoved => "only one ship move per turn",
+            RuleError::ShipCannotMove => "that ship cannot move",
+            RuleError::NoGoldOwed => "you have no gold to pick",
+            RuleError::WrongGoldAmount => "pick exactly the gold you are owed",
         };
         f.write_str(msg)
     }

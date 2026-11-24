@@ -36,7 +36,7 @@ impl Resource {
     }
 }
 
-/// Terrain of a land tile.
+/// Terrain of a tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -48,9 +48,27 @@ pub enum Terrain {
     Fields = 3,
     Mountains = 4,
     Desert = 5,
+    /// Seafaring maps: open water between the islands.
+    Sea = 6,
+    /// Seafaring maps: produces a resource of the owner's choice.
+    Gold = 7,
 }
 
 impl Terrain {
+    pub const COUNT: usize = 8;
+
+    /// Land carries buildings and roads; the sea carries ships.
+    #[inline]
+    pub const fn is_land(self) -> bool {
+        !matches!(self, Terrain::Sea)
+    }
+
+    /// Carries a number token.
+    #[inline]
+    pub const fn produces(self) -> bool {
+        !matches!(self, Terrain::Desert | Terrain::Sea)
+    }
+
     /// Resource produced by this terrain, if any.
     #[inline]
     pub const fn resource(self) -> Option<Resource> {
@@ -60,7 +78,7 @@ impl Terrain {
             Terrain::Pasture => Some(Resource::Wool),
             Terrain::Fields => Some(Resource::Grain),
             Terrain::Mountains => Some(Resource::Ore),
-            Terrain::Desert => None,
+            Terrain::Desert | Terrain::Sea | Terrain::Gold => None,
         }
     }
 }
@@ -223,6 +241,8 @@ pub mod cost {
     pub const SETTLEMENT: ResourceSet = ResourceSet::new(1, 1, 1, 1, 0);
     pub const CITY: ResourceSet = ResourceSet::new(0, 0, 0, 2, 3);
     pub const DEV_CARD: ResourceSet = ResourceSet::new(0, 0, 1, 1, 1);
+    /// Seafaring.
+    pub const SHIP: ResourceSet = ResourceSet::new(0, 1, 1, 0, 0);
 }
 
 #[cfg(test)]

@@ -10,6 +10,8 @@ pub const MAX_PLAYERS: usize = 6;
 /// Size of the largest development deck.
 pub const MAX_DEV_DECK: usize = 34;
 pub const MAX_ROADS: u8 = 15;
+/// Ships per player on seafaring maps.
+pub const MAX_SHIPS: u8 = 15;
 pub const MAX_SETTLEMENTS: u8 = 5;
 pub const MAX_CITIES: u8 = 4;
 /// Players holding more cards than this discard half when a 7 is rolled.
@@ -42,11 +44,11 @@ impl DevCard {
     /// Copies of each card in the deck of a board.
     pub const fn count_in_deck(self, layout: BoardLayout) -> u8 {
         match (self, layout) {
-            (DevCard::Knight, BoardLayout::Base) => 14,
             (DevCard::Knight, BoardLayout::Extended) => 20,
+            (DevCard::Knight, _) => 14,
             (DevCard::VictoryPoint, _) => 5,
-            (_, BoardLayout::Base) => 2,
             (_, BoardLayout::Extended) => 3,
+            (_, _) => 2,
         }
     }
 
@@ -64,16 +66,16 @@ impl BoardLayout {
     /// Cards of each resource in the bank at the start.
     pub const fn bank_per_resource(self) -> u8 {
         match self {
-            BoardLayout::Base => 19,
             BoardLayout::Extended => 24,
+            _ => 19,
         }
     }
 
     /// Development cards in the deck.
     pub const fn dev_deck_size(self) -> usize {
         match self {
-            BoardLayout::Base => 25,
             BoardLayout::Extended => 34,
+            _ => 25,
         }
     }
 
@@ -85,8 +87,46 @@ impl BoardLayout {
     /// Seats the board is designed for.
     pub const fn max_players(self) -> u8 {
         match self {
-            BoardLayout::Base => 4,
             BoardLayout::Extended => 6,
+            _ => 4,
+        }
+    }
+
+    /// Points for a player's first settlement on each island other than
+    /// the ones they started on.
+    pub const fn island_bonus(self) -> u8 {
+        match self {
+            BoardLayout::Archipelago => 2,
+            _ => 0,
+        }
+    }
+}
+
+/// What is played: the classic island (sized by the number of players) or
+/// a seafaring map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum Scenario {
+    #[default]
+    Classic,
+    /// Seafaring: the archipelago, 2–4 players.
+    Archipelago,
+}
+
+impl Scenario {
+    pub const fn victory_points(self) -> u8 {
+        match self {
+            Scenario::Classic => 10,
+            Scenario::Archipelago => 12,
+        }
+    }
+
+    /// Seats this scenario can be played with.
+    pub const fn max_players(self) -> u8 {
+        match self {
+            Scenario::Classic => MAX_PLAYERS as u8,
+            Scenario::Archipelago => 4,
         }
     }
 }
@@ -100,6 +140,9 @@ pub struct GameConfig {
     pub victory_points: u8,
     /// Keep 6 and 8 tokens off adjacent tiles when generating the board.
     pub balanced_board: bool,
+    /// Absent in records from before seafaring: classic.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub scenario: Scenario,
 }
 
 impl GameConfig {
@@ -111,10 +154,24 @@ impl GameConfig {
         }
     }
 
-    /// Board used by this configuration: the extended island seats 5–6.
+    /// Standard rules of a scenario for `num_players` seats.
+    pub fn scenario(scenario: Scenario, num_players: u8) -> Self {
+        GameConfig {
+            num_players,
+            victory_points: scenario.victory_points(),
+            scenario,
+            ..Self::default()
+        }
+    }
+
+    /// Board used by this configuration: the classic island grows to the
+    /// extended one for 5–6 seats.
     #[inline]
     pub fn layout(&self) -> BoardLayout {
-        BoardLayout::for_players(self.num_players)
+        match self.scenario {
+            Scenario::Classic => BoardLayout::for_players(self.num_players),
+            Scenario::Archipelago => BoardLayout::Archipelago,
+        }
     }
 }
 
@@ -124,6 +181,7 @@ impl Default for GameConfig {
             num_players: 4,
             victory_points: 10,
             balanced_board: true,
+            scenario: Scenario::Classic,
         }
     }
 }
@@ -151,8 +209,15 @@ pub enum Phase {
     PreRoll,
     /// A 7 was rolled; players listed in `pending_discard` must discard.
     Discard,
-    /// The current player must move the robber (after a 7 or a knight).
+    /// The current player must move the robber (after a 7 or a knight), or
+    /// on seafaring maps the pirate.
     MoveRobber,
+    /// Seafaring: players listed in `pending_gold` pick resources for their
+    /// gold fields. During setup `vertex` is the settlement just placed,
+    /// whose road or ship comes next.
+    Gold {
+        vertex: Option<u8>,
+    },
     /// Trade, build, buy and play cards in any order, then end the turn.
     Main,
     /// Placing free roads from a Road Building card.
@@ -199,8 +264,13 @@ pub struct PlayerState {
     /// Development cards already played face up.
     pub played_dev_cards: DevCounts,
     pub roads_left: u8,
+    pub ships_left: u8,
     pub settlements_left: u8,
     pub cities_left: u8,
+    /// Islands this player started on (bit `i` = island `i`).
+    pub home_islands: u8,
+    /// Islands that earned this player the settling bonus.
+    pub islands: u8,
     /// Cached length of this player's longest road.
     pub longest_road: u8,
     /// Harbor access bits (`HarborKind::bit`).
@@ -215,8 +285,11 @@ impl PlayerState {
             new_dev_cards: [0; 5],
             played_dev_cards: [0; 5],
             roads_left: MAX_ROADS,
+            ships_left: MAX_SHIPS,
             settlements_left: MAX_SETTLEMENTS,
             cities_left: MAX_CITIES,
+            home_islands: 0,
+            islands: 0,
             longest_road: 0,
             harbors: 0,
         }
@@ -251,11 +324,15 @@ pub struct GameState {
     pub settlements: [u128; MAX_PLAYERS],
     pub cities: [u128; MAX_PLAYERS],
     pub roads: [u128; MAX_PLAYERS],
+    /// Seafaring: ships, on edges along the sea.
+    pub ships: [u128; MAX_PLAYERS],
     pub bank: ResourceSet,
     /// Shuffled deck; cards are drawn from the end of `dev_deck[..dev_deck_len]`.
     pub dev_deck: [DevCard; MAX_DEV_DECK],
     pub dev_deck_len: u8,
     pub robber: u8,
+    /// Sea tile of the pirate, `NONE` on maps without sea.
+    pub pirate: u8,
     pub phase: Phase,
     pub current: u8,
     /// Index into the snake order of initial placements.
@@ -265,7 +342,13 @@ pub struct GameState {
     /// Dice rolled this turn, `None` before rolling.
     pub dice: Option<(u8, u8)>,
     pub dev_card_played: bool,
+    /// The current player moved a ship this turn.
+    pub ship_moved: bool,
+    /// Ships the current player built this turn (they may not move yet).
+    pub new_ships: u128,
     pub pending_discard: [u8; MAX_PLAYERS],
+    /// Gold resources each player still has to pick.
+    pub pending_gold: [u8; MAX_PLAYERS],
     pub trade: Option<TradeOffer>,
     pub longest_road_owner: Option<u8>,
     pub largest_army_owner: Option<u8>,
@@ -287,7 +370,7 @@ impl GameState {
         board: Board,
         seed: u64,
     ) -> Result<GameState, ConfigError> {
-        if !(2..=MAX_PLAYERS as u8).contains(&config.num_players) {
+        if !(2..=config.scenario.max_players()).contains(&config.num_players) {
             return Err(ConfigError::PlayerCount);
         }
         if config.victory_points < 3 {
@@ -316,17 +399,22 @@ impl GameState {
             settlements: [0; MAX_PLAYERS],
             cities: [0; MAX_PLAYERS],
             roads: [0; MAX_PLAYERS],
+            ships: [0; MAX_PLAYERS],
             bank: ResourceSet([layout.bank_per_resource(); 5]),
             dev_deck,
             dev_deck_len: deck_len as u8,
             robber: board.desert,
+            pirate: board.pirate_start,
             phase: Phase::SetupSettlement,
             current: 0,
             setup_step: 0,
             turn: 0,
             dice: None,
             dev_card_played: false,
+            ship_moved: false,
+            new_ships: 0,
             pending_discard: [0; MAX_PLAYERS],
+            pending_gold: [0; MAX_PLAYERS],
             trade: None,
             longest_road_owner: None,
             largest_army_owner: None,
@@ -381,6 +469,11 @@ impl GameState {
                 .iter()
                 .position(|&d| d > 0)
                 .map(|p| p as u8),
+            Phase::Gold { .. } => self
+                .pending_gold
+                .iter()
+                .position(|&d| d > 0)
+                .map(|p| p as u8),
             _ => Some(self.active_player()),
         }
     }
@@ -395,9 +488,10 @@ impl GameState {
         (0..self.num_players()).fold(0, |m, p| m | self.settlements[p] | self.cities[p])
     }
 
+    /// Edges holding a road or a ship.
     #[inline]
     pub fn occupied_edges(&self) -> u128 {
-        (0..self.num_players()).fold(0, |m, p| m | self.roads[p])
+        (0..self.num_players()).fold(0, |m, p| m | self.roads[p] | self.ships[p])
     }
 
     pub fn vertex_owner(&self, v: u8) -> Option<u8> {
@@ -405,9 +499,16 @@ impl GameState {
         (0..self.num_players() as u8).find(|&p| self.buildings_of(p) & bit != 0)
     }
 
+    /// Owner of the road on `e`.
     pub fn edge_owner(&self, e: u8) -> Option<u8> {
         let bit = 1u128 << e;
         (0..self.num_players() as u8).find(|&p| self.roads[p as usize] & bit != 0)
+    }
+
+    /// Owner of the ship on `e`.
+    pub fn ship_owner(&self, e: u8) -> Option<u8> {
+        let bit = 1u128 << e;
+        (0..self.num_players() as u8).find(|&p| self.ships[p as usize] & bit != 0)
     }
 
     /// Points visible to everyone (buildings and special cards).
@@ -420,7 +521,7 @@ impl GameState {
         if self.largest_army_owner == Some(p) {
             vp += 2;
         }
-        vp
+        vp + self.board.layout.island_bonus() * self.players[i].islands.count_ones() as u8
     }
 
     /// Total points including hidden victory point cards.
@@ -441,51 +542,140 @@ impl GameState {
         }
     }
 
-    /// Vertices where `p` may place a settlement. During setup no road is required.
+    /// Vertices where `p` may build a settlement on land, keeping the
+    /// distance rule; with `require_road`, at the end of their own road or
+    /// ship. (Initial placements use [`setup_spots`](Self::setup_spots).)
     pub fn settlement_spots(&self, p: u8, require_road: bool) -> u128 {
         let topo = self.topo();
         let occ = self.occupied_vertices();
-        let free = topo.all_vertices & !(occ | topo.neighbors_of(occ));
+        let free = self.board.land_vertices & !(occ | topo.neighbors_of(occ));
         if require_road {
-            free & topo.endpoints_of(self.roads[p as usize])
+            free & topo.endpoints_of(self.roads[p as usize] | self.ships[p as usize])
         } else {
             free
         }
     }
 
+    /// Vertices open for an initial settlement (on seafaring maps only the
+    /// home island).
+    #[inline]
+    pub fn setup_spots(&self) -> u128 {
+        self.settlement_spots(0, false) & self.board.setup_vertices
+    }
+
     /// Edges where `p` may place a road connected to their network. A road
-    /// cannot continue through an intersection occupied by an opponent.
+    /// cannot continue through an intersection occupied by an opponent, nor
+    /// directly from a ship.
     pub fn road_spots(&self, p: u8) -> u128 {
         let topo = self.topo();
         let own = self.buildings_of(p);
         let opponents = self.occupied_vertices() & !own;
         let reach = own | (topo.endpoints_of(self.roads[p as usize]) & !opponents);
-        topo.edges_touching(reach) & !self.occupied_edges()
+        topo.edges_touching(reach) & self.board.land_edges & !self.occupied_edges()
     }
 
-    /// Bitmask of players `thief` may rob after moving the robber to `tile`:
-    /// opponents with a building on the tile who hold at least one card.
+    /// Edges of the tile the pirate is on (no ship may be built or moved
+    /// there).
+    #[inline]
+    pub fn pirate_edges(&self) -> u128 {
+        if self.pirate == NONE {
+            0
+        } else {
+            self.topo().tile_edge_mask(self.pirate)
+        }
+    }
+
+    /// Edges where `p` may place a ship, if `ships` were their fleet: along
+    /// the sea, away from the pirate, next to their own building or the open
+    /// end of one of their ships. Ships do not continue through an
+    /// intersection occupied by an opponent, nor directly from a road.
+    pub fn ship_spots_with(&self, p: u8, ships: u128) -> u128 {
+        if !self.board.layout.has_ships() {
+            return 0;
+        }
+        let topo = self.topo();
+        let own = self.buildings_of(p);
+        let opponents = self.occupied_vertices() & !own;
+        let reach = own | (topo.endpoints_of(ships) & !opponents);
+        let taken = self.occupied_edges() & !(self.ships[p as usize] & !ships);
+        topo.edges_touching(reach) & self.board.sea_edges & !self.pirate_edges() & !taken
+    }
+
+    /// Edges where `p` may build a ship now.
+    #[inline]
+    pub fn ship_spots(&self, p: u8) -> u128 {
+        self.ship_spots_with(p, self.ships[p as usize])
+    }
+
+    /// `p`'s ships that may move this turn: not built this turn, away from
+    /// the pirate, and at the open end of a line (one end touches neither
+    /// their building nor another of their ships).
+    pub fn movable_ships(&self, p: u8) -> u128 {
+        let ships = self.ships[p as usize];
+        if ships == 0 {
+            return 0;
+        }
+        let topo = self.topo();
+        let own = self.buildings_of(p);
+        let mut out = 0;
+        for e in edges_in(ships & !self.new_ships & !self.pirate_edges()) {
+            let others = ships & !(1u128 << e);
+            let open = topo.edge_vertices[e as usize].iter().any(|&v| {
+                own & (1u128 << v) == 0 && topo.vertex_edge_mask[v as usize] & others == 0
+            });
+            if open {
+                out |= 1u128 << e;
+            }
+        }
+        out
+    }
+
+    /// Where the ship on `from` may move to.
+    pub fn ship_moves(&self, p: u8, from: u8) -> u128 {
+        let rest = self.ships[p as usize] & !(1u128 << from);
+        self.ship_spots_with(p, rest) & !(1u128 << from)
+    }
+
+    /// Bitmask of players `thief` may rob after moving the robber to a land
+    /// `tile` (opponents with a building on it) or the pirate to a sea tile
+    /// (opponents with a ship along it), if they hold at least one card.
     pub fn robber_victims(&self, tile: u8, thief: u8) -> u8 {
-        let tv = self.topo().tile_vertex_mask[tile as usize];
+        let topo = self.topo();
+        let sea = self.board.is_sea(tile);
+        let tv = topo.tile_vertex_mask[tile as usize];
+        let te = if sea { topo.tile_edge_mask(tile) } else { 0 };
         (0..self.num_players() as u8)
             .filter(|&q| {
-                q != thief
-                    && self.buildings_of(q) & tv != 0
-                    && !self.players[q as usize].hand.is_empty()
+                let near = if sea {
+                    self.ships[q as usize] & te != 0
+                } else {
+                    self.buildings_of(q) & tv != 0
+                };
+                q != thief && near && !self.players[q as usize].hand.is_empty()
             })
             .fold(0, |m, q| m | 1 << q)
     }
 
-    /// Length of `p`'s longest continuous road. Opponent buildings split roads.
+    /// Length of `p`'s longest continuous trade route: roads, and on
+    /// seafaring maps ships. Opponent buildings split routes; a route turns
+    /// from road to ship only at `p`'s own settlement or city.
     pub fn compute_longest_road(&self, p: u8) -> u8 {
-        let roads = self.roads[p as usize];
-        if roads == 0 {
+        let (roads, ships) = (self.roads[p as usize], self.ships[p as usize]);
+        if roads | ships == 0 {
             return 0;
         }
         let topo = self.topo();
-        let blocked = self.occupied_vertices() & !self.buildings_of(p);
-        vertices_in(topo.endpoints_of(roads))
-            .map(|v| longest_from(topo, v, roads, 0, blocked))
+        let own = self.buildings_of(p);
+        let blocked = self.occupied_vertices() & !own;
+        let route = Route {
+            topo,
+            roads,
+            ships,
+            own,
+            blocked,
+        };
+        vertices_in(topo.endpoints_of(roads | ships))
+            .map(|v| route.longest_from(v, None, 0))
             .max()
             .unwrap_or(0)
     }
@@ -531,16 +721,39 @@ impl GameState {
                 ));
             }
             let b = self.settlements[p] | self.cities[p];
-            if b & seen_v != 0 || self.roads[p] & seen_e != 0 {
-                return Err("two players share a spot".into());
+            let pieces = self.roads[p] | self.ships[p];
+            if b & seen_v != 0 || pieces & seen_e != 0 || self.roads[p] & self.ships[p] != 0 {
+                return Err("two pieces share a spot".into());
             }
             seen_v |= b;
-            seen_e |= self.roads[p];
+            seen_e |= pieces;
             if self.settlements[p].count_ones() as u8 + ps.settlements_left != MAX_SETTLEMENTS
                 || self.cities[p].count_ones() as u8 + ps.cities_left != MAX_CITIES
                 || self.roads[p].count_ones() as u8 + ps.roads_left != MAX_ROADS
+                || self.ships[p].count_ones() as u8 + ps.ships_left != MAX_SHIPS
             {
                 return Err(format!("player {p} piece counts inconsistent"));
+            }
+            if b & !self.board.land_vertices != 0
+                || self.roads[p] & !self.board.land_edges != 0
+                || self.ships[p] & !self.board.sea_edges != 0
+                || (self.ships[p] != 0 && !layout.has_ships())
+            {
+                return Err(format!("player {p} has a piece on the wrong ground"));
+            }
+            // Island bonuses: earned on islands they built on but did not
+            // start on.
+            let built: u8 = vertices_in(b).fold(0, |m, v| {
+                m | (1u8 << self.board.vertex_island[v as usize]) & !1
+            });
+            if ps.islands & !built != 0
+                || ps.islands & ps.home_islands != 0
+                || (layout.island_bonus() == 0 && ps.islands != 0)
+            {
+                return Err(format!("player {p} has an unearned island bonus"));
+            }
+            if !matches!(self.phase, Phase::Gold { .. }) && self.pending_gold[p] != 0 {
+                return Err("pending gold outside the gold phase".into());
             }
             if ps.longest_road != self.compute_longest_road(p as u8) {
                 return Err(format!("player {p} cached longest road is stale"));
@@ -566,8 +779,18 @@ impl GameState {
                 return Err("largest army owner is not the largest".into());
             }
         }
-        if self.robber as usize >= topo.num_tiles {
-            return Err("robber off board".into());
+        if self.robber as usize >= topo.num_tiles
+            || !self.board.terrain[self.robber as usize].is_land()
+        {
+            return Err("robber off land".into());
+        }
+        if layout.has_ships() != (self.pirate != NONE)
+            || (self.pirate != NONE && !self.board.is_sea(self.pirate))
+        {
+            return Err("pirate off the sea".into());
+        }
+        if self.new_ships & !self.ships[self.current as usize] != 0 {
+            return Err("new ships that are not the current player's".into());
         }
         if (seen_v & !topo.all_vertices) != 0 || (seen_e & !topo.all_edges) != 0 {
             return Err("piece off board".into());
@@ -584,27 +807,46 @@ impl GameState {
     }
 }
 
-/// Longest trail (no edge reused) starting at `v` within `roads`, never
-/// passing through a `blocked` vertex.
-fn longest_from(topo: &Topology, v: u8, roads: u128, used: u128, blocked: u128) -> u8 {
-    let mut best = 0;
-    let links = &topo.vertex_edges[v as usize];
-    for k in 0..3 {
-        let e = links[k];
-        if e == NONE {
-            break;
+/// One player's pieces for the longest-route search.
+struct Route<'a> {
+    topo: &'a Topology,
+    roads: u128,
+    ships: u128,
+    /// The player's own buildings, where roads and ships join.
+    own: u128,
+    /// Intersections occupied by opponents.
+    blocked: u128,
+}
+
+impl Route<'_> {
+    /// Longest trail (no edge reused) starting at `v`, having arrived by a
+    /// ship (`Some(true)`), a road (`Some(false)`) or not at all, never
+    /// passing through a blocked vertex.
+    fn longest_from(&self, v: u8, arrived_by_ship: Option<bool>, used: u128) -> u8 {
+        let topo = self.topo;
+        let mut best = 0;
+        let links = &topo.vertex_edges[v as usize];
+        for k in 0..3 {
+            let e = links[k];
+            if e == NONE {
+                break;
+            }
+            let bit = 1u128 << e;
+            if (self.roads | self.ships) & bit == 0 || used & bit != 0 {
+                continue;
+            }
+            let ship = self.ships & bit != 0;
+            if arrived_by_ship.is_some_and(|s| s != ship) && self.own & (1u128 << v) == 0 {
+                continue;
+            }
+            let u = topo.vertex_vertices[v as usize][k];
+            let len = if self.blocked & (1u128 << u) != 0 {
+                1
+            } else {
+                1 + self.longest_from(u, Some(ship), used | bit)
+            };
+            best = best.max(len);
         }
-        let bit = 1u128 << e;
-        if roads & bit == 0 || used & bit != 0 {
-            continue;
-        }
-        let u = topo.vertex_vertices[v as usize][k];
-        let len = if blocked & (1u128 << u) != 0 {
-            1
-        } else {
-            1 + longest_from(topo, u, roads, used | bit, blocked)
-        };
-        best = best.max(len);
+        best
     }
-    best
 }

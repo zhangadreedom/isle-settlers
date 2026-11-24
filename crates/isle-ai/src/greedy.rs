@@ -70,6 +70,12 @@ impl Bot for GreedyBot {
                 Action::MoveRobber { tile, victim } => Some(robber_value(s, p, *tile, *victim)),
                 _ => None,
             }),
+            Phase::Gold { .. } => best_by(legal, |a| match a {
+                Action::ChooseGold(set) => {
+                    Some(hand_value(s, p, s.players[p as usize].hand + *set))
+                }
+                _ => None,
+            }),
             Phase::Main if p != s.current => Some(respond_trade(s, p, legal)),
             // Out-of-turn building only offers builds, purchases and passing.
             Phase::Main | Phase::SpecialBuild { .. } => main_turn(s, p, legal),

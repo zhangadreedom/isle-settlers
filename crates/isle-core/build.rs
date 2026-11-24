@@ -3,6 +3,10 @@
 //!
 //! * `BASE`: the 19-tile island (rows of 3-4-5-4-3), 3–4 players.
 //! * `EXTENDED`: the 30-tile island for 5–6 players (rows 3-4-5-6-5-4-3).
+//! * `ARCHIPELAGO`: the seafaring map, drawn below as text. Its tiles include
+//!   the sea between the islands; `ARCHIPELAGO_MAP` keeps one character per
+//!   tile (`.` sea, `~` sea where the pirate starts, a letter per island,
+//!   `M` being the home island) for the board to interpret.
 //!
 //! Geometry: pointy-top hexes on an exact integer lattice. A point `(x, y)`
 //! in lattice units maps to world space as `(x * sqrt(3)/2, y / 2)` for unit
@@ -23,40 +27,121 @@ const CORNER_OFFSETS: [(i32, i32); 6] = [(0, -2), (1, -1), (1, 1), (0, 2), (-1, 
 const EDGE_NEIGHBORS: [(i32, i32); 6] = [(1, -3), (2, 0), (1, 3), (-1, 3), (-2, 0), (-1, -3)];
 const NONE: u8 = u8::MAX;
 
-struct Spec {
-    name: &'static str,
-    rows: &'static [i32],
-    harbors: usize,
-    /// Fixed harbor positions (indices into the clockwise coast); `None`
-    /// spreads `harbors` evenly.
-    harbor_slots: Option<&'static [usize]>,
+enum Shape {
+    /// Centred rows of land tiles with these lengths.
+    Rows(&'static [i32]),
+    /// One string per row; character `i` is a tile at lattice `x = i` (the
+    /// map is centred afterwards), a space is no tile.
+    Map(&'static [&'static str]),
 }
 
-const SPECS: [Spec; 2] = [
+enum Harbors {
+    /// `n` harbors spread evenly along the clockwise coast.
+    Spread(usize),
+    /// Indices into the clockwise coast.
+    Coast(&'static [usize]),
+    /// `(tile, side)` pairs: side `i` joins corners `i` and `i + 1`
+    /// (0 = north-east, 1 = east, ... 5 = north-west).
+    Sides(&'static [(usize, usize)]),
+}
+
+struct Spec {
+    name: &'static str,
+    shape: Shape,
+    harbors: Harbors,
+}
+
+/// The archipelago: a home island in the west and two small islands in the
+/// east, two sea tiles away (at least three edges between home and either
+/// island), the pirate between the small ones.
+const ARCHIPELAGO_ROWS: &[&str] = &[
+    "M M M . . b b",
+    " M M M . . b",
+    "M M M . . . ~",
+    " M M M . . c",
+    "M M M . . c c",
+];
+
+const SPECS: [Spec; 3] = [
     // Gaps of 3, 3, 4 coastal edges, repeated three times.
     Spec {
         name: "BASE",
-        rows: &[3, 4, 5, 4, 3],
-        harbors: 9,
-        harbor_slots: Some(&[0, 3, 6, 10, 13, 16, 20, 23, 26]),
+        shape: Shape::Rows(&[3, 4, 5, 4, 3]),
+        harbors: Harbors::Coast(&[0, 3, 6, 10, 13, 16, 20, 23, 26]),
     },
     Spec {
         name: "EXTENDED",
-        rows: &[3, 4, 5, 6, 5, 4, 3],
-        harbors: 11,
-        harbor_slots: None,
+        shape: Shape::Rows(&[3, 4, 5, 6, 5, 4, 3]),
+        harbors: Harbors::Spread(11),
+    },
+    // Seven around the home island, one on each small island.
+    Spec {
+        name: "ARCHIPELAGO",
+        shape: Shape::Map(ARCHIPELAGO_ROWS),
+        harbors: Harbors::Sides(&[
+            (1, 0),
+            (9, 1),
+            (22, 1),
+            (28, 2),
+            (26, 3),
+            (13, 4),
+            (0, 5),
+            (6, 0),
+            (32, 2),
+        ]),
     },
 ];
 
-fn generate(spec: &Spec, out: &mut String) -> (usize, usize, usize) {
-    // Tile centres in reading order.
-    let mid = (spec.rows.len() as i32 - 1) / 2;
-    let mut tiles: Vec<(i32, i32)> = Vec::new();
-    for (i, &count) in spec.rows.iter().enumerate() {
-        for k in 0..count {
-            tiles.push((-(count - 1) + 2 * k, 3 * (i as i32 - mid)));
+/// Tile centres in reading order, with their map characters.
+fn tiles_of(shape: &Shape) -> (Vec<(i32, i32)>, Vec<u8>) {
+    match shape {
+        Shape::Rows(rows) => {
+            let mid = (rows.len() as i32 - 1) / 2;
+            let mut tiles = Vec::new();
+            for (i, &count) in rows.iter().enumerate() {
+                for k in 0..count {
+                    tiles.push((-(count - 1) + 2 * k, 3 * (i as i32 - mid)));
+                }
+            }
+            let chars = vec![b'L'; tiles.len()];
+            (tiles, chars)
+        }
+        Shape::Map(rows) => {
+            let mid = (rows.len() as i32 - 1) / 2;
+            let mut tiles = Vec::new();
+            let mut chars = Vec::new();
+            for (r, line) in rows.iter().enumerate() {
+                for (i, ch) in line.bytes().enumerate() {
+                    if ch != b' ' {
+                        tiles.push((i as i32, 3 * (r as i32 - mid)));
+                        chars.push(ch);
+                    }
+                }
+            }
+            let (lo, hi) = tiles.iter().fold((i32::MAX, i32::MIN), |(lo, hi), t| {
+                (lo.min(t.0), hi.max(t.0))
+            });
+            let shift = (lo + hi).div_euclid(2);
+            for t in &mut tiles {
+                t.0 -= shift;
+            }
+            // Neighbouring rows interleave.
+            let parity = |t: &(i32, i32)| (t.0 + t.1 / 3).rem_euclid(2);
+            assert!(
+                tiles.iter().all(|t| parity(t) == parity(&tiles[0])),
+                "map rows must interleave"
+            );
+            (tiles, chars)
         }
     }
+}
+
+fn is_sea(ch: u8) -> bool {
+    ch == b'.' || ch == b'~'
+}
+
+fn generate(spec: &Spec, out: &mut String) -> (usize, usize, usize, usize) {
+    let (tiles, chars) = tiles_of(&spec.shape);
     let tile_at = |p: (i32, i32)| tiles.iter().position(|&t| t == p);
 
     let corners: BTreeSet<(i32, i32)> = tiles
@@ -125,14 +210,24 @@ fn generate(spec: &Spec, out: &mut String) -> (usize, usize, usize) {
         (y.atan2(x) + std::f64::consts::FRAC_PI_2).rem_euclid(std::f64::consts::TAU)
     };
     coast.sort_by(|&a, &b| angle(a).total_cmp(&angle(b)));
-    let slots: Vec<usize> = match spec.harbor_slots {
-        Some(s) => s.to_vec(),
-        None => (0..spec.harbors)
-            .map(|i| i * coast.len() / spec.harbors)
+    let harbor_edges: Vec<usize> = match spec.harbors {
+        Harbors::Coast(slots) => slots.iter().map(|&s| coast[s]).collect(),
+        Harbors::Spread(n) => (0..n).map(|i| coast[i * coast.len() / n]).collect(),
+        Harbors::Sides(sides) => sides
+            .iter()
+            .map(|&(t, side)| {
+                // A harbor faces the sea: a sea tile or the edge of the map.
+                assert!(!is_sea(chars[t]), "{}: harbor on a sea tile", spec.name);
+                let n = tile_neighbors[t][side];
+                assert!(
+                    n == NONE || is_sea(chars[n as usize]),
+                    "{}: harbor between land tiles",
+                    spec.name
+                );
+                tile_edges[t][side]
+            })
             .collect(),
     };
-    assert_eq!(slots.len(), spec.harbors);
-    let harbor_edges: Vec<usize> = slots.iter().map(|&s| coast[s]).collect();
     // Harbors never share an intersection.
     let mut used = BTreeSet::new();
     for &e in &harbor_edges {
@@ -269,15 +364,86 @@ fn generate(spec: &Spec, out: &mut String) -> (usize, usize, usize) {
     );
     let _ = writeln!(out, "    all_edges: {},", mask((0..edges.len()).collect()));
     let _ = writeln!(out, "}};\n");
-    (tiles.len(), vertices.len(), edges.len())
+    if let Shape::Map(_) = spec.shape {
+        check_islands(spec.name, &tiles, &chars, &tile_neighbors, &tile_vertices);
+        let _ = writeln!(
+            out,
+            "/// Map characters of `{0}`, one per tile.\npub static {0}_MAP: &[u8] = b\"{1}\";\n",
+            spec.name,
+            String::from_utf8(chars).unwrap()
+        );
+    }
+    (tiles.len(), vertices.len(), edges.len(), harbor_edges.len())
+}
+
+/// Each island letter is one connected piece of land, and different
+/// islands share no intersection (so ships are needed between them).
+fn check_islands(
+    name: &str,
+    tiles: &[(i32, i32)],
+    chars: &[u8],
+    neighbors: &[[u8; 6]],
+    tile_vertices: &[[usize; 6]],
+) {
+    let land: Vec<usize> = (0..tiles.len()).filter(|&t| !is_sea(chars[t])).collect();
+    for &t in &land {
+        for &n in &neighbors[t] {
+            if n != NONE && !is_sea(chars[n as usize]) {
+                assert_eq!(chars[t], chars[n as usize], "{name}: islands touch");
+            }
+        }
+    }
+    let letters: BTreeSet<u8> = land.iter().map(|&t| chars[t]).collect();
+    assert!(letters.contains(&b'M'), "{name}: no home island");
+    for &letter in &letters {
+        let group: Vec<usize> = land
+            .iter()
+            .copied()
+            .filter(|&t| chars[t] == letter)
+            .collect();
+        let mut seen = vec![group[0]];
+        let mut i = 0;
+        while i < seen.len() {
+            for &n in &neighbors[seen[i]] {
+                let n = n as usize;
+                if n != NONE as usize && chars[n] == letter && !seen.contains(&n) {
+                    seen.push(n);
+                }
+            }
+            i += 1;
+        }
+        assert_eq!(
+            seen.len(),
+            group.len(),
+            "{name}: island {} is split",
+            letter as char
+        );
+    }
+    for &a in &land {
+        for &b in &land {
+            if chars[a] != chars[b] {
+                assert!(
+                    tile_vertices[a]
+                        .iter()
+                        .all(|v| !tile_vertices[b].contains(v)),
+                    "{name}: islands share an intersection"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        chars.iter().filter(|&&c| c == b'~').count(),
+        1,
+        "{name}: one pirate start"
+    );
 }
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let mut out = String::from("// @generated by build.rs - do not edit.\n\n");
-    let mut max = (0, 0, 0);
+    let mut max = (0, 0, 0, 0);
     for spec in &SPECS {
-        let (t, v, e) = generate(spec, &mut out);
+        let (t, v, e, h) = generate(spec, &mut out);
         if spec.name == "BASE" {
             assert_eq!(
                 (t, v, e),
@@ -286,7 +452,7 @@ fn main() {
             );
         }
         assert!(v <= 128 && e <= 128, "{}: masks are u128", spec.name);
-        max = (max.0.max(t), max.1.max(v), max.2.max(e));
+        max = (max.0.max(t), max.1.max(v), max.2.max(e), max.3.max(h));
     }
     let _ = writeln!(
         out,
@@ -306,7 +472,7 @@ fn main() {
     let _ = writeln!(
         out,
         "/// Largest harbor count of any board.\npub const MAX_HARBORS: usize = {};",
-        SPECS.iter().map(|s| s.harbors).max().unwrap()
+        max.3
     );
     fs::write(
         Path::new(&env::var("OUT_DIR").unwrap()).join("topology_gen.rs"),
