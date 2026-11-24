@@ -1,6 +1,8 @@
-import { createSignal, Show } from 'solid-js';
+import { createEffect, createSignal, Show } from 'solid-js';
 import { errorText } from '../game/text';
 import { account, accountsEnabled, checkRegistration, login, logout, logoutEverywhere, register } from '../net/account';
+import { myProfile, refreshMyProfile } from '../net/ranking';
+import { TierBadge } from './Ranking';
 
 /** Login / registration form, or the signed-in account with a logout button. */
 export function AccountPanel() {
@@ -15,11 +17,15 @@ export function AccountPanel() {
 
 function SignedIn(props: { username: string }) {
   const [error, setError] = createSignal<string | null>(null);
+  createEffect(() => {
+    if (props.username) void refreshMyProfile();
+  });
   return (
     <div class="account-bar">
       <span class="grow">
         已登录 <b class="account-name">{props.username}</b>
         <Verified />
+        <Show when={myProfile()}>{(p) => <TierBadge tier={p().tier} rating={p().rating} />}</Show>
       </span>
       <button class="small" onClick={() => void logout()}>
         退出登录

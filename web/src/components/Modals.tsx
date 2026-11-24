@@ -1,6 +1,8 @@
-import { createMemo, createSignal, For, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js';
 import type { Game } from '../game/controller';
-import type { ReplayRecord, ResourceSet, TradeResponse } from '../generated/proto';
+import type { ReplayRecord, ResourceSet, RoomInfo, TradeResponse } from '../generated/proto';
+import { refreshMyProfile } from '../net/ranking';
+import { RatingResult } from './Ranking';
 import { RESOURCES, RESOURCE_NAME, setTotal } from '../game/text';
 import { Modal, ResIcon, SeatDot, SetView, Stepper } from './bits';
 import { EMBEDDED } from '../embed';
@@ -276,8 +278,14 @@ export function GameOverModal(props: {
   onAgain?: () => void;
   onLobby: () => void;
   onWatchReplay?: (record: ReplayRecord, link: string | null) => void;
+  /** Online: the room, for the rating changes of a ranked game. */
+  room?: RoomInfo | null;
 }) {
   const g = props.game;
+  // Your rating changed: show it in the lobby too.
+  createEffect(() => {
+    if (props.room?.rating.length) void refreshMyProfile();
+  });
   const ranking = () =>
     g
       .view()
@@ -296,6 +304,7 @@ export function GameOverModal(props: {
         </For>
       </ol>
       <p class="muted">共 {g.view().turn} 个回合</p>
+      <Show when={props.room?.ranked && props.room}>{(room) => <RatingResult room={room()} />}</Show>
       <Show when={g.exportReplay}>
         {(load) => {
           const [busy, setBusy] = createSignal(false);

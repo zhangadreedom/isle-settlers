@@ -3,9 +3,10 @@ import { EMBEDDED } from '../embed';
 import type { BotKind } from '../engine';
 import type { BotLevel } from '../generated/proto';
 import type { LocalOptions } from '../game/source';
-import { account } from '../net/account';
+import { account, accountsEnabled } from '../net/account';
 import { saveName, savedName } from '../net/connection';
 import { AccountPanel } from './Account';
+import { Rankings } from './Ranking';
 import { ReplayHistory } from './ReplayHistory';
 
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
@@ -28,7 +29,7 @@ export function Lobby(props: {
   onCreateRoom: (o: CreateRoom) => void;
   onJoinRoom: (room: string) => void;
 }) {
-  const [tab, setTab] = createSignal<'local' | 'online'>('local');
+  const [tab, setTab] = createSignal<'local' | 'online' | 'rank'>('local');
   const players = () => props.players;
   const setPlayers = (n: number) => props.onPlayers(n);
   const [bot, setBot] = createSignal<BotKind>('greedy');
@@ -70,35 +71,46 @@ export function Lobby(props: {
             <button classList={{ on: tab() === 'online' }} onClick={() => setTab('online')}>
               联机对战
             </button>
+            <Show when={accountsEnabled()}>
+              <button classList={{ on: tab() === 'rank' }} onClick={() => setTab('rank')}>
+                排行榜
+              </button>
+            </Show>
           </div>
         </Show>
 
-        <div class="field">
-          <span>人数</span>
-          <div class="seg">
-            <For each={[2, 3, 4, 5, 6]}>
-              {(n) => (
-                <button classList={{ on: players() === n }} onClick={() => setPlayers(n)}>
-                  {n} 人
-                </button>
-              )}
-            </For>
+        <Show when={tab() === 'rank'}>
+          <Rankings />
+        </Show>
+
+        <Show when={tab() !== 'rank'}>
+          <div class="field">
+            <span>人数</span>
+            <div class="seg">
+              <For each={[2, 3, 4, 5, 6]}>
+                {(n) => (
+                  <button classList={{ on: players() === n }} onClick={() => setPlayers(n)}>
+                    {n} 人
+                  </button>
+                )}
+              </For>
+            </div>
           </div>
-        </div>
-        <div class="field">
-          <span>AI 难度</span>
-          <div class="seg">
-            <button classList={{ on: bot() === 'weighted' }} onClick={() => setBot('weighted')}>
-              简单
-            </button>
-            <button classList={{ on: bot() === 'greedy' }} onClick={() => setBot('greedy')}>
-              普通
-            </button>
-            <button classList={{ on: bot() === 'mcts' }} onClick={() => setBot('mcts')} title="搜索型 AI，会推演后续局面">
-              困难
-            </button>
+          <div class="field">
+            <span>AI 难度</span>
+            <div class="seg">
+              <button classList={{ on: bot() === 'weighted' }} onClick={() => setBot('weighted')}>
+                简单
+              </button>
+              <button classList={{ on: bot() === 'greedy' }} onClick={() => setBot('greedy')}>
+                普通
+              </button>
+              <button classList={{ on: bot() === 'mcts' }} onClick={() => setBot('mcts')} title="搜索型 AI，会推演后续局面">
+                困难
+              </button>
+            </div>
           </div>
-        </div>
+        </Show>
 
         <Show when={tab() === 'local'}>
           <div class="field">

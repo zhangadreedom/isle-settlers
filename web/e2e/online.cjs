@@ -12,7 +12,10 @@
 // When the server has accounts (run it with --data-dir), the host registers,
 // logs out, fails and then succeeds to log in, keeps the login across a
 // reload and plays signed in; a fresh browser ("phone") signs in on the
-// invite page and gets the host's seat back mid-game.
+// invite page and gets the host's seat back mid-game. The guest registers on
+// the invite page, so the game is ranked: the host switches the room to
+// casual and back, both see their rating changes at the end, and the host
+// finds the game in the leaderboard tab and opens its replay from there.
 //
 // At the end the guest opens the stored replay from the game-over dialog and
 // a third browser opens the shared replay link.
@@ -295,14 +298,28 @@ async function playLoop(p, other, shared, deadline) {
   await guest.page.goto(BASE + QUERY + `#/r/${roomId}`);
   await guest.page.waitForSelector('text=加入房间');
   await guest.page.screenshot({ path: `${OUT}/p2-guest-join.png` });
-  await guest.page.fill('input[aria-label="昵称"]', 'Bob');
+  const guestName = accounts ? `${username}_b` : 'Bob';
+  if (accounts) {
+    await signIn(guest.page, 'register', guestName, PASSWORD);
+    await guest.page.waitForSelector(`text=以账号 ${guestName} 的身份加入`);
+  } else {
+    await guest.page.fill('input[aria-label="昵称"]', 'Bob');
+  }
   await guest.page.click('button[type="submit"] >> text=加入');
   await guest.page.waitForSelector('.seats');
-  await host.page.waitForFunction(() => document.querySelector('.seats')?.textContent.includes('Bob'));
+  await host.page.waitForFunction((n) => document.querySelector('.seats')?.textContent.includes(n), guestName);
   const seat0 = await guest.page.textContent('.seats li');
   if (!seat0.includes(hostName)) errors.push(`seat 0 shows ${seat0}`);
   const marks = await guest.page.$$eval('.seats li .verified', (els) => els.length);
-  if (marks !== (accounts ? 1 : 0)) errors.push(`${marks} seats marked as signed in`);
+  if (marks !== (accounts ? 2 : 0)) errors.push(`${marks} seats marked as signed in`);
+  // Ranked by default; the host can switch to casual and back.
+  const mode = () => guest.page.textContent('.room-mode .mode-tag');
+  if ((await mode()) !== '排位赛') errors.push(`guest sees mode ${await mode()}`);
+  await host.page.click('.room-mode >> text=休闲');
+  await guest.page.waitForFunction(() => document.querySelector('.room-mode .mode-tag')?.textContent === '休闲局');
+  await host.page.click('.room-mode >> text=排位');
+  await guest.page.waitForFunction(() => document.querySelector('.room-mode .mode-tag')?.textContent === '排位赛');
+  if (accounts && (await guest.page.$$eval('.seats li .tier', (els) => els.length)) !== 2) errors.push('seat ratings missing');
   await host.page.screenshot({ path: `${OUT}/p2-room-host.png` });
   await guest.page.screenshot({ path: `${OUT}/p2-room-guest.png` });
 
@@ -359,6 +376,17 @@ async function playLoop(p, other, shared, deadline) {
   console.log('host:', JSON.stringify(host.stats), 'guest:', JSON.stringify(guest.stats));
   if (PLAYERS > 4 && !host.stats.special && !guest.stats.special) errors.push('never saw a special building phase');
 
+  if (accounts) {
+    // Both signed in, ranked room: everyone sees the rating changes.
+    for (const p of [host, guest]) {
+      await p.page.waitForFunction(() => document.querySelectorAll('.rating-result li').length === 2, null, { timeout: 15000 });
+    }
+    const rows = await host.page.$$eval('.rating-result li', (els) => els.map((li) => li.textContent));
+    if (!rows.every((r) => /1000 → \d+[+-]\d+$/.test(r))) errors.push(`unexpected rating rows ${rows}`);
+    await host.page.screenshot({ path: `${OUT}/p2-rating.png` });
+    console.log('ranking: rating changes', rows.join(' | '));
+  }
+
   // The stored replay, from the dialog and through a shared link.
   await guest.page.click('.modal >> text=观看回放');
   await guest.page.waitForSelector('.replay-bar');
@@ -378,6 +406,24 @@ async function playLoop(p, other, shared, deadline) {
   await sleep(300);
   await viewer.page.screenshot({ path: `${OUT}/p2-replay-link.png` });
   console.log('replay:', hash, total, 'actions');
+
+  if (accounts) {
+    // The host's standing in the lobby, with the game's replay.
+    await host.page.click('.modal >> text=返回大厅');
+    // Leaving an online game lands in the lobby (it once rebuilt a stale game).
+    await host.page.waitForSelector('.lobby .tabs', { timeout: 5000 });
+    if (await host.page.$('.hand')) errors.push('a game is still on after leaving');
+    await host.page.click('.tabs >> text=排行榜');
+    await host.page.waitForSelector('.profile-card .recent li', { timeout: 10000 });
+    const card = await host.page.textContent('.profile-card');
+    if (!card.includes('我的排位') || !card.includes('1 局') || !card.includes('定级赛还差 4 局')) errors.push(`unexpected standing: ${card}`);
+    await host.page.screenshot({ path: `${OUT}/p2-standing.png` });
+    await host.page.click('.profile-card .recent a');
+    await host.page.waitForSelector('.replay-bar', { timeout: 30000 });
+    const id = await host.page.evaluate(() => location.hash);
+    if (id !== hash) errors.push(`standing links to ${id}, the game was ${hash}`);
+    console.log('ranking: standing lists the game, replay', id);
+  }
   console.log('errors:', errors.length ? errors.slice(0, 10) : 'none');
   await browser.close();
   if (errors.length || hs.view.winner === null || gs.view.winner !== hs.view.winner || !shared.reloaded) process.exit(1);

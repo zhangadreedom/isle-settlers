@@ -70,7 +70,10 @@ export function forgetSession() {
   set(null);
 }
 
-async function request<T>(method: string, path: string, body?: unknown, token?: string): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+export type ApiResult<T> = { ok: true; data: T } | { ok: false; error: string };
+
+/** JSON request to the server's API; failures carry an `ApiError` code. */
+export async function request<T>(method: string, path: string, body?: unknown, token?: string): Promise<ApiResult<T>> {
   try {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';

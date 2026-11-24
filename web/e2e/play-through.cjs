@@ -29,7 +29,10 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
   const errors = [];
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
-  page.on('console', (m) => m.type() === 'error' && errors.push(`console: ${m.text()}`));
+  // The lobby asks /api/health whether a server offers accounts; without a
+  // game server (vite preview, static hosting) that request fails by design.
+  const expected = (m) => m.text().startsWith('Failed to load resource') && /\/api\/health$/.test(m.location().url ?? '');
+  page.on('console', (m) => m.type() === 'error' && !expected(m) && errors.push(`console: ${m.text()}`));
 
   await page.goto(URL);
   await page.waitForSelector('text=开始游戏');

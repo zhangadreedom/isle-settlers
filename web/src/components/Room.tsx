@@ -5,6 +5,7 @@ import { errorText } from '../game/text';
 import { account, accountsEnabled } from '../net/account';
 import { inviteLink, savedName, saveName, type Connection } from '../net/connection';
 import { AccountPanel, Verified } from './Account';
+import { TierBadge } from './Ranking';
 
 /** Name prompt shown when opening an invite link for the first time. */
 export function JoinPrompt(props: { room: string; onJoin: (name: string) => void; onCancel: () => void }) {
@@ -122,6 +123,27 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                 </button>
               </div>
 
+              <div class="room-mode">
+                <Show
+                  when={isHost()}
+                  fallback={
+                    <span class="mode-tag" classList={{ ranked: room().ranked }}>
+                      {room().ranked ? '排位赛' : '休闲局'}
+                    </span>
+                  }
+                >
+                  <div class="seg small">
+                    <button classList={{ on: room().ranked }} onClick={() => c.send({ type: 'SetRanked', value: { ranked: true } })}>
+                      排位
+                    </button>
+                    <button classList={{ on: !room().ranked }} onClick={() => c.send({ type: 'SetRanked', value: { ranked: false } })}>
+                      休闲
+                    </button>
+                  </div>
+                </Show>
+                <span class="muted small">{room().ranked ? '至少两名登录玩家时计入排位分' : '不计排位分'}</span>
+              </div>
+
               <ol class="seats">
                 <For each={room().seats}>
                   {(s, i) => (
@@ -131,6 +153,9 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                         {seatLabel(s)}
                         <Show when={s.type === 'Human' && s.value.registered}>
                           <Verified />
+                        </Show>
+                        <Show when={s.type === 'Human' && s.value.rating}>
+                          {(r) => <TierBadge tier={r().tier} rating={r().rating} />}
                         </Show>
                         {i() === c.seat() ? '（你）' : ''}
                         {i() === room().host ? ' · 房主' : ''}

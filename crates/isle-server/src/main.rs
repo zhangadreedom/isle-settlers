@@ -4,6 +4,7 @@
 //! isle-server [--addr 0.0.0.0:8080] [--static-dir web/dist] [--data-dir data]
 //!             [--bot-delay 1.0] [--autopilot-secs 30] [--no-accounts]
 //!             [--session-days 30] [--client-ip-header X-Forwarded-For]
+//!             [--placement-games 5]
 //! ```
 //! `PORT` and `ISLE_DATA_DIR` environment variables are honoured too.
 
@@ -21,7 +22,8 @@ fn usage(err: &str) -> ! {
     eprintln!(
         "usage: isle-server [--addr HOST:PORT] [--static-dir DIR] [--data-dir DIR]\n\
          \x20                  [--bot-delay SCALE] [--autopilot-secs N] [--no-accounts]\n\
-         \x20                  [--session-days N] [--client-ip-header NAME]"
+         \x20                  [--session-days N] [--client-ip-header NAME]\n\
+         \x20                  [--placement-games N]"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 });
 }
@@ -67,6 +69,13 @@ fn parse_args() -> (SocketAddr, ServerConfig) {
                 config.session_ttl = Duration::from_secs(days * 24 * 60 * 60);
             }
             "--client-ip-header" => config.client_ip_header = Some(val()),
+            "--placement-games" => {
+                config.placement_games = val()
+                    .parse()
+                    .ok()
+                    .filter(|n| *n <= 100)
+                    .unwrap_or_else(|| usage("--placement-games must be 0..=100"))
+            }
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown flag {other}")),
         }

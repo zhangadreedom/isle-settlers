@@ -1,7 +1,9 @@
 // Labels and event descriptions (zh-CN).
-import type { BotLevel, DevCard, Event, Resource, ResourceSet, RuleError } from '../generated/proto';
+import type { BotLevel, DevCard, Event, Resource, ResourceSet, RuleError, Tier } from '../generated/proto';
 
 export const BOT_LEVEL_NAME: Record<BotLevel, string> = { Easy: '简单', Normal: '普通', Hard: '困难' };
+
+export const TIER_NAME: Record<Tier, string> = { Bronze: '青铜', Silver: '白银', Gold: '黄金', Platinum: '铂金', Diamond: '钻石', Master: '大师' };
 
 export const RESOURCES: Resource[] = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'];
 export const RESOURCE_NAME: Record<Resource, string> = { Brick: '砖', Lumber: '木', Wool: '羊毛', Grain: '小麦', Ore: '矿石' };
@@ -93,6 +95,7 @@ const SERVER_ERRORS: Record<string, string> = {
   Internal: '服务器出错了，请稍后再试',
   ServerError: '服务器出错了，正在重试…',
   NetworkError: '网络连接失败',
+  PlayerNotFound: '找不到这名玩家',
 };
 
 export function errorText(code: string): string {

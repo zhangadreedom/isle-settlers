@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { batch, createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import type { BoardRenderer, Insets, PickKind } from './board/BoardRenderer';
 import { DiceView, Flights, GameLog, HandBar, PlayerList } from './components/Hud';
 import { Lobby, randomSeed, type CreateRoom } from './components/Lobby';
@@ -177,10 +177,14 @@ export default function App() {
   function leave(clearHash = true) {
     game()?.dispose();
     conn()?.close();
-    setGame(null);
-    setConn(null);
-    setJoinRoom(null);
-    setTradeOpen(false);
+    // One update: with the game gone but the connection still set, the
+    // snapshot effect below would rebuild a game from the old snapshot.
+    batch(() => {
+      setConn(null);
+      setGame(null);
+      setJoinRoom(null);
+      setTradeOpen(false);
+    });
     if (clearHash && location.hash) history.replaceState(null, '', location.pathname + location.search);
     setPreviewSeed(randomSeed());
   }
@@ -201,7 +205,7 @@ export default function App() {
     const c = conn();
     const snapshot = c?.snapshot();
     const r = renderer();
-    if (!c || !snapshot || !r || game()) return;
+    if (!c || !snapshot || !r || game() || c.status() === 'closed') return;
     setGame(createGame(createOnlineSource(c, snapshot), r));
   });
 
@@ -329,6 +333,9 @@ export default function App() {
               <Show when={conn()}>
                 {(c) => <span class="room-tag muted">房间 {c().roomId()}</span>}
               </Show>
+              <Show when={conn()?.room()?.ranked}>
+                <span class="room-tag mode-tag ranked">排位赛</span>
+              </Show>
               <Show when={g().replay}>
                 <span class="room-tag muted">回放</span>
               </Show>
@@ -364,6 +371,7 @@ export default function App() {
                 onLobby={() => leave()}
                 onAgain={g().online ? undefined : () => lastLocal && startLocal({ ...lastLocal, seed: randomSeed() })}
                 onWatchReplay={watchReplay}
+                room={conn()?.room()}
               />
             </Show>
             <Show when={g().toast()}>
