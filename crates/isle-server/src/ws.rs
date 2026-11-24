@@ -15,6 +15,7 @@ use tokio::time::{Instant, interval, timeout};
 
 use crate::AppState;
 use crate::room::{Out, RoomCmd};
+use crate::store::SeatAccount;
 
 /// Largest accepted client frame; real messages are a few hundred bytes.
 const MAX_MESSAGE: usize = 16 * 1024;
@@ -49,6 +50,30 @@ async fn next_message(stream: &mut SplitStream<WebSocket>) -> Option<Result<Clie
     }
 }
 
+/// The account behind the session token sent with `Create` / `Join`.
+async fn seat_account(
+    state: &AppState,
+    session: Option<String>,
+) -> Result<Option<SeatAccount>, String> {
+    let Some(token) = session else {
+        return Ok(None);
+    };
+    let Some(accounts) = &state.accounts else {
+        return Err("AccountsDisabled".into());
+    };
+    match accounts.session(token).await {
+        Ok(Some(s)) => Ok(Some(SeatAccount {
+            id: s.account.id,
+            username: s.account.username,
+        })),
+        Ok(None) => Err("SessionExpired".into()),
+        Err(e) => {
+            tracing::error!("session check failed: {e}");
+            Err("ServerError".into())
+        }
+    }
+}
+
 async fn serve(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let (out, mut outbox) = mpsc::channel::<Out>(OUTBOX);
@@ -71,15 +96,30 @@ async fn serve(socket: WebSocket, state: AppState) {
             players,
             bots,
             name,
-        }))) => {
-            state
-                .registry
-                .create(players, bots, name, out.clone())
-                .await
-        }
-        Ok(Some(Ok(ClientMsg::Join { room, name, token }))) => {
-            state.registry.join(&room, name, token, out.clone()).await
-        }
+            session,
+        }))) => match seat_account(&state, session).await {
+            Ok(account) => {
+                state
+                    .registry
+                    .create(players, bots, name, account, out.clone())
+                    .await
+            }
+            Err(code) => Err(code),
+        },
+        Ok(Some(Ok(ClientMsg::Join {
+            room,
+            name,
+            token,
+            session,
+        }))) => match seat_account(&state, session).await {
+            Ok(account) => {
+                state
+                    .registry
+                    .join(&room, name, token, account, out.clone())
+                    .await
+            }
+            Err(code) => Err(code),
+        },
         Ok(Some(_)) => Err("BadMessage".to_owned()),
         Ok(None) | Err(_) => Err(String::new()),
     };

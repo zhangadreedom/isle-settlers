@@ -122,7 +122,11 @@ finalPoints: Array<number> | null, };
 
 export type BotLevel = "Easy" | "Normal" | "Hard";
 
-export type SeatView = { "type": "Open" } | { "type": "Human", "value": { name: string, connected: boolean, 
+export type SeatView = { "type": "Open" } | { "type": "Human", "value": { name: string, 
+/**
+ * Signed in: `name` is the account's username.
+ */
+registered: boolean, connected: boolean, 
 /**
  * A bot is playing for this player while they are disconnected.
  */
@@ -162,7 +166,7 @@ export type ChatLine = {
  */
 seat: number | null, name: string, text: string, };
 
-export type ClientMsg = { "type": "Create", "value": { players: number, bots: BotLevel, name: string, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
+export type ClientMsg = { "type": "Create", "value": { players: number, bots: BotLevel, name: string, session?: string | null, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, session?: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
 
 export type ServerMsg = { "type": "Joined", "value": { room: string, seat: number | null, token: string | null, } } | { "type": "Room", "value": RoomInfo } | { "type": "Snapshot", "value": Snapshot } | { "type": "Update", "value": Update } | { "type": "Chat", "value": ChatLine } | { "type": "Error", "value": { code: string, } };
 
@@ -186,4 +190,34 @@ seed: string, players: Array<ReplayPlayer>,
  * [`Action::encode`] bytes.
  */
 actions: Array<number>, winner: number | null, };
+
+export type Credentials = { username: string, password: string, };
+
+export type AccountInfo = { 
+/**
+ * Canonical (lowercase) username, also the player's name in rooms.
+ */
+username: string, 
+/**
+ * Unix seconds.
+ */
+createdAt: number, };
+
+export type SessionGrant = { account: AccountInfo, 
+/**
+ * Bearer token for later requests and for joining rooms.
+ */
+token: string, 
+/**
+ * Unix seconds; the token stops working at this instant.
+ */
+expiresAt: number, };
+
+export type SessionInfo = { account: AccountInfo, 
+/**
+ * Unix seconds.
+ */
+expiresAt: number, };
+
+export type ApiError = { error: string, };
 

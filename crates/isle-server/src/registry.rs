@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::ServerConfig;
 use crate::ids;
 use crate::room::{Attached, Outbox, Room, RoomCmd};
-use crate::store::{ReplayArchive, Store};
+use crate::store::{ReplayArchive, SeatAccount, Store};
 
 pub type RoomSender = mpsc::Sender<RoomCmd>;
 
@@ -74,6 +74,7 @@ impl Registry {
         players: u8,
         bots: BotLevel,
         name: String,
+        account: Option<SeatAccount>,
         out: Outbox,
     ) -> Result<(RoomSender, Attached), String> {
         if !(2..=isle_core::MAX_PLAYERS as u8).contains(&players) {
@@ -91,10 +92,17 @@ impl Registry {
                 }
             }
         };
-        let (room, token) = Room::new_lobby(id.clone(), players, bots, name.clone(), self);
+        let (room, token) = Room::new_lobby(
+            id.clone(),
+            players,
+            bots,
+            name.clone(),
+            account.clone(),
+            self,
+        );
         let tx = self.spawn(id.clone(), room);
         tracing::info!(room = %id, players, "room created");
-        self.attach(tx, name, Some(token), out).await
+        self.attach(tx, name, Some(token), account, out).await
     }
 
     /// Joins (or rejoins with `token`) an existing room.
@@ -103,6 +111,7 @@ impl Registry {
         room: &str,
         name: String,
         token: Option<String>,
+        account: Option<SeatAccount>,
         out: Outbox,
     ) -> Result<(RoomSender, Attached), String> {
         let id = room.trim().to_ascii_uppercase();
@@ -113,7 +122,7 @@ impl Registry {
             .get(&id)
             .cloned()
             .ok_or("RoomNotFound")?;
-        self.attach(tx, name, token, out).await
+        self.attach(tx, name, token, account, out).await
     }
 
     async fn attach(
@@ -121,12 +130,14 @@ impl Registry {
         tx: RoomSender,
         name: String,
         token: Option<String>,
+        account: Option<SeatAccount>,
         out: Outbox,
     ) -> Result<(RoomSender, Attached), String> {
         let (reply, rx) = oneshot::channel();
         tx.send(RoomCmd::Attach {
             name,
             token,
+            account,
             out,
             reply,
         })

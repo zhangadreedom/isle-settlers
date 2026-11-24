@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
 use crate::registry::Registry;
-use crate::store::{ReplayArchive, RoomRecord, SeatRecord, Store};
+use crate::store::{ReplayArchive, RoomRecord, SeatAccount, SeatRecord, Store};
 use crate::{ServerConfig, ids};
 
 pub type ConnId = u64;
@@ -38,6 +38,8 @@ pub enum RoomCmd {
     Attach {
         name: String,
         token: Option<String>,
+        /// Verified account of the connection, if signed in.
+        account: Option<SeatAccount>,
         out: Outbox,
         reply: oneshot::Sender<Result<Attached, String>>,
     },
@@ -69,8 +71,20 @@ const SAVE_DELAY: Duration = Duration::from_millis(250);
 #[derive(Clone, Debug)]
 enum SeatKind {
     Open,
-    Human { name: String, token: String },
+    Human {
+        name: String,
+        token: String,
+        account: Option<SeatAccount>,
+    },
     Bot(BotLevel),
+}
+
+/// Display name: the username for accounts, else the cleaned-up nickname.
+fn display_name(name: &str, account: Option<&SeatAccount>, fallback: &str) -> String {
+    match account {
+        Some(a) => a.username.clone(),
+        None => clean_name(name).unwrap_or_else(|| fallback.into()),
+    }
 }
 
 #[derive(Debug)]
@@ -164,10 +178,11 @@ impl Room {
         players: u8,
         bots: BotLevel,
         creator: String,
+        account: Option<SeatAccount>,
         registry: &Registry,
     ) -> (Room, String) {
         let token = ids::token();
-        let name = clean_name(&creator).unwrap_or_else(|| "玩家 1".into());
+        let name = display_name(&creator, account.as_ref(), "玩家 1");
         let now = Instant::now();
         let mut seats: Vec<Seat> = (0..players)
             .map(|_| Seat {
@@ -179,6 +194,7 @@ impl Room {
         seats[0].kind = SeatKind::Human {
             name,
             token: token.clone(),
+            account,
         };
         let room = Room {
             id,
@@ -210,9 +226,14 @@ impl Room {
             .map(|s| {
                 let kind = match s {
                     SeatRecord::Open => SeatKind::Open,
-                    SeatRecord::Human { name, token } => SeatKind::Human {
+                    SeatRecord::Human {
+                        name,
+                        token,
+                        account,
+                    } => SeatKind::Human {
                         name: name.clone(),
                         token: token.clone(),
+                        account: account.clone(),
                     },
                     SeatRecord::Bot { level } => SeatKind::Bot(*level),
                 };
@@ -459,10 +480,11 @@ impl Room {
             RoomCmd::Attach {
                 name,
                 token,
+                account,
                 out,
                 reply,
             } => {
-                let result = self.attach(name, token, out, now);
+                let result = self.attach(name, token, account, out, now);
                 let _ = reply.send(result);
             }
             RoomCmd::Detach { conn } => self.detach(conn, now),
@@ -479,16 +501,28 @@ impl Room {
         &mut self,
         name: String,
         token: Option<String>,
+        account: Option<SeatAccount>,
         out: Outbox,
         now: Instant,
     ) -> Result<Attached, String> {
-        let name = clean_name(&name).unwrap_or_else(|| "玩家".into());
-        let mut seat = token.as_ref().and_then(|t| {
+        let name = display_name(&name, account.as_ref(), "玩家");
+        // The seat token wins; otherwise a signed-in player gets back the
+        // seat their account holds (another device, cleared storage).
+        let by_token = token.as_ref().and_then(|t| {
             self.seats
                 .iter()
                 .position(|s| matches!(&s.kind, SeatKind::Human { token, .. } if token == t))
         });
-        let mut token = seat.and(token);
+        let by_account = account.as_ref().and_then(|a| {
+            self.seats.iter().position(
+                |s| matches!(&s.kind, SeatKind::Human { account: Some(b), .. } if b.id == a.id),
+            )
+        });
+        let mut seat = by_token.or(by_account);
+        let mut token = seat.map(|i| match &self.seats[i].kind {
+            SeatKind::Human { token, .. } => token.clone(),
+            _ => unreachable!("matched a human seat"),
+        });
         if seat.is_none()
             && self.game.is_none()
             && let Some(i) = self
@@ -500,6 +534,7 @@ impl Room {
             self.seats[i].kind = SeatKind::Human {
                 name,
                 token: t.clone(),
+                account,
             };
             seat = Some(i);
             token = Some(t);
@@ -763,8 +798,9 @@ impl Room {
             .map(|(i, s)| match &s.kind {
                 SeatKind::Open => SeatView::Open,
                 SeatKind::Bot(level) => SeatView::Bot { level: *level },
-                SeatKind::Human { name, .. } => SeatView::Human {
+                SeatKind::Human { name, account, .. } => SeatView::Human {
                     name: name.clone(),
+                    registered: account.is_some(),
                     connected: s.connections > 0,
                     autopilot: self.on_autopilot(i as u8, now),
                 },
@@ -872,9 +908,14 @@ impl Room {
                 .iter()
                 .map(|s| match &s.kind {
                     SeatKind::Open => SeatRecord::Open,
-                    SeatKind::Human { name, token } => SeatRecord::Human {
+                    SeatKind::Human {
+                        name,
+                        token,
+                        account,
+                    } => SeatRecord::Human {
                         name: name.clone(),
                         token: token.clone(),
+                        account: account.clone(),
                     },
                     SeatKind::Bot(level) => SeatRecord::Bot { level: *level },
                 })

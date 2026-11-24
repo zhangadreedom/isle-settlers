@@ -32,8 +32,24 @@ impl RoomRecord {
 #[serde(tag = "kind")]
 pub enum SeatRecord {
     Open,
-    Human { name: String, token: String },
-    Bot { level: BotLevel },
+    Human {
+        name: String,
+        token: String,
+        /// The signed-in account holding the seat (absent for guests and in
+        /// records written before accounts existed).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<SeatAccount>,
+    },
+    Bot {
+        level: BotLevel,
+    },
+}
+
+/// An account bound to a seat.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatAccount {
+    pub id: i64,
+    pub username: String,
 }
 
 /// One JSON file per room in `dir`, replaced atomically on every save.

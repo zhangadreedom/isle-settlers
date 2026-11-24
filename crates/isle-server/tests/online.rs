@@ -1,195 +1,19 @@
 //! End-to-end tests over real WebSockets against a server on a random port.
 
-use std::net::SocketAddr;
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use common::*;
+use futures_util::SinkExt;
 use isle_core::{Action, Event, Phase};
-use isle_proto::PlayerView;
-use isle_proto::net::{BotLevel, ChatLine, ClientMsg, LegalActions, RoomInfo, SeatView, ServerMsg};
-use isle_server::{AppState, ServerConfig, app};
+use isle_proto::net::{BotLevel, ChatLine, ClientMsg, SeatView};
+use isle_server::ServerConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-
-fn fast_config() -> ServerConfig {
-    ServerConfig {
-        bot_delay_scale: 0.0,
-        autopilot_after: Duration::from_secs(3600),
-        ..ServerConfig::default()
-    }
-}
-
-struct Server {
-    addr: SocketAddr,
-    state: AppState,
-    task: JoinHandle<()>,
-}
-
-impl Server {
-    async fn start(config: ServerConfig) -> Server {
-        let state = AppState::new(config);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let router = app(state.clone());
-        let task = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        Server { addr, state, task }
-    }
-
-    async fn stop(self) {
-        self.state.registry.shutdown().await;
-        self.task.abort();
-    }
-}
-
-/// A protocol client that keeps the latest state it was sent.
-struct Client {
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    room_id: String,
-    seat: Option<u8>,
-    token: Option<String>,
-    room: Option<RoomInfo>,
-    view: Option<PlayerView>,
-    legal: Option<LegalActions>,
-    events: Vec<Event>,
-    errors: Vec<String>,
-    chats: Vec<ChatLine>,
-}
-
-impl Client {
-    async fn connect(addr: SocketAddr) -> Client {
-        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
-            .await
-            .unwrap();
-        Client {
-            ws,
-            room_id: String::new(),
-            seat: None,
-            token: None,
-            room: None,
-            view: None,
-            legal: None,
-            events: Vec::new(),
-            errors: Vec::new(),
-            chats: Vec::new(),
-        }
-    }
-
-    async fn create(addr: SocketAddr, players: u8, name: &str) -> Client {
-        let mut c = Client::connect(addr).await;
-        c.send(&ClientMsg::Create {
-            players,
-            bots: BotLevel::Normal,
-            name: name.into(),
-        })
-        .await;
-        c.until(|c| c.room.is_some()).await;
-        c
-    }
-
-    async fn join(addr: SocketAddr, room: &str, name: &str, token: Option<String>) -> Client {
-        let mut c = Client::connect(addr).await;
-        c.send(&ClientMsg::Join {
-            room: room.into(),
-            name: name.into(),
-            token,
-        })
-        .await;
-        c.until(|c| c.room.is_some() || !c.errors.is_empty()).await;
-        c
-    }
-
-    async fn send(&mut self, msg: &ClientMsg) {
-        self.ws
-            .send(Message::Text(serde_json::to_string(msg).unwrap().into()))
-            .await
-            .unwrap();
-    }
-
-    /// Receives one message (5 s timeout) and folds it into the state.
-    async fn recv(&mut self) -> ServerMsg {
-        loop {
-            let frame = timeout(Duration::from_secs(5), self.ws.next())
-                .await
-                .expect("timed out waiting for the server")
-                .expect("socket closed")
-                .unwrap();
-            let Message::Text(text) = frame else { continue };
-            let msg: ServerMsg = serde_json::from_str(&text).unwrap();
-            match &msg {
-                ServerMsg::Joined { room, seat, token } => {
-                    self.room_id = room.clone();
-                    self.seat = *seat;
-                    self.token = token.clone();
-                }
-                ServerMsg::Room(r) => self.room = Some(r.clone()),
-                ServerMsg::Snapshot(s) => {
-                    self.view = Some(s.view.clone());
-                    self.legal = Some(s.legal.clone());
-                }
-                ServerMsg::Update(u) => {
-                    self.view = Some(u.view.clone());
-                    self.legal = Some(u.legal.clone());
-                    self.events.extend(u.events.iter().copied());
-                }
-                ServerMsg::Chat(c) => self.chats.push(c.clone()),
-                ServerMsg::Error { code } => self.errors.push(code.clone()),
-            }
-            return msg;
-        }
-    }
-
-    async fn until(&mut self, done: impl Fn(&Client) -> bool) {
-        while !done(self) {
-            self.recv().await;
-        }
-    }
-
-    fn game_over(&self) -> bool {
-        self.view.as_ref().is_some_and(|v| v.winner.is_some())
-    }
-}
-
-/// Simple progress-making policy over the legal actions.
-fn choose(legal: &[Action]) -> Option<Action> {
-    let rank = |a: &Action| match a {
-        Action::BuildCity(_) => 0,
-        Action::BuildSettlement(_) => 1,
-        Action::BuildRoad(_) => 2,
-        Action::RollDice => 3,
-        Action::Discard(_) | Action::MoveRobber { .. } => 4,
-        Action::RespondTrade { accept: false } => 5,
-        Action::EndTurn => 6,
-        _ => 9,
-    };
-    legal.iter().copied().min_by_key(rank)
-}
-
-/// Plays whatever this client is asked to until the game ends.
-async fn play_to_end(mut c: Client) -> Client {
-    let mut acted_at = None;
-    while !c.game_over() {
-        if let Some(legal) = c.legal.clone()
-            && acted_at != Some(legal.version)
-            && let Some(action) = choose(&legal.actions)
-        {
-            acted_at = Some(legal.version);
-            c.send(&ClientMsg::Act {
-                version: legal.version,
-                action,
-            })
-            .await;
-        }
-        c.recv().await;
-    }
-    c
-}
 
 #[tokio::test]
 async fn two_humans_and_bots_play_a_full_game() {
@@ -539,6 +363,7 @@ async fn hard_bots_play_on_the_blocking_pool() {
         players: 4,
         bots: BotLevel::Hard,
         name: "Alice".into(),
+        session: None,
     })
     .await;
     host.until(|c| c.room.is_some()).await;
@@ -612,20 +437,6 @@ async fn six_seat_rooms_play_on_the_extended_island() {
         "{passes} passes over {turns} turns"
     );
     server.stop().await;
-}
-
-/// `GET path` over plain HTTP; returns the status line and the body.
-async fn http_get(addr: SocketAddr, path: &str) -> (String, String) {
-    let mut tcp = TcpStream::connect(addr).await.unwrap();
-    tcp.write_all(
-        format!("GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n").as_bytes(),
-    )
-    .await
-    .unwrap();
-    let mut raw = String::new();
-    tcp.read_to_string(&mut raw).await.unwrap();
-    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
-    (head.lines().next().unwrap().to_owned(), body.to_owned())
 }
 
 #[tokio::test]

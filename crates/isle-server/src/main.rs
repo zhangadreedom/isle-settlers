@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! isle-server [--addr 0.0.0.0:8080] [--static-dir web/dist] [--data-dir data]
-//!             [--bot-delay 1.0] [--autopilot-secs 30]
+//!             [--bot-delay 1.0] [--autopilot-secs 30] [--no-accounts]
+//!             [--session-days 30] [--client-ip-header X-Forwarded-For]
 //! ```
 //! `PORT` and `ISLE_DATA_DIR` environment variables are honoured too.
 
@@ -19,7 +20,8 @@ fn usage(err: &str) -> ! {
     }
     eprintln!(
         "usage: isle-server [--addr HOST:PORT] [--static-dir DIR] [--data-dir DIR]\n\
-         \x20                  [--bot-delay SCALE] [--autopilot-secs N]"
+         \x20                  [--bot-delay SCALE] [--autopilot-secs N] [--no-accounts]\n\
+         \x20                  [--session-days N] [--client-ip-header NAME]"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 });
 }
@@ -55,6 +57,16 @@ fn parse_args() -> (SocketAddr, ServerConfig) {
                         .unwrap_or_else(|_| usage("bad --autopilot-secs")),
                 )
             }
+            "--no-accounts" => config.accounts = false,
+            "--session-days" => {
+                let days: u64 = val()
+                    .parse()
+                    .ok()
+                    .filter(|d| (1..=366).contains(d))
+                    .unwrap_or_else(|| usage("--session-days must be 1..=366"));
+                config.session_ttl = Duration::from_secs(days * 24 * 60 * 60);
+            }
+            "--client-ip-header" => config.client_ip_header = Some(val()),
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown flag {other}")),
         }
@@ -98,7 +110,15 @@ async fn main() {
     if let Some(dir) = &config.data_dir {
         tracing::info!("persisting rooms in {}", dir.display());
     }
-    let state = AppState::new(config);
+    let state = AppState::new(config).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
+    if state.accounts.is_some() {
+        tracing::info!("accounts enabled");
+    } else {
+        tracing::info!("accounts disabled (they need --data-dir)");
+    }
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| {
@@ -106,7 +126,8 @@ async fn main() {
             std::process::exit(1);
         });
     tracing::info!("listening on http://{addr}");
-    if let Err(e) = axum::serve(listener, app(state.clone()))
+    let service = app(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    if let Err(e) = axum::serve(listener, service)
         .with_graceful_shutdown(shutdown_signal())
         .await
     {

@@ -7,10 +7,13 @@
 //! empty seats and play for disconnected players ("autopilot"). With a data
 //! directory, rooms survive restarts: each is stored as its seed plus action
 //! log and rebuilt by replay. Finished games are kept as replays, served at
-//! `/api/replays/{id}`.
+//! `/api/replays/{id}`. With a data directory there are also player
+//! accounts (`/api/accounts`, `/api/sessions`, `/api/session`): signing in
+//! is optional, and a signed-in player's seat belongs to their account.
 
 pub mod account_store;
 pub mod accounts;
+mod auth;
 mod registry;
 mod room;
 mod store;
@@ -28,6 +31,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
+pub use auth::Accounts;
 pub use registry::Registry;
 pub use store::ReplayArchive;
 
@@ -50,6 +54,18 @@ pub struct ServerConfig {
     pub data_dir: Option<PathBuf>,
     /// Built web client (`web/dist`) served at `/`.
     pub static_dir: Option<PathBuf>,
+    /// Offer accounts. They are stored in the data directory, so without
+    /// one there are none.
+    pub accounts: bool,
+    /// How long a login lasts.
+    pub session_ttl: Duration,
+    /// Register / login attempts per client address: a burst of
+    /// `auth_burst` (0 = unlimited), then one per `auth_refill`.
+    pub auth_burst: u32,
+    pub auth_refill: Duration,
+    /// Header a trusted reverse proxy puts the client address in (e.g.
+    /// `X-Forwarded-For`); rate limits use the peer address otherwise.
+    pub client_ip_header: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -64,6 +80,11 @@ impl Default for ServerConfig {
             hard_bot: "mcts".into(),
             data_dir: None,
             static_dir: None,
+            accounts: true,
+            session_ttl: account_store::DEFAULT_SESSION_TTL,
+            auth_burst: 10,
+            auth_refill: Duration::from_secs(6),
+            client_ip_header: None,
         }
     }
 }
@@ -71,25 +92,34 @@ impl Default for ServerConfig {
 #[derive(Clone)]
 pub struct AppState {
     pub registry: Arc<Registry>,
+    /// `None` when accounts are off.
+    pub accounts: Option<Arc<Accounts>>,
     started: Instant,
 }
 
 impl AppState {
-    /// Creates the state and restores persisted rooms.
-    pub fn new(config: ServerConfig) -> AppState {
-        AppState {
+    /// Opens the account store and restores persisted rooms. Fails if the
+    /// account store cannot be opened (damaged, or not ours).
+    pub fn new(config: ServerConfig) -> Result<AppState, String> {
+        let accounts = Accounts::open(&config)?.map(Arc::new);
+        Ok(AppState {
             registry: Registry::new(config),
+            accounts,
             started: Instant::now(),
-        }
+        })
     }
 }
 
-/// HTTP routes: `/api/ws` (game protocol), `/api/health`, and the web client.
+/// HTTP routes: `/api/ws` (game protocol), `/api/health`, replays, the
+/// account API and the web client. Serve it with
+/// `into_make_service_with_connect_info::<SocketAddr>()` so login attempts
+/// are rate limited per client.
 pub fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/api/ws", get(ws::upgrade))
         .route("/api/health", get(health))
         .route("/api/replays/{id}", get(replay))
+        .merge(auth::routes())
         .with_state(state.clone());
     if let Some(dir) = &state.registry.config().static_dir {
         // Hashed assets never change; everything else is revalidated.
@@ -134,6 +164,7 @@ async fn health(State(state): State<AppState>) -> axum::Json<serde_json::Value> 
     axum::Json(serde_json::json!({
         "ok": true,
         "rooms": state.registry.room_count(),
+        "accounts": state.accounts.is_some(),
         "uptimeSecs": state.started.elapsed().as_secs(),
     }))
 }

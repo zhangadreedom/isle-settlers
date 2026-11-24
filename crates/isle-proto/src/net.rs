@@ -54,6 +54,8 @@ pub enum SeatView {
     Open,
     Human {
         name: String,
+        /// Signed in: `name` is the account's username.
+        registered: bool,
         connected: bool,
         /// A bot is playing for this player while they are disconnected.
         autopilot: bool,
@@ -125,19 +127,28 @@ pub struct ChatLine {
 #[serde(tag = "type", content = "value")]
 pub enum ClientMsg {
     /// First message: create a room with `players` seats and take seat 0.
-    /// Seats nobody joins are played by bots of level `bots`.
+    /// Seats nobody joins are played by bots of level `bots`. With an
+    /// account `session` token the seat belongs to that account and `name`
+    /// is replaced by its username.
     Create {
         players: u8,
         bots: BotLevel,
         name: String,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional = nullable))]
+        session: Option<String>,
     },
     /// First message: join a room. With the token from an earlier `Joined`
     /// you get your seat back; otherwise you take a free seat in the lobby
-    /// or watch as a spectator.
+    /// or watch as a spectator. With an account `session` token you also get
+    /// back the seat that account holds, from any device.
     Join {
         room: String,
         name: String,
         token: Option<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional = nullable))]
+        session: Option<String>,
     },
     /// Play an action computed from `legal.actions` (or a trade proposal) at
     /// state `version`.
@@ -174,7 +185,9 @@ pub enum ServerMsg {
     Chat(ChatLine),
     /// `code` is a `RuleError` name or one of: `BadMessage`, `RoomNotFound`,
     /// `TooManyRooms`, `NotHost`, `AlreadyStarted`, `NotStarted`, `Spectator`,
-    /// `Stale`, `RateLimited`, `InvalidSeat`.
+    /// `Stale`, `RateLimited`, `InvalidSeat`, `SessionExpired` (the account
+    /// session sent with `Create` / `Join` is unknown, expired or revoked),
+    /// `AccountsDisabled`, `ServerError` (temporary, retry).
     Error {
         code: String,
     },
@@ -232,11 +245,13 @@ mod tests {
                 players: 4,
                 bots: BotLevel::Normal,
                 name: "A".into(),
+                session: Some("ab".repeat(32)),
             },
             ClientMsg::Join {
                 room: "ABCD".into(),
                 name: "B".into(),
                 token: None,
+                session: None,
             },
             ClientMsg::Act {
                 version: 3,
@@ -252,6 +267,12 @@ mod tests {
             let json = serde_json::to_string(&m).unwrap();
             assert_eq!(serde_json::from_str::<ClientMsg>(&json).unwrap(), m);
         }
+        // Clients from before accounts send no `session`.
+        let json = r#"{"type":"Join","value":{"room":"R","name":"N","token":null}}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(json).unwrap(),
+            ClientMsg::Join { session: None, .. }
+        ));
         let json = r#"{"type":"Act","value":{"version":1,"action":{"type":"MoveRobber","value":{"tile":3,"victim":null}}}}"#;
         assert_eq!(
             serde_json::from_str::<ClientMsg>(json).unwrap(),

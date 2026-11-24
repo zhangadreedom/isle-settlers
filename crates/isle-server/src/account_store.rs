@@ -302,6 +302,18 @@ impl AccountStore {
         }
     }
 
+    /// Creates an account and starts its first session, hashing the password
+    /// once (registering and then logging in would hash it twice).
+    pub fn register_session(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<NewSession, AccountStoreError> {
+        let now = now_secs();
+        let account = self.register_at(username, password, now)?;
+        self.create_session_at(account, now)
+    }
+
     /// The account with this (case-insensitive) username, if any.
     pub fn find_account(&self, username: &str) -> Result<Option<Account>, AccountStoreError> {
         let Ok(username) = accounts::normalize_username(username) else {
@@ -743,6 +755,24 @@ mod tests {
             .expect("validate")
             .expect("valid session");
         assert_eq!(session, login.session);
+    }
+
+    #[test]
+    fn register_session_starts_a_session() {
+        let tmp = TempDir::new();
+        let store = open(&tmp.0);
+        let new = store.register_session("Dora", PW).expect("register");
+        assert_eq!(new.session.account.username, "dora");
+        let session = store
+            .validate_session(new.token.expose())
+            .expect("validate")
+            .expect("valid");
+        assert_eq!(session, new.session);
+        assert!(matches!(
+            store.register_session("DORA", PW),
+            Err(AccountStoreError::UsernameTaken)
+        ));
+        assert_eq!(session_count(&store), 1);
     }
 
     #[test]

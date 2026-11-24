@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 pub use isle_core::{Action, DevCard, Event, RuleError, TradeResponse};
 
+pub mod account;
 pub mod net;
 pub mod replay;
 
