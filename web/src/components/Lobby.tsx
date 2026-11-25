@@ -72,7 +72,14 @@ export function Lobby(props: {
     <div class="lobby-wrap">
       <div class="panel lobby">
         <h1>Isle Settlers</h1>
-        <p class="muted">在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，每回合结束后其他人可以特殊建造。</p>
+        <p class="muted">
+          <Show
+            when={scenario() === 'Archipelago'}
+            fallback="在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，每回合结束后其他人可以特殊建造。"
+          >
+            航海 · 群岛：从西边的主岛出发，造船驶过海峡，第一次在东边的小岛上建村庄奖励 2 分；金矿产出任选资源，海盗会封锁航线。先到 12 分者获胜，2–4 人。
+          </Show>
+        </p>
 
         <Show when={!EMBEDDED}>
           <div class="tabs">

@@ -1503,3 +1503,8 @@ button.link {
     display: none;
   }
 }
+
+.mode-tag.sea {
+  background: rgba(42, 129, 153, 0.35);
+  color: #bfe9f4;
+}

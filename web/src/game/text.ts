@@ -21,7 +21,7 @@ export const DEV_NAME: Record<DevCard, string> = {
 export const DEV_HELP: Record<DevCard, string> = {
   Knight: '移动强盗并抢一张牌，计入最大骑士',
   VictoryPoint: '1 分（对他人隐藏）',
-  RoadBuilding: '免费建 2 条道路',
+  RoadBuilding: '免费建 2 条道路（航海地图上也可以是船）',
   YearOfPlenty: '从银行拿 2 张任选资源',
   Monopoly: '所有对手交出指定资源',
 };
@@ -31,6 +31,7 @@ export const COSTS: { label: string; cost: ResourceSet; points: string }[] = [
   { label: '村庄', cost: [1, 1, 1, 1, 0], points: '1 分' },
   { label: '城市', cost: [0, 0, 0, 2, 3], points: '2 分' },
   { label: '发展卡', cost: [0, 0, 1, 1, 1], points: '?' },
+  { label: '船', cost: [0, 1, 1, 0, 0], points: '—' },
 ];
 
 const ERRORS: Record<RuleError, string> = {

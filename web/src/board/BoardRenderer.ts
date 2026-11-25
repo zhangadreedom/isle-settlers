@@ -20,13 +20,24 @@ export interface BoardData {
   terrain: number[];
   numbers: number[];
   harbors: number[];
+  /** Island per tile: 0 for the sea, 1.. for land. */
+  islands: number[];
 }
 
 export interface PieceData {
   buildings: number[];
   roads: number[];
+  /** Seafaring: ship owner per edge (or EMPTY). */
+  ships?: number[];
   robber: number;
+  /** Seafaring: the pirate's sea tile. */
+  pirate?: number | null;
 }
+
+/** Terrain code of the sea (see palette). */
+const SEA_TERRAIN = 6;
+/** Height of ships and the pirate above the water plane. */
+const WATER = -0.06;
 
 export type PickKind = 'vertex' | 'edge' | 'tile';
 
@@ -62,6 +73,9 @@ const MAX_SPOTS = 128;
 /** Beach outline: distance from the outermost tile centres at the top and the foot of the sand. */
 const BEACH_TOP = 1.55;
 const BEACH_FOOT = 1.94;
+/** Seafaring islands get a narrower beach so straits stay open water. */
+const ISLAND_BEACH_TOP = 1.2;
+const ISLAND_BEACH_FOOT = 1.44;
 const CAMERA_DIR = new THREE.Vector3(0, 10.5, 8.5).normalize();
 const DROP_MS = 420;
 const ROBBER_MS = 550;
@@ -110,11 +124,21 @@ function offsetPolygon(poly: [number, number][], d: number): [number, number][] 
     const len = Math.hypot(bx - ax, bz - az);
     return [(bz - az) / len, -(bx - ax) / len];
   };
-  return poly.map((p, i) => {
+  // Corners sharper than a right angle are bevelled (two points), so a
+  // small island's beach does not shoot out a long spike. The choice depends
+  // only on the angle, so offsets of one polygon keep the same vertex count.
+  return poly.flatMap((p, i): [number, number][] => {
     const n1 = normal((i - 1 + n) % n);
     const n2 = normal(i);
-    const k = d / (1 + n1[0] * n2[0] + n1[1] * n2[1]);
-    return [p[0] + (n1[0] + n2[0]) * k, p[1] + (n1[1] + n2[1]) * k];
+    const dot = n1[0] * n2[0] + n1[1] * n2[1];
+    if (dot < 0) {
+      return [
+        [p[0] + n1[0] * d, p[1] + n1[1] * d],
+        [p[0] + n2[0] * d, p[1] + n2[1] * d],
+      ];
+    }
+    const k = d / (1 + dot);
+    return [[p[0] + (n1[0] + n2[0]) * k, p[1] + (n1[1] + n2[1]) * k]];
   });
 }
 
@@ -175,6 +199,31 @@ const cityGeometry = mergeGeometries([
 ])!;
 
 const roadGeometry = new THREE.BoxGeometry(0.64, 0.09, 0.12);
+/** Flat triangle pointing +x (a bow), `length` long, `width` wide, `thickness` high. */
+function bow(width: number, length: number, thickness: number) {
+  return prism(width, length, thickness).rotateX(Math.PI / 2).rotateY(Math.PI / 2);
+}
+
+const mast = (r: number, h: number, x: number, y: number) => new THREE.CylinderGeometry(r, r, h, 6).translate(x, y, 0).toNonIndexed();
+
+/** A small boat: hull, bow, cabin, mast and sail; bow along +x. */
+const shipGeometry = mergeGeometries([
+  box(0.4, 0.09, 0.17, 0, 0.045, 0),
+  bow(0.17, 0.12, 0.09).translate(0.2, 0.045, 0),
+  box(0.12, 0.07, 0.11, -0.11, 0.125, 0),
+  mast(0.012, 0.36, 0.04, 0.27),
+  box(0.02, 0.22, 0.2, 0.06, 0.3, 0),
+])!;
+/** The pirate: a bigger, dark ship with two sails. */
+const pirateHull = mergeGeometries([
+  box(0.56, 0.12, 0.24, 0, 0.06, 0),
+  bow(0.24, 0.16, 0.12).translate(0.28, 0.06, 0),
+  box(0.16, 0.1, 0.2, -0.2, 0.17, 0),
+  mast(0.015, 0.5, 0.08, 0.37),
+  mast(0.013, 0.36, -0.1, 0.3),
+])!;
+const pirateSails = mergeGeometries([box(0.025, 0.3, 0.28, 0.1, 0.4, 0), box(0.022, 0.2, 0.2, -0.08, 0.32, 0)])!;
+const seaRingGeometry = new THREE.RingGeometry(0.9, 0.97, 6, 1, Math.PI / 6).rotateX(-Math.PI / 2);
 const tokenGeometry = new THREE.CylinderGeometry(0.25, 0.25, 0.05, 24);
 const labelGeometry = new THREE.PlaneGeometry(0.5, 0.5).rotateX(-Math.PI / 2);
 const vertexMarkerGeometry = new THREE.CylinderGeometry(0.14, 0.14, 0.05, 20);
@@ -204,6 +253,13 @@ const DECORATIONS: Record<number, Decoration> = {
     cap: { geometry: new THREE.ConeGeometry(0.108, 0.23, 5).translate(0, 0.485, 0), material: std(0xf4f6f8) },
   },
   5: { geometry: new THREE.SphereGeometry(0.25, 8, 5), material: std(0xd8c08a), count: 2, scale: [0.8, 1.2], squash: 0.3 },
+  7: {
+    geometry: new THREE.OctahedronGeometry(0.1, 0).translate(0, 0.06, 0),
+    material: std(0xffcf3a, { metalness: 0.55, roughness: 0.25, emissive: 0x6b4a00 }),
+    count: 7,
+    scale: [0.8, 1.4],
+    squash: 0.75,
+  },
 };
 
 function canvasTexture(draw: (ctx: CanvasRenderingContext2D, size: number) => void) {
@@ -277,6 +333,8 @@ export class BoardRenderer {
   private readonly controls: OrbitControls;
   private readonly board = new THREE.Group();
   private readonly roads: THREE.InstancedMesh;
+  private readonly ships: THREE.InstancedMesh;
+  private readonly pirate = new THREE.Group();
   private readonly settlements: THREE.InstancedMesh;
   private readonly cities: THREE.InstancedMesh;
   private readonly markers: Record<PickKind, THREE.InstancedMesh>;
@@ -290,6 +348,10 @@ export class BoardRenderer {
   private edgeXZ: { x: number; z: number; angle: number }[] = [];
   /** Unit vector pointing out to sea from each harbor slot. */
   private harborOut: [number, number][] = [];
+  /** Tiles on either side of each edge. */
+  private edgeTiles: number[][] = [];
+  /** Per edge: unit direction towards open water (zero between two sea tiles). */
+  private edgeSeaward: [number, number][] = [];
   /** Half extents (world units) of the area that must stay in view. */
   private extent = { x: 5.2, z: 4.42 };
   private readonly numberTextures = new Map<number, THREE.Texture>();
@@ -300,6 +362,10 @@ export class BoardRenderer {
 
   // Pieces keyed by spot so new ones can be animated.
   private roadPieces = new Map<number, Piece>();
+  private shipPieces = new Map<number, Piece>();
+  private pirateFrom: [number, number] | null = null;
+  private pirateTo: [number, number] | null = null;
+  private pirateStart = 0;
   private buildingPieces = new Map<number, Piece & { city: boolean }>();
   private robberFrom: [number, number] | null = null;
   private robberTo: [number, number] = [0, 0];
@@ -356,6 +422,8 @@ export class BoardRenderer {
 
     const pieceMaterial = std(0xffffff, { roughness: 0.6 });
     this.roads = this.instanced(roadGeometry, pieceMaterial, MAX_SPOTS, true);
+    this.ships = this.instanced(shipGeometry, pieceMaterial, MAX_SPOTS, true);
+    this.scene.add(this.ships);
     this.settlements = this.instanced(settlementGeometry, pieceMaterial, MAX_SPOTS, true);
     this.cities = this.instanced(cityGeometry, pieceMaterial, MAX_SPOTS, true);
     this.scene.add(this.roads, this.settlements, this.cities);
@@ -378,6 +446,13 @@ export class BoardRenderer {
     body.castShadow = head.castShadow = true;
     this.robber.add(body, head);
     this.scene.add(this.robber);
+
+    const hull = new THREE.Mesh(pirateHull, std(0x24242b, { roughness: 0.6 }));
+    const sails = new THREE.Mesh(pirateSails, std(0x3b3b44, { roughness: 0.8 }));
+    hull.castShadow = sails.castShadow = true;
+    this.pirate.add(hull, sails);
+    this.pirate.visible = false;
+    this.scene.add(this.pirate);
 
     container.addEventListener('pointermove', this.onPointerMove);
     container.addEventListener('pointerdown', this.onPointerDown);
@@ -406,24 +481,13 @@ export class BoardRenderer {
       const [bx, bz] = this.vertexXZ[topology.edgeVertices[2 * e + 1]];
       this.edgeXZ.push({ x: (ax + bx) / 2, z: (az + bz) / 2, angle: -Math.atan2(bz - az, bx - ax) });
     }
-    // A harbor faces away from the one tile its coastal edge belongs to.
-    this.harborOut = [...topology.harborEdges].map((e) => {
-      const a = topology.edgeVertices[2 * e];
-      const b = topology.edgeVertices[2 * e + 1];
-      let t = 0;
-      for (let i = 0; i < this.tileXZ.length; i++) {
-        const corners = topology.tileVertices.subarray(i * 6, i * 6 + 6);
-        if (corners.includes(a) && corners.includes(b)) t = i;
+    this.edgeTiles = this.edgeXZ.map(() => []);
+    for (let t = 0; t < this.tileXZ.length; t++) {
+      const corners = topology.tileVertices.subarray(t * 6, t * 6 + 6);
+      for (let e = 0; e < this.edgeXZ.length; e++) {
+        if (corners.includes(topology.edgeVertices[2 * e]) && corners.includes(topology.edgeVertices[2 * e + 1])) this.edgeTiles[e].push(t);
       }
-      const { x, z } = this.edgeXZ[e];
-      const [cx, cz] = this.tileXZ[t];
-      const len = Math.hypot(x - cx, z - cz);
-      return [(x - cx) / len, (z - cz) / len];
-    });
-
-    const hull = convexHull(this.tileXZ);
-    this.beach.geometry.dispose();
-    this.beach.geometry = bankGeometry(offsetPolygon(hull, BEACH_TOP), offsetPolygon(hull, BEACH_FOOT), 0.24);
+    }
     const maxX = Math.max(...this.tileXZ.map(([x]) => Math.abs(x)));
     const maxZ = Math.max(...this.tileXZ.map(([, z]) => Math.abs(z)));
     this.extent = { x: maxX + MARGIN_X, z: maxZ + MARGIN_Z };
@@ -433,36 +497,83 @@ export class BoardRenderer {
     this.resize();
   }
 
+  /**
+   * Land-dependent geometry: one beach per island (the classic island is
+   * one), which way each harbor and each coastal ship faces.
+   */
+  private setLand(terrain: number[], islands: number[]) {
+    const isSea = (t: number | undefined) => t === undefined || terrain[t] === SEA_TERRAIN;
+    const seafaring = terrain.some((t) => t === SEA_TERRAIN);
+    const [top, foot] = seafaring ? [ISLAND_BEACH_TOP, ISLAND_BEACH_FOOT] : [BEACH_TOP, BEACH_FOOT];
+    const ids = [...new Set(islands.filter((i) => i > 0))];
+    const banks = ids.map((id) => {
+      const hull = convexHull(this.tileXZ.filter((_, t) => islands[t] === id));
+      return bankGeometry(offsetPolygon(hull, top), offsetPolygon(hull, foot), 0.24);
+    });
+    this.beach.geometry.dispose();
+    this.beach.geometry = banks.length > 1 ? mergeGeometries(banks) : (banks[0] ?? new THREE.BufferGeometry());
+
+    // Away from the land tile of an edge, towards the water.
+    const outward = (e: number): [number, number] => {
+      const landTile = this.edgeTiles[e].find((t) => !isSea(t));
+      const seaTile = this.edgeTiles[e].find((t) => isSea(t));
+      const { x, z } = this.edgeXZ[e];
+      if (landTile === undefined) return [0, 0];
+      const [cx, cz] = this.tileXZ[landTile];
+      if (seaTile === undefined && this.edgeTiles[e].length > 1) return [0, 0];
+      const len = Math.hypot(x - cx, z - cz);
+      return [(x - cx) / len, (z - cz) / len];
+    };
+    this.edgeSeaward = this.edgeXZ.map((_, e) => outward(e));
+    this.harborOut = [...this.topology!.harborEdges].map((e) => this.edgeSeaward[e]);
+  }
+
   /** Draw calls in the last frame (for the HUD). */
   get drawCalls() {
     return this.renderer.info.render.drawCalls;
   }
 
   /** Rebuilds tiles, number tokens, decorations and harbors for a new map. */
-  setBoard({ terrain, numbers, harbors }: BoardData, topology: Topology) {
+  setBoard({ terrain, numbers, harbors, islands }: BoardData, topology: Topology) {
     if (topology !== this.topology) this.setTopology(topology);
+    this.setLand(terrain, islands);
     this.camera.position.copy(CAMERA_DIR).multiplyScalar(this.fitDistance || 14);
     this.controls.update();
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
     this.board.clear();
     this.roadPieces.clear();
+    this.shipPieces.clear();
     this.buildingPieces.clear();
     this.robberFrom = null;
+    this.pirateFrom = this.pirateTo = null;
 
+    // Land tiles are raised hexes; sea tiles inside the map are open water,
+    // marked by a faint ring so the sailing grid reads.
+    const land = [...terrain.keys()].filter((i) => terrain[i] !== SEA_TERRAIN);
+    const sea = [...terrain.keys()].filter((i) => terrain[i] === SEA_TERRAIN);
     const tileMaterial = std(0xffffff);
-    const tiles = this.instanced(hexGeometry, tileMaterial, terrain.length, true);
+    const tiles = this.instanced(hexGeometry, tileMaterial, land.length, true);
     tiles.castShadow = false;
     const m = new THREE.Matrix4();
     const color = new THREE.Color();
-    terrain.forEach((t, i) => {
-      const [x, z] = this.tileXZ[i];
+    land.forEach((t, i) => {
+      const [x, z] = this.tileXZ[t];
       tiles.setMatrixAt(i, m.makeTranslation(x, TILE_HEIGHT / 2, z));
-      tiles.setColorAt(i, color.setHex(TERRAIN_COLORS[t]));
+      tiles.setColorAt(i, color.setHex(TERRAIN_COLORS[terrain[t]]));
     });
-    this.commit(tiles, terrain.length);
+    this.commit(tiles, land.length);
     this.board.add(tiles);
     this.disposables.push(tileMaterial, tiles);
+    if (sea.length) {
+      const ringMaterial = new THREE.MeshBasicMaterial({ color: TERRAIN_COLORS[SEA_TERRAIN], transparent: true, opacity: 0.55, depthWrite: false });
+      const rings = this.instanced(seaRingGeometry, ringMaterial, sea.length);
+      rings.castShadow = rings.receiveShadow = false;
+      sea.forEach((t, i) => rings.setMatrixAt(i, m.makeTranslation(this.tileXZ[t][0], -0.12, this.tileXZ[t][1])));
+      this.commit(rings, sea.length);
+      this.board.add(rings);
+      this.disposables.push(ringMaterial, rings);
+    }
 
     this.addDecorations(terrain);
     this.addTokens(numbers);
@@ -475,8 +586,38 @@ export class BoardRenderer {
    * before drop in; a moved robber walks over. Pass `animate: false` for the
    * first sync of a game.
    */
-  setPieces({ buildings, roads, robber }: PieceData, animate = true) {
+  setPieces({ buildings, roads, ships, robber, pirate }: PieceData, animate = true) {
     const now = animate ? performance.now() : -1e9;
+    const nextShips = new Map<number, Piece>();
+    (ships ?? []).forEach((owner, e) => {
+      if (owner === EMPTY) return;
+      const prev = this.shipPieces.get(e);
+      const { x, z, angle } = this.edgeXZ[e];
+      // Coastal ships sit off the beach, bow along the edge.
+      const [ox, oz] = this.edgeSeaward[e] ?? [0, 0];
+      const coastal = ox !== 0 || oz !== 0;
+      const at = { x: x + ox * (coastal ? 0.42 : 0), z: z + oz * (coastal ? 0.42 : 0), angle };
+      nextShips.set(e, prev?.owner === owner ? prev : { ...at, owner, born: now });
+    });
+    this.shipPieces = nextShips;
+
+    if (pirate === undefined || pirate === null) {
+      this.pirate.visible = false;
+      this.pirateFrom = this.pirateTo = null;
+    } else {
+      const [px, pz] = this.tileXZ[pirate] ?? [0, 0];
+      const to: [number, number] = [px, pz];
+      const moved = this.pirateTo !== null && (to[0] !== this.pirateTo[0] || to[1] !== this.pirateTo[1]);
+      if (animate && moved) {
+        this.pirateFrom = [this.pirate.position.x, this.pirate.position.z];
+        this.pirateStart = now;
+      } else {
+        this.pirateFrom = to;
+        this.pirateStart = -1e9;
+      }
+      this.pirateTo = to;
+      this.pirate.visible = true;
+    }
     const nextRoads = new Map<number, Piece>();
     roads.forEach((owner, e) => {
       if (owner === EMPTY) return;
@@ -681,6 +822,21 @@ export class BoardRenderer {
     let n = 0;
     for (const piece of this.roadPieces.values()) place(this.roads, n++, piece, TOP + 0.045);
     this.commit(this.roads, n);
+    let nsh = 0;
+    for (const piece of this.shipPieces.values()) place(this.ships, nsh++, piece, WATER);
+    this.commit(this.ships, nsh);
+    if (this.pirateTo) {
+      const tp = Math.min(1, (now - this.pirateStart) / ROBBER_MS);
+      const from = this.pirateFrom ?? this.pirateTo;
+      const ep = easeInOut(tp);
+      this.pirate.position.set(
+        from[0] + (this.pirateTo[0] - from[0]) * ep,
+        WATER + Math.sin(Math.PI * tp) * 0.25,
+        from[1] + (this.pirateTo[1] - from[1]) * ep,
+      );
+      this.pirate.rotation.y = 0.6;
+      if (tp < 1) animating = true;
+    }
     let ns = 0;
     let nc = 0;
     for (const piece of this.buildingPieces.values()) {

@@ -30,6 +30,8 @@ const BASE = process.env.E2E_URL || 'http://localhost:8080/';
 const QUERY = '?debug&renderer=webgl';
 const RES = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore'];
 const PLAYERS = Number(process.env.E2E_PLAYERS || 3);
+// E2E_SCENARIO=archipelago plays the room on the seafaring map.
+const SEA = process.env.E2E_SCENARIO === 'archipelago';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PASSWORD = 'e2e password 12345';
@@ -110,7 +112,20 @@ async function step(p, other, shared) {
   if (v.phase.type === 'SetupSettlement') {
     await clickSpot(page, 'vertex', await rankSettlements(page, of('BuildSettlement').map((a) => a.value)));
   } else if (v.phase.type === 'SetupRoad' || v.phase.type === 'RoadBuilding') {
-    await clickSpot(page, 'edge', of('BuildRoad').map((a) => a.value));
+    await clickSpot(page, 'edge', [...new Set([...of('BuildRoad'), ...of('BuildShip')].map((a) => a.value))]);
+    await sleep(120);
+    if (await page.$('.modal h2:has-text("修路还是造船")')) {
+      await page.click(`.modal .choice >> text=${Math.random() < 0.5 ? '船' : '道路'}`);
+    }
+  } else if (types.has('ChooseGold')) {
+    await page.waitForSelector('.modal h2:has-text("金矿")');
+    for (let guard = 0; guard < 12; guard++) {
+      const plus = await page.$('.modal .stepper button[aria-label="增加"]:not([disabled])');
+      if (!plus) break;
+      await plus.click();
+    }
+    await page.click('.modal >> text=拿取');
+    p.stats.gold = (p.stats.gold ?? 0) + 1;
   } else if (types.has('Discard')) {
     await page.waitForSelector('.modal .stepper');
     const steppers = await page.$$('.modal .stepper');
@@ -170,6 +185,10 @@ async function step(p, other, shared) {
     } else if (types.has('BuildSettlement')) {
       await page.click('.build >> text=村庄');
       await clickSpot(page, 'vertex', of('BuildSettlement').map((a) => a.value));
+    } else if (SEA && types.has('BuildShip') && v.players[me].shipsLeft > 9) {
+      await page.click('.build:has-text("船") >> nth=0');
+      await clickSpot(page, 'edge', of('BuildShip').map((a) => a.value));
+      p.stats.ships = (p.stats.ships ?? 0) + 1;
     } else if (types.has('BuildRoad')) {
       await page.click('.build >> text=道路');
       await clickSpot(page, 'edge', of('BuildRoad').map((a) => a.value));
@@ -285,6 +304,7 @@ async function playLoop(p, other, shared, deadline) {
     console.log('accounts: off on this server (run it with --data-dir to test them)');
     await host.page.fill('input[aria-label="昵称"]', 'Alice');
   }
+  if (SEA) await host.page.click('.seg >> text=航海 · 群岛');
   await host.page.click(`.seg >> text=${PLAYERS} 人`);
   // E2E_AI=简单|普通|困难 sets the level of the bot filling the free seat.
   if (process.env.E2E_AI) await host.page.click(`.seg >> text=${process.env.E2E_AI}`);
@@ -312,6 +332,7 @@ async function playLoop(p, other, shared, deadline) {
   if (!seat0.includes(hostName)) errors.push(`seat 0 shows ${seat0}`);
   const marks = await guest.page.$$eval('.seats li .verified', (els) => els.length);
   if (marks !== (accounts ? 2 : 0)) errors.push(`${marks} seats marked as signed in`);
+  if (SEA && !(await guest.page.$('.room-mode .mode-tag.sea'))) errors.push('guest does not see the seafaring map');
   // Ranked by default; the host can switch to casual and back.
   const mode = () => guest.page.textContent('.room-mode .mode-tag');
   if ((await mode()) !== '排位赛') errors.push(`guest sees mode ${await mode()}`);

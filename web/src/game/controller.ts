@@ -8,7 +8,8 @@ import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, Reso
 import type { GameSource, SourceState } from './source';
 import { RESOURCES, describe, errorText } from './text';
 
-export type BuildMode = 'road' | 'settlement' | 'city' | null;
+/** Build modes; `ship` and `move` (move a ship: pick it, then where) are seafaring. */
+export type BuildMode = 'road' | 'settlement' | 'city' | 'ship' | 'move' | null;
 
 export interface LogEntry {
   id: number;
@@ -26,14 +27,15 @@ export interface Flight {
   resource: number;
 }
 
-const TERRAINS = ['Hills', 'Forest', 'Pasture', 'Fields', 'Mountains', 'Desert'];
-const PRODUCES = [0, 1, 2, 3, 4, -1]; // terrain code -> resource index
+const TERRAINS = ['Hills', 'Forest', 'Pasture', 'Fields', 'Mountains', 'Desert', 'Sea', 'Gold'];
+const PRODUCES = [0, 1, 2, 3, 4, -1, -1, -1]; // terrain code -> resource index
 
 export function boardData(info: BoardInfo): BoardData {
   return {
     terrain: info.terrain.map((t) => TERRAINS.indexOf(t)),
     numbers: info.numbers,
     harbors: info.harbors.map((h) => (h.type === 'Generic' ? 5 : RESOURCES.indexOf(h.value))),
+    islands: info.islands ?? info.terrain.map(() => 1),
   };
 }
 
@@ -53,6 +55,11 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
   const [dice, setDice] = createSignal<{ values: [number, number]; key: number } | null>(null);
   const [flights, setFlights] = createSignal<Flight[]>([]);
   const [victimChoice, setVictimChoice] = createSignal<{ tile: number; victims: number[] } | null>(null);
+  /** Seafaring: the ship picked to move (mode `move`). */
+  const [moveFrom, setMoveFrom] = createSignal<number | null>(null);
+  /** Seafaring: a coastal edge that could take a road or a ship. */
+  const [routeChoice, setRouteChoice] = createSignal<number | null>(null);
+  const seafaring = source.board.layout === 'Archipelago';
 
   let logId = 0;
   let flightId = 0;
@@ -80,29 +87,35 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
       setView(s.view);
       setLegal(s.legal);
       if (mode() && !modeAvailable(mode(), s.legal.actions)) setModeSignal(null);
+      if (mode() !== 'move') setMoveFrom(null);
       if (s.view.phase.type !== 'MoveRobber') setVictimChoice(null);
+      setRouteChoice(null);
     });
-    renderer.setPieces({ buildings: s.view.buildings, roads: s.view.roads, robber: s.view.robber }, !s.resync);
+    renderer.setPieces(
+      { buildings: s.view.buildings, roads: s.view.roads, ships: s.view.ships, robber: s.view.robber, pirate: s.view.pirate },
+      !s.resync,
+    );
     renderer.setHighlights(highlights());
   }
 
+  const MODE_ACTION = { road: 'BuildRoad', settlement: 'BuildSettlement', city: 'BuildCity', ship: 'BuildShip', move: 'MoveShip' } as const;
+
   function modeAvailable(m: BuildMode, list: Action[]) {
-    const type = m === 'road' ? 'BuildRoad' : m === 'settlement' ? 'BuildSettlement' : 'BuildCity';
-    return list.some((a) => a.type === type);
+    return m !== null && list.some((a) => a.type === MODE_ACTION[m]);
   }
 
   function highlights(): Highlights | null {
     const v = view();
     const list = actions();
     if (!v || !list.length) return null;
-    const ids = (type: 'BuildRoad' | 'BuildSettlement' | 'BuildCity') =>
+    const ids = (type: 'BuildRoad' | 'BuildSettlement' | 'BuildCity' | 'BuildShip') =>
       list.flatMap((a) => (a.type === type ? [a.value] : []));
     switch (v.phase.type) {
       case 'SetupSettlement':
         return { kind: 'vertex', ids: ids('BuildSettlement') };
       case 'SetupRoad':
       case 'RoadBuilding':
-        return { kind: 'edge', ids: ids('BuildRoad') };
+        return { kind: 'edge', ids: [...new Set([...ids('BuildRoad'), ...ids('BuildShip')])] };
       case 'MoveRobber':
         return { kind: 'tile', ids: [...new Set(list.flatMap((a) => (a.type === 'MoveRobber' ? [a.value.tile] : [])))] };
       case 'Main':
@@ -111,6 +124,14 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
         if (mode() === 'road') return { kind: 'edge', ids: ids('BuildRoad') };
         if (mode() === 'settlement') return { kind: 'vertex', ids: ids('BuildSettlement') };
         if (mode() === 'city') return { kind: 'vertex', ids: ids('BuildCity') };
+        if (mode() === 'ship') return { kind: 'edge', ids: ids('BuildShip') };
+        if (mode() === 'move') {
+          const moves = list.flatMap((a) => (a.type === 'MoveShip' ? [a.value] : []));
+          const from = moveFrom();
+          return from === null
+            ? { kind: 'edge', ids: [...new Set(moves.map((m) => m.from))] }
+            : { kind: 'edge', ids: moves.filter((m) => m.from === from).map((m) => m.to) };
+        }
         return null;
       default:
         return null;
@@ -144,7 +165,21 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
       return;
     }
     if (kind === 'edge') {
-      act((a) => a.type === 'BuildRoad' && a.value === id);
+      if (mode() === 'move') {
+        const from = moveFrom();
+        if (from === null) {
+          setMoveFrom(id);
+          renderer.setHighlights(highlights());
+        } else {
+          act((a) => a.type === 'MoveShip' && a.value.from === from && a.value.to === id);
+        }
+        return;
+      }
+      const road = actions().some((a) => a.type === 'BuildRoad' && a.value === id) && mode() !== 'ship';
+      const ship = actions().some((a) => a.type === 'BuildShip' && a.value === id) && mode() !== 'road';
+      if (road && ship) setRouteChoice(id);
+      else if (ship) act((a) => a.type === 'BuildShip' && a.value === id);
+      else act((a) => a.type === 'BuildRoad' && a.value === id);
       return;
     }
     if ((v.phase.type === 'Main' || v.phase.type === 'SpecialBuild') && mode() === 'city') act((a) => a.type === 'BuildCity' && a.value === id);
@@ -153,6 +188,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
 
   function setMode(m: BuildMode) {
     setModeSignal(mode() === m ? null : m);
+    setMoveFrom(null);
     renderer.setHighlights(highlights());
   }
 
@@ -252,6 +288,8 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
       return me();
     },
     online: source.online,
+    /** Ships, the pirate and gold are in play. */
+    seafaring,
     /** Playback controls when watching a replay. */
     replay: source.replay,
     /** The finished game as a replay record (local games and online rooms). */
@@ -269,6 +307,9 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     dice,
     flights,
     victimChoice,
+    moveFrom,
+    routeChoice,
+    clearRouteChoice: () => setRouteChoice(null),
     name,
     has,
     act,
@@ -278,8 +319,8 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     clearVictimChoice: () => setVictimChoice(null),
     showToast,
     dispose,
-    /** Finds the legal Discard/YearOfPlenty action matching a set. */
-    actSet(type: 'Discard' | 'PlayYearOfPlenty', set: ResourceSet) {
+    /** Finds the legal Discard/YearOfPlenty/ChooseGold action matching a set. */
+    actSet(type: 'Discard' | 'PlayYearOfPlenty' | 'ChooseGold', set: ResourceSet) {
       return act((a) => a.type === type && sameSet(a.value, set));
     },
   };

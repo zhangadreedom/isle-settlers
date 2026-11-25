@@ -103,6 +103,73 @@ export function YearOfPlentyModal(props: { game: Game; onClose: () => void }) {
   );
 }
 
+/** Seafaring: pick the resources a gold field produced. */
+export function GoldModal(props: { game: Game }) {
+  const g = props.game;
+  const owed = () => (g.me === null ? 0 : (g.view().pendingGold[g.me] ?? 0));
+  const want = () => Math.min(owed(), setTotal(g.view().bank));
+  const [pick, setPick] = createSignal<ResourceSet>(empty());
+  return (
+    <Modal title={`金矿：任选 ${want()} 张资源`}>
+      <p class="muted">你的村庄或城市挨着产出的金矿，可以从银行任选资源（银行不够时有多少拿多少）。</p>
+      <div class="pickers">
+        <For each={RESOURCES}>
+          {(_, i) => (
+            <Stepper
+              label={<ResIcon r={i()} size="md" />}
+              value={pick()[i()]}
+              max={Math.min(g.view().bank[i()], pick()[i()] + want() - setTotal(pick()))}
+              onChange={(v) => setPick(withCount(pick(), i(), v))}
+            />
+          )}
+        </For>
+      </div>
+      <footer>
+        <span class="muted">
+          已选 {setTotal(pick())} / {want()}
+        </span>
+        <button class="primary" disabled={setTotal(pick()) !== want()} onClick={() => g.actSet('ChooseGold', pick()) && setPick(empty())}>
+          拿取
+        </button>
+      </footer>
+    </Modal>
+  );
+}
+
+/** Seafaring: a coastal edge takes a road or a ship. */
+export function RouteChoiceModal(props: { game: Game }) {
+  const g = props.game;
+  return (
+    <Show when={g.routeChoice() !== null}>
+      <Modal title="修路还是造船？" onClose={g.clearRouteChoice}>
+        <p class="muted">这条边在海岸上：道路连向陆地，船可以继续驶向海上。</p>
+        <div class="choices row">
+          <button
+            class="choice"
+            onClick={() => {
+              const e = g.routeChoice();
+              g.clearRouteChoice();
+              g.act((a) => a.type === 'BuildRoad' && a.value === e);
+            }}
+          >
+            道路
+          </button>
+          <button
+            class="choice"
+            onClick={() => {
+              const e = g.routeChoice();
+              g.clearRouteChoice();
+              g.act((a) => a.type === 'BuildShip' && a.value === e);
+            }}
+          >
+            船
+          </button>
+        </div>
+      </Modal>
+    </Show>
+  );
+}
+
 export function MonopolyModal(props: { game: Game; onClose: () => void }) {
   const g = props.game;
   return (

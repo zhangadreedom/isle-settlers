@@ -1,11 +1,14 @@
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import { Verified } from './Account';
-import type { Game } from '../game/controller';
+import type { BuildMode, Game } from '../game/controller';
 import { EMBEDDED } from '../embed';
 import type { ReplayControls } from '../game/source';
 import { BOT_LEVEL_NAME, COSTS, DEV_CARDS, DEV_HELP, DEV_NAME, RESOURCES, RESOURCE_CSS, RESOURCE_SHORT } from '../game/text';
 import type { DevCard } from '../generated/proto';
 import { Die, ResIcon, SeatDot, SetView } from './bits';
+
+/** Islands in a bonus mask. */
+const islandCount = (mask: number) => [...mask.toString(2)].filter((b) => b === '1').length;
 
 export function PlayerList(props: { game: Game }) {
   const g = props.game;
@@ -64,15 +67,21 @@ export function PlayerList(props: { game: Game }) {
                 <span title="手牌">牌 {p.resourceCount}</span>
                 <span title="发展卡">卡 {p.devCardCount}</span>
                 <span title="已出骑士">骑 {p.playedDevCards[0]}</span>
-                <span title="最长连续道路">路 {p.longestRoad}</span>
+                <span title={g.seafaring ? '最长连续商路（道路和船）' : '最长连续道路'}>路 {p.longestRoad}</span>
+                <Show when={g.seafaring}>
+                  <span title={`海上的船（还能造 ${p.shipsLeft} 艘）`}>船 {15 - p.shipsLeft}</span>
+                </Show>
               </div>
-              <Show when={g.view().longestRoadOwner === p.seat || g.view().largestArmyOwner === p.seat}>
+              <Show when={g.view().longestRoadOwner === p.seat || g.view().largestArmyOwner === p.seat || islandCount(p.islands) > 0}>
                 <div class="badges">
                   <Show when={g.view().longestRoadOwner === p.seat}>
-                    <span class="badge">最长道路 +2</span>
+                    <span class="badge">{g.seafaring ? '最长商路' : '最长道路'} +2</span>
                   </Show>
                   <Show when={g.view().largestArmyOwner === p.seat}>
                     <span class="badge">最大骑士 +2</span>
+                  </Show>
+                  <Show when={islandCount(p.islands) > 0}>
+                    <span class="badge" title="首次在新岛屿建村庄的奖励">新岛 +{2 * islandCount(p.islands)}</span>
                   </Show>
                 </div>
               </Show>
@@ -169,6 +178,20 @@ export function GameLog(props: { game: Game; open: boolean; onToggle: () => void
   );
 }
 
+const MODE_PROMPT: Record<Exclude<BuildMode, null>, string> = {
+  road: '选择位置建造道路（再点一次按钮取消）',
+  settlement: '选择位置建造村庄（再点一次按钮取消）',
+  city: '选择位置建造城市（再点一次按钮取消）',
+  ship: '选择临海的边造船（再点一次按钮取消）',
+  move: '先点一艘可以移动的船，再点它要去的位置（再点一次按钮取消）',
+};
+
+function modePrompt(g: Game): string {
+  const m = g.mode();
+  if (m === 'move' && g.moveFrom() !== null) return '点这艘船要去的位置（再点一次按钮取消）';
+  return m ? MODE_PROMPT[m] : '';
+}
+
 /** What the human should do now. */
 function prompt(g: Game): string {
   const v = g.view();
@@ -180,7 +203,7 @@ function prompt(g: Game): string {
   if (v.phase.type === 'SpecialBuild') {
     const builder = v.phase.value.builder;
     if (builder === g.me) {
-      if (g.mode()) return `选择位置建造${g.mode() === 'road' ? '道路' : g.mode() === 'settlement' ? '村庄' : '城市'}（再点一次按钮取消）`;
+      if (g.mode()) return modePrompt(g);
       return '特殊建造：可以建造或买发展卡（不能交易），或者跳过';
     }
     return `${g.name(builder)} 特殊建造中…`;
@@ -191,14 +214,21 @@ function prompt(g: Game): string {
     case 'SetupSettlement':
       return myTurn ? `放置你的第 ${v.players[g.me].settlementsLeft === 5 ? 1 : 2} 个村庄（点击发光的交叉点）` : `${g.name(v.current)} 正在选择开局位置…`;
     case 'SetupRoad':
+      if (g.seafaring) return myTurn ? '放置一条与村庄相连的道路或船（临海的边可以造船）' : `${g.name(v.current)} 正在放置道路或船…`;
       return myTurn ? '放置一条与村庄相连的道路' : `${g.name(v.current)} 正在放置道路…`;
+    case 'Gold': {
+      const owed = v.pendingGold[g.me] ?? 0;
+      return owed > 0 ? `金矿产出：任选 ${owed} 张资源` : '等待其他玩家选择金矿资源…';
+    }
     case 'PreRoll':
       return myTurn ? '掷骰子（也可以先打一张发展卡）' : `${g.name(v.current)} 的回合`;
     case 'Discard':
       return v.pendingDiscard[g.me] > 0 ? `掷出 7：请弃掉 ${v.pendingDiscard[g.me]} 张牌` : '等待其他玩家弃牌…';
     case 'MoveRobber':
+      if (g.seafaring) return myTurn ? '移动强盗（点陆地）或海盗（点海面）' : `${g.name(v.current)} 正在移动强盗或海盗…`;
       return myTurn ? '把强盗移到另一个地块（点击发光的地块）' : `${g.name(v.current)} 正在移动强盗…`;
     case 'RoadBuilding':
+      if (g.seafaring) return myTurn ? `免费放置道路或船（还剩 ${v.phase.value.remaining}）` : `${g.name(v.current)} 正在修路造船…`;
       return myTurn ? `免费放置道路（还剩 ${v.phase.value.remaining} 条）` : `${g.name(v.current)} 正在修路…`;
     case 'Main':
       if (!myTurn) return `${g.name(v.current)} 的回合`;
@@ -207,7 +237,7 @@ function prompt(g: Game): string {
         if (responses.includes('Pending')) return '等待其他玩家回应你的交易…';
         return responses.includes('Accepted') ? '选择一位接受的玩家成交，或撤回报价' : '没有人接受，请撤回报价';
       }
-      if (g.mode()) return `选择位置建造${g.mode() === 'road' ? '道路' : g.mode() === 'settlement' ? '村庄' : '城市'}（再点一次按钮取消）`;
+      if (g.mode()) return modePrompt(g);
       return '交易、建造、打发展卡，或结束回合';
     case 'GameOver':
       return '游戏结束';
@@ -287,6 +317,23 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
                     </button>
                   )}
                 </For>
+                <Show when={g.seafaring}>
+                  <button class="build" classList={{ on: g.mode() === 'ship' }} disabled={!g.has('BuildShip')} onClick={() => g.setMode('ship')} title="船：沿海岸和海面延伸，登上新岛屿">
+                    船
+                    <SetView set={COSTS[4].cost} />
+                  </button>
+                  <Show when={isMain()}>
+                    <button
+                      class="build"
+                      classList={{ on: g.mode() === 'move' }}
+                      disabled={!g.has('MoveShip')}
+                      onClick={() => g.setMode('move')}
+                      title="每回合可以把一艘航线末端的船移到别处（本回合造的船除外）"
+                    >
+                      移船
+                    </button>
+                  </Show>
+                </Show>
                 <button class="build" disabled={!g.has('BuyDevCard')} onClick={() => g.act((a) => a.type === 'BuyDevCard')}>
                   发展卡
                   <SetView set={COSTS[3].cost} />

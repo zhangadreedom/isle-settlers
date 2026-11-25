@@ -142,6 +142,11 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                   </div>
                 </Show>
                 <span class="muted small">{room().ranked ? '至少两名登录玩家时计入排位分' : '不计排位分'}</span>
+                <Show when={room().scenario === 'Archipelago'}>
+                  <span class="mode-tag sea" title="造船出海，登上新岛屿得奖励分，先到 12 分">
+                    航海 · 群岛
+                  </span>
+                </Show>
               </div>
 
               <ol class="seats">

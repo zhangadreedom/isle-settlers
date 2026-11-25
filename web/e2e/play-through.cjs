@@ -22,7 +22,10 @@ const EMBED = process.env.E2E_EMBED === '1';
 const URL = (process.env.E2E_URL || 'http://localhost:4173/') + (EMBED ? '?debug' : '?debug&renderer=webgl');
 const BUILD_ONLY = !!process.env.BUILD_ONLY;
 const PLAYERS = Number(process.env.E2E_PLAYERS || 4);
-const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
+// E2E_SCENARIO=archipelago plays the seafaring map: ships (built, moved,
+// chosen over roads on coasts), gold picks and the pirate.
+const SEA = process.env.E2E_SCENARIO === 'archipelago';
+const P = (BUILD_ONLY ? 'b-' : '') + (SEA ? 'sea-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
 
 (async () => {
   const browser = await chromium.launch();
@@ -40,6 +43,7 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
     throw new Error('embedded lobby exposes online play');
   }
   await page.waitForFunction(() => !document.querySelector('.lobby button.primary')?.disabled);
+  if (SEA) await page.click('.seg >> text=航海 · 群岛');
   await page.click(`.seg >> text=${PLAYERS} 人`);
   await page.waitForTimeout(300);
   await page.screenshot({ path: `${OUT}/p1-${P}lobby.png` });
@@ -76,7 +80,8 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
     throw new Error(`no visible ${kind} among ${ids.length}`);
   }
 
-  const stats = { settlements: 0, roads: 0, cities: 0, bankTrades: 0, offers: 0, deals: 0, discards: 0, robbers: 0, dev: 0, turns: 0, specialBuilds: 0, specialPasses: 0 };
+  const stats = { settlements: 0, roads: 0, cities: 0, bankTrades: 0, offers: 0, deals: 0, discards: 0, robbers: 0, dev: 0, turns: 0, specialBuilds: 0, specialPasses: 0, ships: 0, moves: 0, gold: 0, pirates: 0, routeChoices: 0 };
+  let movedTurn = -1;
   const shots = { setup: false, offer: false, robber: false, mid: false, special: false };
   let triedOfferTurn = -1;
   // Actions are confirmed asynchronously (the match runs in a worker): after
@@ -123,22 +128,51 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
         shots.setup = true;
       }
       // Prefer high-production spots (sum of pips of adjacent tiles).
-      const ranked = await page.evaluate((ids) => {
+      const ranked = await page.evaluate(([ids, sea]) => {
         const { game } = window.__isle;
         const topology = game().topology;
         const nums = game().board.numbers;
+        const terrain = game().board.terrain;
         const pips = (n) => (n === 0 ? 0 : 6 - Math.abs(7 - n));
         const score = (vtx) => {
           let s = 0;
-          for (let t = 0; t < nums.length; t++) for (let k = 0; k < 6; k++) if (topology.tileVertices[t * 6 + k] === vtx) s += pips(nums[t]);
+          let around = 0;
+          let water = false;
+          for (let t = 0; t < nums.length; t++)
+            for (let k = 0; k < 6; k++)
+              if (topology.tileVertices[t * 6 + k] === vtx) {
+                s += pips(nums[t]);
+                around++;
+                if (terrain[t] === 6) water = true;
+              }
+          // Seafaring: a coastal start can launch ships.
+          if (sea && (water || around < 3)) s += 4;
           return s;
         };
         return ids.sort((a, b) => score(b) - score(a));
-      }, acts.filter((a) => a.type === 'BuildSettlement').map((a) => a.value));
+      }, [acts.filter((a) => a.type === 'BuildSettlement').map((a) => a.value), SEA]);
       await clickSpot('vertex', ranked);
     } else if (v.phase.type === 'SetupRoad' || v.phase.type === 'RoadBuilding') {
-      await clickSpot('edge', acts.filter((a) => a.type === 'BuildRoad').map((a) => a.value));
-      stats.roads++;
+      const edges = acts.filter((a) => a.type === 'BuildRoad' || a.type === 'BuildShip').map((a) => a.value);
+      await clickSpot('edge', [...new Set(edges)]);
+      // A coastal edge asks which piece; take the ship half the time.
+      await page.waitForTimeout(120);
+      if (await page.$('.modal h2:has-text("修路还是造船")')) {
+        const ship = Math.random() < 0.5;
+        await page.click(`.modal .choice >> text=${ship ? '船' : '道路'}`);
+        stats.routeChoices++;
+        stats[ship ? 'ships' : 'roads']++;
+      } else stats.roads++;
+    } else if (types.has('ChooseGold')) {
+      // Gold field: pick what the dialog asks for, from the first piles.
+      await page.waitForSelector('.modal h2:has-text("金矿")');
+      for (let guard = 0; guard < 12; guard++) {
+        const plus = await page.$('.modal .stepper button[aria-label="增加"]:not([disabled])');
+        if (!plus) break;
+        await plus.click();
+      }
+      await page.click('.modal >> text=拿取');
+      stats.gold++;
     } else if (types.has('Discard')) {
       const need = v.pendingDiscard[v.me.seat];
       const hand = [...v.me.hand];
@@ -153,7 +187,15 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
       await page.click('text=确认弃牌');
       stats.discards++;
     } else if (v.phase.type === 'MoveRobber') {
-      const tiles = [...new Set(acts.map((a) => a.value.tile))];
+      let tiles = [...new Set(acts.map((a) => a.value.tile))];
+      // On the archipelago, send the pirate out now and then.
+      if (SEA && Math.random() < 0.4) {
+        const sea = await page.evaluate((ts) => ts.filter((t) => window.__isle.game().board.terrain[t] === 6), tiles);
+        if (sea.length) {
+          tiles = sea;
+          stats.pirates++;
+        }
+      }
       await clickSpot('tile', tiles);
       if (!shots.robber) {
         await page.waitForTimeout(200);
@@ -222,6 +264,20 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
         await page.click('.build >> text=村庄');
         await clickSpot('vertex', acts.filter((a) => a.type === 'BuildSettlement').map((a) => a.value));
         stats.settlements++;
+      } else if (SEA && types.has('MoveShip') && movedTurn !== v.turn && Math.random() < 0.5) {
+        // Move a ship: pick it, then where it goes.
+        movedTurn = v.turn;
+        const moves = acts.filter((a) => a.type === 'MoveShip');
+        await page.click('.build:has-text("移船")');
+        await clickSpot('edge', [...new Set(moves.map((m) => m.value.from))]);
+        await page.waitForTimeout(150);
+        const from = await page.evaluate(() => window.__isle.game().moveFrom());
+        await clickSpot('edge', moves.filter((m) => m.value.from === from).map((m) => m.value.to));
+        stats.moves++;
+      } else if (SEA && types.has('BuildShip') && v.players[v.me.seat].shipsLeft > 6) {
+        await page.click('.build:has-text("船") >> nth=0');
+        await clickSpot('edge', acts.filter((a) => a.type === 'BuildShip').map((a) => a.value));
+        stats.ships++;
       } else if (types.has('BuildRoad') && (BUILD_ONLY ? !acts.some((a) => a.type === 'BuildSettlement') : v.players[v.me.seat].roadsLeft > 7)) {
         await page.click('.build >> text=道路');
         await clickSpot('edge', acts.filter((a) => a.type === 'BuildRoad').map((a) => a.value));
@@ -294,6 +350,14 @@ const P = (BUILD_ONLY ? 'b-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
   console.log('stats:', JSON.stringify(stats));
   console.log('log tail:', (await page.$$eval('.log li', (els) => els.slice(-4).map((e) => e.textContent))).join(' | '));
   if (PLAYERS > 4 && stats.specialPasses + stats.specialBuilds === 0) errors.push('never saw a special building phase');
+  if (SEA && stats.ships === 0) errors.push('never built a ship');
+  if (SEA) {
+    const sea = await page.evaluate(() => {
+      const v = window.__isle.game().view();
+      return { ships: v.ships.filter((s) => s !== 255).length, islands: v.players.map((p) => p.islands), pirate: v.pirate };
+    });
+    console.log('sea:', JSON.stringify(sea));
+  }
 
   // ---- replay ----
   const file = path.join(OUT, `replay-${P}game.json`);

@@ -2,7 +2,17 @@ import { batch, createEffect, createSignal, onCleanup, onMount, Show } from 'sol
 import type { BoardRenderer, Insets, PickKind } from './board/BoardRenderer';
 import { DiceView, Flights, GameLog, HandBar, PlayerList } from './components/Hud';
 import { Lobby, randomSeed, type CreateRoom } from './components/Lobby';
-import { DiscardModal, GameOverModal, IncomingTrade, MonopolyModal, TradeModal, VictimModal, YearOfPlentyModal } from './components/Modals';
+import {
+  DiscardModal,
+  GameOverModal,
+  GoldModal,
+  IncomingTrade,
+  MonopolyModal,
+  RouteChoiceModal,
+  TradeModal,
+  VictimModal,
+  YearOfPlentyModal,
+} from './components/Modals';
 import { JoinPrompt, RoomLobby } from './components/Room';
 import { EngineError, loadEngine, Match, Replay, topology } from './engine';
 import { boardData, createGame, type Game } from './game/controller';
@@ -356,6 +366,10 @@ export default function App() {
             <Show when={!g().replay && g().me !== null && g().view().phase.type === 'Discard' && g().view().pendingDiscard[g().me!] > 0}>
               <DiscardModal game={g()} />
             </Show>
+            <Show when={!g().replay && g().me !== null && g().view().phase.type === 'Gold' && (g().view().pendingGold[g().me!] ?? 0) > 0}>
+              <GoldModal game={g()} />
+            </Show>
+            <RouteChoiceModal game={g()} />
             <VictimModal game={g()} />
             <Show when={!g().replay}>
               <IncomingTrade game={g()} />

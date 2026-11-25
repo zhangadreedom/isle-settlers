@@ -8,6 +8,8 @@ export const TERRAIN_COLORS = [
   0xe2b74a, // fields (grain)
   0x8a8f99, // mountains (ore)
   0xe5d3a1, // desert
+  0x2a8199, // sea (seafaring maps: shallow water rings)
+  0x7d5f36, // gold field (dark river valley; nuggets carry the gold)
 ] as const;
 
 export const RESOURCE_COLORS = [0xc0623a, 0x2f7d4a, 0xb9e08f, 0xe2b74a, 0x8a8f99] as const;

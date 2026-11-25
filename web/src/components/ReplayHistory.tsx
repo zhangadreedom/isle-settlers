@@ -6,7 +6,8 @@ export function ReplayHistory(props: { ready: boolean; onOpen: (json: string) =>
   const entries = localReplayHistory();
   const rows = entries.map(({ savedAt, record }) => {
     const winner = record.players[record.winner!];
-    const description = `${record.players.length} 人 · ${winner.name || `AI ${record.winner! + 1}`}获胜 · #${record.seed}`;
+    const sea = record.config.scenario === 'Archipelago' ? '航海 · ' : '';
+    const description = `${sea}${record.players.length} 人 · ${winner.name || `AI ${record.winner! + 1}`}获胜 · #${record.seed}`;
     const date = new Date(savedAt).toLocaleString();
     return { record, description, date };
   });
