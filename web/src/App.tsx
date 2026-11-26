@@ -413,7 +413,7 @@ export default function App() {
           连接中断，正在重连…
         </div>
       </Show>
-      <footer class="renderer-info muted">{backend() ? `${backend()} · 按需渲染` : ''}</footer>
+      <footer class="renderer-info muted">{backend() ? `v${__APP_VERSION__} · ${backend()} · 按需渲染` : `v${__APP_VERSION__}`}</footer>
       <Show when={status()}>
         <div class="loading">{status()}</div>
       </Show>

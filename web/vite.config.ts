@@ -1,8 +1,10 @@
 import { defineConfig } from 'vite';
 import solid from 'vite-plugin-solid';
+import pkg from './package.json';
 
 export default defineConfig({
   plugins: [solid()],
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   resolve: {
     // Three.js addons import 'three'; point them at the WebGPU build so a
     // single copy of the library ships.
