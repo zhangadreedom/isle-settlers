@@ -88,6 +88,16 @@ pub struct PrivateInfo {
     pub trade_ratios: [u8; 5],
 }
 
+/// Revealed board state on fog maps, updated as unexplored tiles flip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct FogBoard {
+    pub terrain: Vec<Terrain>,
+    pub numbers: Vec<u8>,
+    pub islands: Vec<u8>,
+}
+
 /// Everything one seat may know about the game right now.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -128,6 +138,9 @@ pub struct PlayerView {
     pub winner: Option<u8>,
     /// Total points per seat, revealed once the game is over.
     pub final_points: Option<Vec<u8>>,
+    /// Fog maps: current board tiles as revealed so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fog: Option<FogBoard>,
 }
 
 pub fn board_info(state: &GameState) -> BoardInfo {
@@ -219,6 +232,11 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
         final_points: state
             .winner
             .map(|_| (0..n as u8).map(|p| state.victory_points(p)).collect()),
+        fog: state.board.layout.has_fog().then(|| FogBoard {
+            terrain: state.board.tiles().to_vec(),
+            numbers: state.board.numbers[..topo.num_tiles].to_vec(),
+            islands: state.board.tile_island[..topo.num_tiles].to_vec(),
+        }),
     }
 }
 
@@ -228,22 +246,27 @@ mod tests {
     use isle_ai::{Bot, WeightedRandomBot};
     use isle_core::{GameConfig, Rng};
 
-    /// Mid-game states from bot play.
+    /// Mid-game states from bot play (classic and fog islands).
     fn sample_states() -> Vec<GameState> {
         let mut out = Vec::new();
-        for seed in 0..30u64 {
-            let mut g = GameState::new(GameConfig::default(), seed).unwrap();
-            let mut bots: Vec<WeightedRandomBot> = (0..4)
-                .map(|k| WeightedRandomBot::new(seed * 7 + k))
-                .collect();
-            let mut legal = Vec::new();
-            for step in 0..400 {
-                let Some(p) = g.to_move() else { break };
-                g.legal_actions(p, &mut legal);
-                let a = bots[p as usize].choose(&g, p, &legal);
-                g.apply(p, a).unwrap();
-                if step % 50 == 49 {
-                    out.push(g);
+        for (scenario, seeds) in [
+            (isle_core::Scenario::Classic, 0..20u64),
+            (isle_core::Scenario::FogIslands, 20..35u64),
+        ] {
+            for seed in seeds {
+                let mut g = GameState::new(GameConfig::scenario(scenario, 4), seed).unwrap();
+                let mut bots: Vec<WeightedRandomBot> = (0..4)
+                    .map(|k| WeightedRandomBot::new(seed * 7 + k))
+                    .collect();
+                let mut legal = Vec::new();
+                for step in 0..400 {
+                    let Some(p) = g.to_move() else { break };
+                    g.legal_actions(p, &mut legal);
+                    let a = bots[p as usize].choose(&g, p, &legal);
+                    g.apply(p, a).unwrap();
+                    if step % 50 == 49 {
+                        out.push(g);
+                    }
                 }
             }
         }
@@ -252,7 +275,7 @@ mod tests {
 
     /// Changes everything a viewer must not be able to observe: other seats'
     /// hand composition and development cards (keeping counts), the deck
-    /// order and the RNG. Conservation is not preserved; only the view matters.
+    /// order, hidden fog stacks and the RNG.
     fn scramble_hidden(g: &GameState, viewer: u8, seed: u64) -> GameState {
         let mut h = *g;
         for q in 0..h.num_players() {
@@ -270,6 +293,10 @@ mod tests {
         let mut rng = Rng::new(seed);
         let len = h.dev_deck_len as usize;
         rng.shuffle(&mut h.dev_deck[..len]);
+        let ft = h.fog_terrain_len as usize;
+        rng.shuffle(&mut h.fog_terrain[..ft]);
+        let fn_len = h.fog_numbers_len as usize;
+        rng.shuffle(&mut h.fog_numbers[..fn_len]);
         h.rng = Rng::new(seed ^ 0xABCD);
         h
     }

@@ -80,6 +80,29 @@ pub const ARCHIPELAGO_NUMBER_POOL: [u8; 20] = [
     2, 3, 3, 4, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 10, 11, 11, 12,
 ];
 
+/// Fog islands: known land of the crescent home island (`M`).
+pub const FOG_HOME_POOL: [Terrain; 14] = {
+    use Terrain::*;
+    [
+        Forest, Forest, Forest, Pasture, Pasture, Pasture, Fields, Fields, Fields, Hills, Hills,
+        Mountains, Mountains, Desert,
+    ]
+};
+
+/// Fog islands: hidden stack of thirteen unexplored tiles (`?`).
+pub const FOG_TERRAIN_POOL: [Terrain; 13] = {
+    use Terrain::*;
+    [
+        Sea, Sea, Sea, Sea, Gold, Gold, Hills, Hills, Mountains, Mountains, Forest, Pasture, Fields,
+    ]
+};
+
+/// Fog islands: number tokens placed on the home island's thirteen producing tiles.
+pub const FOG_HOME_NUMBER_POOL: [u8; 13] = [2, 3, 4, 4, 5, 5, 6, 8, 9, 9, 10, 10, 11];
+
+/// Fog islands: hidden stack of number tokens drawn when land is discovered.
+pub const FOG_NUMBER_POOL: [u8; 9] = [3, 4, 5, 6, 8, 9, 10, 11, 12];
+
 /// Number tokens a gold field may carry: neither the likeliest (6, 8) nor
 /// the rarest (2, 12).
 pub const GOLD_NUMBERS: [u8; 6] = [3, 4, 5, 9, 10, 11];
@@ -97,11 +120,11 @@ impl BoardLayout {
         match self {
             BoardLayout::Base => &TERRAIN_POOL,
             BoardLayout::Extended => &EXTENDED_TERRAIN_POOL,
-            BoardLayout::Archipelago => &[],
+            BoardLayout::Archipelago | BoardLayout::FogIslands => &[],
         }
     }
 
-    /// Terrain counts of a board of this layout, indexed by `Terrain`.
+    /// Initial terrain counts of a board of this layout, indexed by `Terrain`.
     pub fn terrain_counts(self) -> [u8; Terrain::COUNT] {
         let mut n = [0u8; Terrain::COUNT];
         let mut add = |tiles: &[Terrain]| tiles.iter().for_each(|&t| n[t as usize] += 1);
@@ -122,16 +145,35 @@ impl BoardLayout {
                 n[Terrain::Gold as usize] += islands.len() as u8;
                 n[Terrain::Sea as usize] += map.iter().filter(|&&c| is_sea_char(c)).count() as u8;
             }
+            BoardLayout::FogIslands => {
+                add(&FOG_HOME_POOL);
+                let map = self.map().unwrap_or(&[]);
+                n[Terrain::Sea as usize] += map.iter().filter(|&&c| is_sea_char(c)).count() as u8;
+                n[Terrain::Fog as usize] += map.iter().filter(|&&c| c == b'?').count() as u8;
+            }
         }
         n
     }
 
-    /// Number tokens, one per producing tile.
+    /// Total terrain counts once every fog tile is accounted for.
+    pub fn full_terrain_counts(self) -> [u8; Terrain::COUNT] {
+        let mut n = self.terrain_counts();
+        if self == BoardLayout::FogIslands {
+            n[Terrain::Fog as usize] = 0;
+            for t in FOG_TERRAIN_POOL {
+                n[t as usize] += 1;
+            }
+        }
+        n
+    }
+
+    /// Number tokens placed on the initial board, one per producing tile.
     pub fn number_pool(self) -> &'static [u8] {
         match self {
             BoardLayout::Base => &NUMBER_POOL,
             BoardLayout::Extended => &EXTENDED_NUMBER_POOL,
             BoardLayout::Archipelago => &ARCHIPELAGO_NUMBER_POOL,
+            BoardLayout::FogIslands => &FOG_HOME_NUMBER_POOL,
         }
     }
 
@@ -234,9 +276,12 @@ impl Board {
     }
 
     /// A seafaring board: sea where the map has it, the home island's
-    /// terrain shuffled, one gold field on each small island and the rest of
-    /// their terrain shuffled; gold fields carry mid numbers only.
+    /// terrain shuffled, and on the archipelago one gold field per small
+    /// island (or on fog maps, `Terrain::Fog` over `?` tiles).
     fn generate_map(rng: &mut Rng, layout: BoardLayout, balanced: bool) -> Board {
+        if layout == BoardLayout::FogIslands {
+            return Self::generate_fog(rng, balanced);
+        }
         let topo = layout.topology();
         let map = layout.map().expect("seafaring layout");
         let nt = topo.num_tiles;
@@ -296,6 +341,51 @@ impl Board {
             .expect("generated board is valid")
     }
 
+    fn generate_fog(rng: &mut Rng, balanced: bool) -> Board {
+        let layout = BoardLayout::FogIslands;
+        let topo = layout.topology();
+        let map = layout.map().expect("fog map");
+        let nt = topo.num_tiles;
+        let mut home = FOG_HOME_POOL;
+        rng.shuffle(&mut home);
+        let mut home = home.into_iter();
+        let mut terrain = [Terrain::Desert; MAX_TILES];
+        for t in 0..nt {
+            terrain[t] = match map[t] {
+                c if is_sea_char(c) => Terrain::Sea,
+                b'?' => Terrain::Fog,
+                b'M' => home.next().expect("home pool fits the map"),
+                _ => unreachable!("unexpected fog map character"),
+            };
+        }
+        let nh = topo.harbor_edges.len();
+        let mut harbors = [HarborKind::Generic; MAX_HARBORS];
+        harbors[..nh].copy_from_slice(layout.harbor_pool());
+        rng.shuffle(&mut harbors[..nh]);
+
+        let tokens = layout.number_pool();
+        let mut numbers = [0u8; MAX_TILES];
+        for _attempt in 0..10_000 {
+            let mut pool = [0u8; MAX_TILES];
+            let pool = &mut pool[..tokens.len()];
+            pool.copy_from_slice(tokens);
+            rng.shuffle(pool);
+            let mut it = pool.iter();
+            for t in 0..nt {
+                numbers[t] = if terrain[t].produces() {
+                    *it.next().unwrap()
+                } else {
+                    0
+                };
+            }
+            if !balanced || !has_adjacent_red_numbers(topo, &numbers) {
+                break;
+            }
+        }
+        Board::from_layout(layout, &terrain[..nt], &numbers[..nt], &harbors[..nh])
+            .expect("generated fog board is valid")
+    }
+
     /// Builds a board from an explicit layout (custom maps, tests). Slices
     /// hold one entry per tile and per harbor slot of `layout`.
     pub fn from_layout(
@@ -321,7 +411,11 @@ impl Board {
         }
         let map = layout.map();
         if let Some(map) = map
-            && (0..nt).any(|t| is_sea_char(map[t]) != (terrain[t] == Terrain::Sea))
+            && (0..nt).any(|t| match map[t] {
+                c if is_sea_char(c) => terrain[t] != Terrain::Sea,
+                b'?' => terrain[t] != Terrain::Fog,
+                _ => !terrain[t].is_land(),
+            })
         {
             return Err(BoardError::WrongShape);
         }
@@ -362,7 +456,7 @@ impl Board {
         let mut tile_island = [0u8; MAX_TILES];
         let mut letters: Vec<u8> = vec![b'M'];
         for t in 0..nt {
-            if terrain[t] == Terrain::Sea {
+            if !terrain[t].is_land() {
                 continue;
             }
             let letter = map.map_or(b'M', |m| m[t]);
@@ -393,13 +487,16 @@ impl Board {
         let mut edge_land = [false; MAX_EDGES];
         let mut edge_tiles = [0u8; MAX_EDGES];
         let mut edge_sea = [false; MAX_EDGES];
+        let mut edge_fog = [false; MAX_EDGES];
         for t in 0..nt {
             for &e in &topo.tile_edges[t] {
                 edge_tiles[e as usize] += 1;
                 if terrain[t] == Terrain::Sea {
                     edge_sea[e as usize] = true;
-                } else {
+                } else if terrain[t].is_land() {
                     edge_land[e as usize] = true;
+                } else {
+                    edge_fog[e as usize] = true;
                 }
             }
         }
@@ -408,8 +505,8 @@ impl Board {
             if edge_land[e] {
                 land_edges |= 1u128 << e;
             }
-            // The map's border is open sea.
-            if edge_sea[e] || edge_tiles[e] == 1 {
+            // The map's border is open sea once the tile inside is known.
+            if edge_sea[e] || (edge_tiles[e] == 1 && !edge_fog[e]) {
                 sea_edges |= 1u128 << e;
             }
         }
@@ -473,6 +570,42 @@ impl Board {
             .filter(|&&t| t != NONE)
             .map(|&t| PIPS[self.numbers[t as usize] as usize])
             .sum()
+    }
+
+    /// Turns an unexplored [`Terrain::Fog`] tile face up, updating the
+    /// number lookup, island ids and buildable masks in place.
+    pub fn reveal_tile(&mut self, tile: u8, terrain: Terrain, number: u8) {
+        let t = tile as usize;
+        let topo = self.topo();
+        debug_assert_eq!(self.terrain[t], Terrain::Fog);
+        debug_assert_ne!(terrain, Terrain::Fog);
+        debug_assert_eq!(terrain.produces(), number != 0);
+        self.terrain[t] = terrain;
+        self.numbers[t] = number;
+        if number != 0 {
+            let slot = self.tiles_by_number[number as usize]
+                .iter_mut()
+                .find(|s| **s == NONE)
+                .expect("number pool fits MAX_TILES_PER_NUMBER");
+            *slot = tile;
+        }
+        if terrain == Terrain::Sea {
+            self.sea_edges |= topo.tile_edge_mask(tile);
+        } else if terrain.is_land() {
+            // Discovered land belongs to island 2 (distinct from home island 1).
+            self.tile_island[t] = 2;
+            for &v in &topo.tile_vertices[t] {
+                self.vertex_island[v as usize] = 2;
+                self.land_vertices |= 1u128 << v;
+            }
+            for &e in &topo.tile_edges[t] {
+                self.land_edges |= 1u128 << e;
+                // Outer border edges of newly revealed land face the open sea.
+                if topo.coast_edges.contains(&e) {
+                    self.sea_edges |= 1u128 << e;
+                }
+            }
+        }
     }
 }
 

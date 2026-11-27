@@ -27,8 +27,8 @@ export interface Flight {
   resource: number;
 }
 
-const TERRAINS = ['Hills', 'Forest', 'Pasture', 'Fields', 'Mountains', 'Desert', 'Sea', 'Gold'];
-const PRODUCES = [0, 1, 2, 3, 4, -1, -1, -1]; // terrain code -> resource index
+const TERRAINS = ['Hills', 'Forest', 'Pasture', 'Fields', 'Mountains', 'Desert', 'Sea', 'Gold', 'Fog'];
+const PRODUCES = [0, 1, 2, 3, 4, -1, -1, -1, -1]; // terrain code -> resource index
 
 export function boardData(info: BoardInfo): BoardData {
   return {
@@ -59,7 +59,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
   const [moveFrom, setMoveFrom] = createSignal<number | null>(null);
   /** Seafaring: a coastal edge that could take a road or a ship. */
   const [routeChoice, setRouteChoice] = createSignal<number | null>(null);
-  const seafaring = source.board.layout === 'Archipelago';
+  const seafaring = source.board.layout === 'Archipelago' || source.board.layout === 'FogIslands';
 
   let logId = 0;
   let flightId = 0;
@@ -75,8 +75,24 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
 
   // ---- state sync ----
 
+  function syncFog(v: PlayerView) {
+    const f = v.fog;
+    if (!f) return;
+    const nextTerrain = f.terrain.map((t) => TERRAINS.indexOf(t));
+    const changed =
+      nextTerrain.some((t, i) => t !== board.terrain[i]) ||
+      f.numbers.some((n, i) => n !== board.numbers[i]) ||
+      f.islands.some((id, i) => id !== board.islands[i]);
+    if (!changed) return;
+    board.terrain = nextTerrain;
+    board.numbers = [...f.numbers];
+    board.islands = [...f.islands];
+    renderer.updateBoard(board);
+  }
+
   function onState(s: SourceState) {
     if (disposed) return;
+    syncFog(s.view);
     if (s.resync) {
       setLog([]);
       if (s.log?.length) handleEvents(s.log, s.view, false);
@@ -216,6 +232,12 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
           break;
         case 'StartingResources':
           if (animate && lastSettlement >= 0) launchFrom(e.value.player, e.value.resources, tilesAround(lastSettlement));
+          break;
+        case 'TileRevealed':
+          if (animate && e.value.reward !== null) {
+            const r = RESOURCES.indexOf(e.value.reward);
+            if (r >= 0) launchFrom(e.value.player, ([0, 0, 0, 0, 0].map((_, i) => (i === r ? 1 : 0)) as ResourceSet), [e.value.tile]);
+          }
           break;
       }
     }

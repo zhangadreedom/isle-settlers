@@ -290,23 +290,25 @@ struct TopologyInfo {
     harbor_edges: Vec<u8>,
 }
 
-/// `Classic` or `Archipelago` (the serialized `Scenario`).
+/// `Classic`, `Archipelago` or `FogIslands` (the serialized `Scenario`).
 fn parse_scenario(name: &str) -> Result<Scenario, JsError> {
     match name {
         "Classic" | "" => Ok(Scenario::Classic),
         "Archipelago" => Ok(Scenario::Archipelago),
+        "FogIslands" => Ok(Scenario::FogIslands),
         _ => Err(JsError::new("UnknownScenario")),
     }
 }
 
-/// Topology tables of `layout` (`"Base"`, `"Extended"` or `"Archipelago"`)
-/// as JSON.
+/// Topology tables of `layout` (`"Base"`, `"Extended"`, `"Archipelago"` or
+/// `"FogIslands"`) as JSON.
 #[wasm_bindgen]
 pub fn topology(layout: &str) -> Result<String, JsError> {
     let layout = match layout {
         "Base" => BoardLayout::Base,
         "Extended" => BoardLayout::Extended,
         "Archipelago" => BoardLayout::Archipelago,
+        "FogIslands" => BoardLayout::FogIslands,
         _ => return Err(JsError::new("UnknownLayout")),
     };
     let t = layout.topology();
@@ -325,7 +327,11 @@ mod tests {
 
     #[test]
     fn replay_seeking_matches_stepping() {
-        for (players, scenario) in [(5, Scenario::Classic), (4, Scenario::Archipelago)] {
+        for (players, scenario) in [
+            (5, Scenario::Classic),
+            (4, Scenario::Archipelago),
+            (4, Scenario::FogIslands),
+        ] {
             let mut host = MatchHost::new(players, 21, None, "greedy", scenario).unwrap();
             while host.step_bot().is_some() {}
             assert!(host.state.winner.is_some());
@@ -360,7 +366,7 @@ mod tests {
 
     #[test]
     fn topology_tables_cover_every_layout() {
-        for layout in ["Base", "Extended", "Archipelago"] {
+        for layout in ["Base", "Extended", "Archipelago", "FogIslands"] {
             assert!(topology(layout).is_ok(), "{layout}");
         }
     }

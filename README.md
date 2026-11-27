@@ -78,10 +78,11 @@ cargo run --release -p isle-sim -- --games 5000 --check
 cargo run --release -p isle-sim -- --games 3000 --players 6 --check
 ```
 
-航海扩展（群岛地图，2–4 人）加 `--scenario archipelago`，结果里会多出人均登岛奖励和终局船数：
+航海扩展（群岛或迷雾地图，2–4 人）加 `--scenario archipelago` 或 `--scenario fog`，结果里会多出人均登岛奖励、终局船数与翻开的迷雾格数：
 
 ```bash
 cargo run --release -p isle-sim -- --games 1000 --scenario archipelago --players 4 --bot greedy --check
+cargo run --release -p isle-sim -- --games 1000 --scenario fog --players 4 --bot greedy --check
 ```
 
 确定性指纹：对一批固定种子的对局取哈希，应输出 `b862d3b3842bae2d`。修改引擎时用它确认基础局的行为没有变（已存档的房间和回放依赖这一点）：
@@ -211,4 +212,4 @@ node web/e2e/online.cjs
 - [x] P1：浏览器内人机对局（大厅、点击建造、交易、发展卡、弃牌与强盗、动画、观战模式、嵌入单人版 `build:embed`）
 - [x] P2：联机对战（WebSocket 服务器、房间与邀请链接、断线重连、掉线托管、聊天、持久化、Docker）
 - [x] P3：困难 AI（确定化 + ISMCTS + 评估函数，锦标赛调参；浏览器端跑在 Web Worker 里）
-- [ ] P4：5–6 人扩展 ✅、回放与本机回放列表 ✅、账号（注册登录接口、前端登录、座位绑定账号、登录限流）✅、排位（评分、段位、排行榜、玩家主页）✅、航海扩展（群岛地图、船与移船、海盗、金矿、登岛奖励，AI 会出海）✅、其他扩展包
+- [ ] P4：5–6 人扩展 ✅、回放与本机回放列表 ✅、账号（注册登录接口、前端登录、座位绑定账号、登录限流）✅、排位（评分、段位、排行榜、玩家主页）✅、航海扩展（群岛与迷雾双剧本、船与移船、海盗、金矿、迷雾翻牌奖励、登岛奖励，AI 会出海探索）✅、其他扩展包

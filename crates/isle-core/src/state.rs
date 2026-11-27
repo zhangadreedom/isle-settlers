@@ -1,7 +1,7 @@
 //! Game state and read-only queries.
 
-use crate::board::Board;
-use crate::resources::ResourceSet;
+use crate::board::{Board, FOG_HOME_NUMBER_POOL, FOG_NUMBER_POOL, FOG_TERRAIN_POOL};
+use crate::resources::{ResourceSet, Terrain};
 use crate::rng::Rng;
 use crate::topology::*;
 
@@ -9,6 +9,10 @@ use crate::topology::*;
 pub const MAX_PLAYERS: usize = 6;
 /// Size of the largest development deck.
 pub const MAX_DEV_DECK: usize = 34;
+/// Unexplored tiles on a fog map.
+pub const MAX_FOG_TILES: usize = 13;
+/// Number tokens in the hidden fog stack.
+pub const MAX_FOG_NUMBERS: usize = 9;
 pub const MAX_ROADS: u8 = 15;
 /// Ships per player on seafaring maps.
 pub const MAX_SHIPS: u8 = 15;
@@ -96,7 +100,7 @@ impl BoardLayout {
     /// the ones they started on.
     pub const fn island_bonus(self) -> u8 {
         match self {
-            BoardLayout::Archipelago => 2,
+            BoardLayout::Archipelago | BoardLayout::FogIslands => 2,
             _ => 0,
         }
     }
@@ -112,13 +116,15 @@ pub enum Scenario {
     Classic,
     /// Seafaring: the archipelago, 2–4 players.
     Archipelago,
+    /// Seafaring: unexplored fog tiles revealed by ships, 2–4 players.
+    FogIslands,
 }
 
 impl Scenario {
     pub const fn victory_points(self) -> u8 {
         match self {
             Scenario::Classic => 10,
-            Scenario::Archipelago => 12,
+            Scenario::Archipelago | Scenario::FogIslands => 12,
         }
     }
 
@@ -126,7 +132,7 @@ impl Scenario {
     pub const fn max_players(self) -> u8 {
         match self {
             Scenario::Classic => MAX_PLAYERS as u8,
-            Scenario::Archipelago => 4,
+            Scenario::Archipelago | Scenario::FogIslands => 4,
         }
     }
 }
@@ -171,6 +177,7 @@ impl GameConfig {
         match self.scenario {
             Scenario::Classic => BoardLayout::for_players(self.num_players),
             Scenario::Archipelago => BoardLayout::Archipelago,
+            Scenario::FogIslands => BoardLayout::FogIslands,
         }
     }
 }
@@ -330,10 +337,18 @@ pub struct GameState {
     /// Shuffled deck; cards are drawn from the end of `dev_deck[..dev_deck_len]`.
     pub dev_deck: [DevCard; MAX_DEV_DECK],
     pub dev_deck_len: u8,
+    /// Fog maps: shuffled hidden terrain stack (`fog_terrain[..fog_terrain_len]`).
+    pub fog_terrain: [Terrain; MAX_FOG_TILES],
+    pub fog_terrain_len: u8,
+    /// Fog maps: shuffled hidden number stack (`fog_numbers[..fog_numbers_len]`).
+    pub fog_numbers: [u8; MAX_FOG_NUMBERS],
+    pub fog_numbers_len: u8,
     pub robber: u8,
     /// Sea tile of the pirate, `NONE` on maps without sea.
     pub pirate: u8,
     pub phase: Phase,
+    /// Phase resumed once every pending gold choice is made.
+    pub after_gold: Phase,
     pub current: u8,
     /// Index into the snake order of initial placements.
     pub setup_step: u8,
@@ -392,6 +407,18 @@ impl GameState {
         let deck_len = layout.dev_deck_size();
         debug_assert_eq!(i, deck_len);
         rng.shuffle(&mut dev_deck[..deck_len]);
+        let mut fog_terrain = [Terrain::Sea; MAX_FOG_TILES];
+        let mut fog_terrain_len = 0u8;
+        let mut fog_numbers = [0u8; MAX_FOG_NUMBERS];
+        let mut fog_numbers_len = 0u8;
+        if layout.has_fog() {
+            fog_terrain.copy_from_slice(&FOG_TERRAIN_POOL);
+            fog_terrain_len = MAX_FOG_TILES as u8;
+            rng.shuffle(&mut fog_terrain);
+            fog_numbers.copy_from_slice(&FOG_NUMBER_POOL);
+            fog_numbers_len = MAX_FOG_NUMBERS as u8;
+            rng.shuffle(&mut fog_numbers);
+        }
         Ok(GameState {
             config,
             board,
@@ -403,9 +430,14 @@ impl GameState {
             bank: ResourceSet([layout.bank_per_resource(); 5]),
             dev_deck,
             dev_deck_len: deck_len as u8,
+            fog_terrain,
+            fog_terrain_len,
+            fog_numbers,
+            fog_numbers_len,
             robber: board.desert,
             pirate: board.pirate_start,
             phase: Phase::SetupSettlement,
+            after_gold: Phase::Main,
             current: 0,
             setup_step: 0,
             turn: 0,
@@ -794,6 +826,68 @@ impl GameState {
         }
         if (seen_v & !topo.all_vertices) != 0 || (seen_e & !topo.all_edges) != 0 {
             return Err("piece off board".into());
+        }
+        if layout.has_fog() {
+            let fog_tiles = self
+                .board
+                .tiles()
+                .iter()
+                .filter(|&&t| t == Terrain::Fog)
+                .count();
+            if fog_tiles != self.fog_terrain_len as usize {
+                return Err(format!(
+                    "fog tile count mismatch: {fog_tiles} on board vs {} in stack",
+                    self.fog_terrain_len
+                ));
+            }
+            let fog_producing = self.fog_terrain[..self.fog_terrain_len as usize]
+                .iter()
+                .filter(|t| t.produces())
+                .count();
+            if fog_producing != self.fog_numbers_len as usize {
+                return Err(format!(
+                    "fog number count mismatch: {fog_producing} producing vs {} tokens",
+                    self.fog_numbers_len
+                ));
+            }
+            let mut counts = [0u8; Terrain::COUNT];
+            for &t in self.board.tiles() {
+                if t != Terrain::Fog {
+                    counts[t as usize] += 1;
+                }
+            }
+            for &t in &self.fog_terrain[..self.fog_terrain_len as usize] {
+                counts[t as usize] += 1;
+            }
+            if counts != layout.full_terrain_counts() {
+                return Err("fog terrain not conserved".into());
+            }
+            let mut num_counts = [0u8; 13];
+            for &num in &self.board.numbers[..topo.num_tiles] {
+                if num != 0 {
+                    num_counts[num as usize] += 1;
+                }
+            }
+            for &num in &self.fog_numbers[..self.fog_numbers_len as usize] {
+                num_counts[num as usize] += 1;
+            }
+            let mut expected_nums = [0u8; 13];
+            for &num in FOG_HOME_NUMBER_POOL.iter().chain(FOG_NUMBER_POOL.iter()) {
+                expected_nums[num as usize] += 1;
+            }
+            if num_counts != expected_nums {
+                return Err("fog number tokens not conserved".into());
+            }
+            let route_vertices = topo.endpoints_of(seen_e);
+            for t in 0..topo.num_tiles {
+                if self.board.terrain[t] == Terrain::Fog
+                    && route_vertices & topo.tile_vertex_mask[t] != 0
+                {
+                    return Err(format!("route touches unrevealed fog tile {t}"));
+                }
+            }
+        } else if self.fog_terrain_len != 0 || self.fog_numbers_len != 0 {
+            return Err("non-fog board has fog stacks".into());
         }
         if let Phase::SpecialBuild { builder } = self.phase
             && (!layout.has_special_build() || builder == self.current || builder as usize >= n)

@@ -20,6 +20,9 @@ pub enum BoardLayout {
     /// Seafaring: a home island and two small islands in 33 tiles of land
     /// and sea, 9 harbors, ships and the pirate: 2–4 players.
     Archipelago,
+    /// Seafaring: a crescent home island and thirteen unexplored fog tiles
+    /// revealed as ships reach them: 2–4 players.
+    FogIslands,
 }
 
 impl BoardLayout {
@@ -29,15 +32,17 @@ impl BoardLayout {
             BoardLayout::Base => &BASE,
             BoardLayout::Extended => &EXTENDED,
             BoardLayout::Archipelago => &ARCHIPELAGO,
+            BoardLayout::FogIslands => &FOG_ISLANDS,
         }
     }
 
     /// Map characters of a seafaring layout, one per tile (`.` and `~` sea,
-    /// letters islands, `M` the home island); `None` for all-land boards.
+    /// `?` fog, letters islands, `M` the home island); `None` for all-land boards.
     #[inline]
     pub fn map(self) -> Option<&'static [u8]> {
         match self {
             BoardLayout::Archipelago => Some(ARCHIPELAGO_MAP),
+            BoardLayout::FogIslands => Some(FOG_ISLANDS_MAP),
             _ => None,
         }
     }
@@ -45,7 +50,13 @@ impl BoardLayout {
     /// Ships and the pirate are in play.
     #[inline]
     pub const fn has_ships(self) -> bool {
-        matches!(self, BoardLayout::Archipelago)
+        matches!(self, BoardLayout::Archipelago | BoardLayout::FogIslands)
+    }
+
+    /// Unexplored fog tiles are revealed during play.
+    #[inline]
+    pub const fn has_fog(self) -> bool {
+        matches!(self, BoardLayout::FogIslands)
     }
 
     /// The board normally used with `players` seats.
@@ -166,7 +177,7 @@ pub fn lattice_to_world((x, y): (i16, i16), size: f32) -> (f32, f32) {
 mod tests {
     use super::*;
 
-    const ALL: [&Topology; 3] = [&BASE, &EXTENDED, &ARCHIPELAGO];
+    const ALL: [&Topology; 4] = [&BASE, &EXTENDED, &ARCHIPELAGO, &FOG_ISLANDS];
 
     #[test]
     fn counts() {
@@ -187,6 +198,16 @@ mod tests {
         );
         assert_eq!(ARCHIPELAGO_MAP.len(), 33);
         assert_eq!(ARCHIPELAGO.harbor_edges.len(), 9);
+        assert_eq!(
+            (
+                FOG_ISLANDS.num_tiles,
+                FOG_ISLANDS.num_vertices,
+                FOG_ISLANDS.num_edges
+            ),
+            (33, 90, 122)
+        );
+        assert_eq!(FOG_ISLANDS_MAP.len(), 33);
+        assert_eq!(FOG_ISLANDS.harbor_edges.len(), 9);
         for t in ALL {
             // Euler's formula for a disc tiled by hexes: E = V + F - 1.
             assert_eq!(t.num_edges, t.num_vertices + t.num_tiles - 1);
@@ -272,7 +293,11 @@ mod tests {
             for &e in topo.harbor_edges {
                 // Seafaring harbors may face inner sea; build.rs checks
                 // that they face water.
-                assert!(std::ptr::eq(topo, &ARCHIPELAGO) || topo.coast_edges.contains(&e));
+                assert!(
+                    std::ptr::eq(topo, &ARCHIPELAGO)
+                        || std::ptr::eq(topo, &FOG_ISLANDS)
+                        || topo.coast_edges.contains(&e)
+                );
                 let [a, b] = topo.edge_vertices[e as usize];
                 let m = (1u128 << a) | (1u128 << b);
                 assert_eq!(seen & m, 0);

@@ -10,6 +10,11 @@ use crate::greedy::spot_value;
 
 /// Settlement value of the island bonus a spot would earn `p`.
 const ISLAND_BONUS_VALUE: f32 = 6.0;
+/// Exploration value per unexplored fog tile a vertex reveals (expected
+/// free resource plus the chance of uncovering rich land or gold).
+const FOG_TILE_VALUE: f32 = 4.5;
+/// Extra pull towards the fog before `p` has earned their outer-island bonus.
+const FOG_SEEK_BONUS: f32 = 3.0;
 /// Free sea edges searched beyond the tip of the fleet.
 const SEARCH_DEPTH: usize = 6;
 /// Value kept per extra ship needed to get there.
@@ -30,6 +35,26 @@ pub(crate) fn island_bonus_value(s: &GameState, p: u8, v: u8) -> f32 {
     }
 }
 
+/// Exploration value of reaching `v` when it borders unexplored fog tiles.
+fn fog_value(s: &GameState, p: u8, v: u8) -> f32 {
+    if !s.board.layout.has_fog() {
+        return 0.0;
+    }
+    let count = s.topo().vertex_tiles[v as usize]
+        .iter()
+        .filter(|&&t| t != NONE && s.board.terrain[t as usize] == isle_core::Terrain::Fog)
+        .count();
+    if count == 0 {
+        return 0.0;
+    }
+    let seek = if s.players[p as usize].islands == 0 {
+        FOG_SEEK_BONUS
+    } else {
+        0.0
+    };
+    seek + FOG_TILE_VALUE * count as f32
+}
+
 /// Where `p`'s next ship could attach: own buildings and the open tips of
 /// their ships (not through opponents).
 fn fleet_reach(s: &GameState, p: u8, ships: u128) -> u128 {
@@ -38,12 +63,13 @@ fn fleet_reach(s: &GameState, p: u8, ships: u128) -> u128 {
     own | (s.topo().endpoints_of(ships) & !opponents)
 }
 
-/// Best settlement spot reachable from the vertices in `starts` over free
-/// sea edges (away from the pirate, not through opponents), decayed by the
-/// number of ships still needed. `taken` are edges counted as occupied.
+/// Best settlement or exploration spot reachable from the vertices in `starts`
+/// over free sea edges (away from the pirate, not through opponents), decayed
+/// by the number of ships still needed. `taken` are edges counted as occupied.
 fn sea_search(s: &GameState, p: u8, starts: u128, taken: u128) -> f32 {
     let topo = s.topo();
     let spots = s.settlement_spots(p, false);
+    let has_fog = s.board.layout.has_fog();
     let blocked = s.occupied_vertices() & !s.buildings_of(p);
     let open = s.board.sea_edges & !s.pirate_edges() & !taken;
     let mut best = 0.0f32;
@@ -52,6 +78,11 @@ fn sea_search(s: &GameState, p: u8, starts: u128, taken: u128) -> f32 {
     for depth in 0..=SEARCH_DEPTH {
         for v in vertices_in(layer & spots) {
             best = best.max((spot_value(s, p, v) + island_bonus_value(s, p, v)) * DECAY[depth]);
+        }
+        if has_fog {
+            for v in vertices_in(layer) {
+                best = best.max(fog_value(s, p, v) * DECAY[depth]);
+            }
         }
         if depth == SEARCH_DEPTH {
             break;
@@ -121,11 +152,16 @@ pub(crate) fn island_progress(s: &GameState, q: u8) -> f32 {
     let spots = s.settlement_spots(q, false);
     let blocked = s.occupied_vertices() & !s.buildings_of(q);
     let open = s.board.sea_edges & !s.pirate_edges() & !s.occupied_edges();
+    let has_fog = s.board.layout.has_fog() && s.players[q as usize].islands == 0;
+    let mut fog_best = 0.0f32;
     let mut seen = reach;
     let mut layer = reach;
     for depth in 0..=SEARCH_DEPTH {
         if vertices_in(layer & spots).any(|v| island_bonus_value(s, q, v) > 0.0) {
             return DECAY[depth];
+        }
+        if has_fog && fog_best == 0.0 && vertices_in(layer).any(|v| fog_value(s, q, v) > 0.0) {
+            fog_best = 0.65 * DECAY[depth];
         }
         let mut next = 0u128;
         for v in vertices_in(layer & !blocked) {
@@ -145,7 +181,7 @@ pub(crate) fn island_progress(s: &GameState, q: u8) -> f32 {
         }
         seen |= layer;
     }
-    0.0
+    fog_best
 }
 
 #[cfg(test)]

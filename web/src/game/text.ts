@@ -1,5 +1,5 @@
 // Labels and event descriptions (zh-CN).
-import type { BotLevel, DevCard, Event, Resource, ResourceSet, RuleError, Tier } from '../generated/proto';
+import type { BotLevel, DevCard, Event, Resource, ResourceSet, RuleError, Terrain, Tier } from '../generated/proto';
 
 export const BOT_LEVEL_NAME: Record<BotLevel, string> = { Easy: '简单', Normal: '普通', Hard: '困难' };
 
@@ -9,6 +9,18 @@ export const RESOURCES: Resource[] = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore']
 export const RESOURCE_NAME: Record<Resource, string> = { Brick: '砖', Lumber: '木', Wool: '羊毛', Grain: '小麦', Ore: '矿石' };
 export const RESOURCE_SHORT: Record<Resource, string> = { Brick: '砖', Lumber: '木', Wool: '羊', Grain: '麦', Ore: '矿' };
 export const RESOURCE_CSS = ['#c0623a', '#2f7d4a', '#9fd27a', '#e2b74a', '#8a8f99'] as const;
+
+export const TERRAIN_NAME: Record<Terrain, string> = {
+  Hills: '丘陵',
+  Forest: '森林',
+  Pasture: '牧场',
+  Fields: '农田',
+  Mountains: '山脉',
+  Desert: '沙漠',
+  Sea: '海面',
+  Gold: '金矿',
+  Fog: '迷雾',
+};
 
 export const DEV_CARDS: DevCard[] = ['Knight', 'VictoryPoint', 'RoadBuilding', 'YearOfPlenty', 'Monopoly'];
 export const DEV_NAME: Record<DevCard, string> = {
@@ -176,6 +188,12 @@ export function describe(e: Event, name: (seat: number) => string): string | nul
       return `${name(e.value.player)} 从金矿选取 ${setText(e.value.resources)}`;
     case 'IslandSettled':
       return `${name(e.value.player)} 登上新的岛屿，奖励 ${e.value.points} 分`;
+    case 'TileRevealed': {
+      const what = TERRAIN_NAME[e.value.terrain];
+      const num = e.value.number ? `（${e.value.number}）` : '';
+      const got = e.value.reward ? `，奖励 1 ${RESOURCE_SHORT[e.value.reward]}` : '';
+      return `${name(e.value.player)} 拨开迷雾，发现${what}${num}${got}`;
+    }
     case 'TurnEnded':
     case 'SpecialBuildPassed':
     case 'GoldOwed':

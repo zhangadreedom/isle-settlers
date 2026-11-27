@@ -68,6 +68,18 @@ pub fn determinize(s: &GameState, me: u8, rng: &mut Rng) -> GameState {
     debug_assert_eq!(deck.len(), s.dev_deck_len as usize);
     d.dev_deck[..deck.len()].copy_from_slice(&deck);
 
+    // Unexplored fog stacks. The multiset of remaining tiles and number
+    // tokens is public (initial pool minus revealed tiles); only their order
+    // is hidden, so sort into canonical order first and shuffle.
+    if layout.has_fog() && s.fog_terrain_len > 0 {
+        let tlen = s.fog_terrain_len as usize;
+        d.fog_terrain[..tlen].sort_unstable_by_key(|&t| t as u8);
+        rng.shuffle(&mut d.fog_terrain[..tlen]);
+        let nlen = s.fog_numbers_len as usize;
+        d.fog_numbers[..nlen].sort_unstable();
+        rng.shuffle(&mut d.fog_numbers[..nlen]);
+    }
+
     // Future dice and steals.
     d.rng = Rng::new(rng.next_u64());
     d
@@ -81,19 +93,24 @@ pub(crate) mod tests {
 
     pub(crate) fn sample_states() -> Vec<GameState> {
         let mut out = Vec::new();
-        for seed in 0..20u64 {
-            let mut g = GameState::new(GameConfig::default(), seed).unwrap();
-            let mut bots: Vec<WeightedRandomBot> = (0..4)
-                .map(|k| WeightedRandomBot::new(seed * 9 + k))
-                .collect();
-            let mut legal = Vec::new();
-            for step in 0..500 {
-                let Some(p) = g.to_move() else { break };
-                g.legal_actions(p, &mut legal);
-                let a = bots[p as usize].choose(&g, p, &legal);
-                g.apply(p, a).unwrap();
-                if step % 60 == 59 {
-                    out.push(g);
+        for (scenario, seeds) in [
+            (isle_core::Scenario::Classic, 0..14u64),
+            (isle_core::Scenario::FogIslands, 14..24u64),
+        ] {
+            for seed in seeds {
+                let mut g = GameState::new(GameConfig::scenario(scenario, 4), seed).unwrap();
+                let mut bots: Vec<WeightedRandomBot> = (0..4)
+                    .map(|k| WeightedRandomBot::new(seed * 9 + k))
+                    .collect();
+                let mut legal = Vec::new();
+                for step in 0..500 {
+                    let Some(p) = g.to_move() else { break };
+                    g.legal_actions(p, &mut legal);
+                    let a = bots[p as usize].choose(&g, p, &legal);
+                    g.apply(p, a).unwrap();
+                    if step % 60 == 59 {
+                        out.push(g);
+                    }
                 }
             }
         }

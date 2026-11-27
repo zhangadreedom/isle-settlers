@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::resources::{Resource, ResourceSet};
+use crate::resources::{Resource, ResourceSet, Terrain};
 use crate::state::DevCard;
 
 /// Everything a player can do. The acting seat is passed separately to
@@ -299,6 +299,15 @@ pub enum Event {
         player: u8,
         island: u8,
         points: u8,
+    },
+    /// Fog maps: an unexplored tile was turned face up (`reward` is the free
+    /// resource card drawn from the bank for regular land, if any).
+    TileRevealed {
+        player: u8,
+        tile: u8,
+        terrain: Terrain,
+        number: u8,
+        reward: Option<Resource>,
     },
     GameWon {
         player: u8,

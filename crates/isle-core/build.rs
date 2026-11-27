@@ -7,6 +7,8 @@
 //!   the sea between the islands; `ARCHIPELAGO_MAP` keeps one character per
 //!   tile (`.` sea, `~` sea where the pirate starts, a letter per island,
 //!   `M` being the home island) for the board to interpret.
+//! * `FOG_ISLANDS`: a crescent home island in the west separated by a sea
+//!   strait from thirteen unexplored fog tiles (`?`) in the east.
 //!
 //! Geometry: pointy-top hexes on an exact integer lattice. A point `(x, y)`
 //! in lattice units maps to world space as `(x * sqrt(3)/2, y / 2)` for unit
@@ -62,7 +64,18 @@ const ARCHIPELAGO_ROWS: &[&str] = &[
     "M M M . . c c",
 ];
 
-const SPECS: [Spec; 3] = [
+/// Fog islands: a crescent home island in the west around a sheltered bay,
+/// a sea channel with the pirate at its mouth, and thirteen unexplored fog
+/// tiles (`?`) to the east.
+const FOG_ISLANDS_ROWS: &[&str] = &[
+    "M M M . ? ? ?",
+    " M M M . ? ?",
+    "M M . ~ ? ? ?",
+    " M M M . ? ?",
+    "M M M . ? ? ?",
+];
+
+const SPECS: [Spec; 4] = [
     // Gaps of 3, 3, 4 coastal edges, repeated three times.
     Spec {
         name: "BASE",
@@ -88,6 +101,22 @@ const SPECS: [Spec; 3] = [
             (0, 5),
             (6, 0),
             (32, 2),
+        ]),
+    },
+    // Nine symmetric harbors around the crescent home island.
+    Spec {
+        name: "FOG_ISLANDS",
+        shape: Shape::Map(FOG_ISLANDS_ROWS),
+        harbors: Harbors::Sides(&[
+            (0, 0),
+            (2, 0),
+            (9, 1),
+            (14, 1),
+            (22, 1),
+            (28, 2),
+            (26, 2),
+            (20, 4),
+            (7, 4),
         ]),
     },
 ];
@@ -138,6 +167,14 @@ fn tiles_of(shape: &Shape) -> (Vec<(i32, i32)>, Vec<u8>) {
 
 fn is_sea(ch: u8) -> bool {
     ch == b'.' || ch == b'~'
+}
+
+fn is_fog(ch: u8) -> bool {
+    ch == b'?'
+}
+
+fn is_land(ch: u8) -> bool {
+    !is_sea(ch) && !is_fog(ch)
 }
 
 fn generate(spec: &Spec, out: &mut String) -> (usize, usize, usize, usize) {
@@ -216,12 +253,12 @@ fn generate(spec: &Spec, out: &mut String) -> (usize, usize, usize, usize) {
         Harbors::Sides(sides) => sides
             .iter()
             .map(|&(t, side)| {
-                // A harbor faces the sea: a sea tile or the edge of the map.
-                assert!(!is_sea(chars[t]), "{}: harbor on a sea tile", spec.name);
+                // A harbor sits on known land and faces open water.
+                assert!(is_land(chars[t]), "{}: harbor not on known land", spec.name);
                 let n = tile_neighbors[t][side];
                 assert!(
                     n == NONE || is_sea(chars[n as usize]),
-                    "{}: harbor between land tiles",
+                    "{}: harbor not facing open sea",
                     spec.name
                 );
                 tile_edges[t][side]
@@ -377,7 +414,7 @@ fn generate(spec: &Spec, out: &mut String) -> (usize, usize, usize, usize) {
 }
 
 /// Each island letter is one connected piece of land, and different
-/// islands share no intersection (so ships are needed between them).
+/// islands (as well as initial land and fog) share no intersection.
 fn check_islands(
     name: &str,
     tiles: &[(i32, i32)],
@@ -385,11 +422,14 @@ fn check_islands(
     neighbors: &[[u8; 6]],
     tile_vertices: &[[usize; 6]],
 ) {
-    let land: Vec<usize> = (0..tiles.len()).filter(|&t| !is_sea(chars[t])).collect();
+    let land: Vec<usize> = (0..tiles.len()).filter(|&t| is_land(chars[t])).collect();
     for &t in &land {
         for &n in &neighbors[t] {
-            if n != NONE && !is_sea(chars[n as usize]) {
-                assert_eq!(chars[t], chars[n as usize], "{name}: islands touch");
+            if n != NONE {
+                assert!(!is_fog(chars[n as usize]), "{name}: land touches fog");
+                if is_land(chars[n as usize]) {
+                    assert_eq!(chars[t], chars[n as usize], "{name}: islands touch");
+                }
             }
         }
     }

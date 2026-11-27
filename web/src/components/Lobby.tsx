@@ -20,7 +20,7 @@ export interface CreateRoom {
 }
 
 /** Seats each scenario can be played with. */
-const MAX_SEATS: Record<Scenario, number> = { Classic: 6, Archipelago: 4 };
+const MAX_SEATS: Record<Scenario, number> = { Classic: 6, Archipelago: 4, FogIslands: 4 };
 
 export function Lobby(props: {
   ready: boolean;
@@ -75,7 +75,14 @@ export function Lobby(props: {
         <p class="muted">
           <Show
             when={scenario() === 'Archipelago'}
-            fallback="在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，每回合结束后其他人可以特殊建造。"
+            fallback={
+              <Show
+                when={scenario() === 'FogIslands'}
+                fallback="在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，每回合结束后其他人可以特殊建造。"
+              >
+                航海 · 迷雾：从西侧月牙主岛扬帆驶入迷雾，船或道路触及未知格即翻开地形——发现产资源陆地立即奖励 1 张资源（金矿任选 1 张），首次在迷雾新大陆建村庄奖励 2 分。先到 12 分者获胜，2–4 人。
+              </Show>
+            }
           >
             航海 · 群岛：从西边的主岛出发，造船驶过海峡，第一次在东边的小岛上建村庄奖励 2 分；金矿产出任选资源，海盗会封锁航线。先到 12 分者获胜，2–4 人。
           </Show>
@@ -115,6 +122,13 @@ export function Lobby(props: {
               >
                 航海 · 群岛
               </button>
+              <button
+                classList={{ on: scenario() === 'FogIslands' }}
+                onClick={() => setScenario('FogIslands')}
+                title="未知海域探索翻牌，发现新陆地得资源与登岛分，2–4 人"
+              >
+                航海 · 迷雾
+              </button>
             </div>
           </div>
           <div class="field">
@@ -125,7 +139,7 @@ export function Lobby(props: {
                   <button
                     classList={{ on: players() === n }}
                     disabled={n > MAX_SEATS[scenario()]}
-                    title={n > MAX_SEATS[scenario()] ? '群岛地图最多 4 人' : undefined}
+                    title={n > MAX_SEATS[scenario()] ? '航海地图最多 4 人' : undefined}
                     onClick={() => setPlayers(n)}
                   >
                     {n} 人

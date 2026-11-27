@@ -41,7 +41,7 @@ fn random_action(rng: &mut Rng) -> Action {
         7 => Action::PlayYearOfPlenty(random_set(rng, 3)),
         8 => Action::PlayMonopoly(random_resource(rng)),
         9 => Action::MoveRobber {
-            tile: rng.below(32) as u8,
+            tile: rng.below(35) as u8,
             victim: if rng.below(3) == 0 {
                 None
             } else {
@@ -270,5 +270,35 @@ fn archipelago_games_finish_and_use_the_sea() {
     assert!(
         ships > 300 && islands > 50 && gold > 20,
         "ships {ships} islands {islands} gold {gold}"
+    );
+}
+
+#[test]
+fn fog_games_with_cross_checking() {
+    for seed in 0..60 {
+        play_scenario(Scenario::FogIslands, seed, 2 + (seed % 3) as u8, true);
+    }
+}
+
+#[test]
+fn fog_games_finish_and_uncover_the_mist() {
+    let (mut finished, mut ships, mut revealed, mut islands) = (0, 0, 0, 0);
+    for seed in 900..1100 {
+        let (g, _) = play_scenario(Scenario::FogIslands, seed, 3 + (seed % 2) as u8, false);
+        if let Some(w) = g.winner {
+            finished += 1;
+            assert!(g.victory_points(w) >= g.config.victory_points);
+        }
+        let n = g.num_players();
+        ships += (0..n).filter(|&p| g.ships[p] != 0).count();
+        islands += (0..n).filter(|&p| g.players[p].islands != 0).count();
+        revealed += 13 - g.fog_terrain_len as usize;
+        let (again, _) = play_scenario(Scenario::FogIslands, seed, 3 + (seed % 2) as u8, false);
+        assert_eq!(g, again);
+    }
+    assert!(finished > 140, "only {finished}/200 fog games finished");
+    assert!(
+        ships > 300 && revealed > 500 && islands > 30,
+        "ships {ships} revealed {revealed} islands {islands}"
     );
 }

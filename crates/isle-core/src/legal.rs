@@ -72,6 +72,9 @@ impl GameState {
                     if tile == self.robber || tile == self.pirate {
                         continue;
                     }
+                    if self.board.terrain[tile as usize] == crate::Terrain::Fog {
+                        continue;
+                    }
                     if self.board.is_sea(tile) && self.pirate == NONE {
                         continue;
                     }

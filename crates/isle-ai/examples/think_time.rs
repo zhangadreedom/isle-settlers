@@ -16,6 +16,7 @@ fn main() {
     let players: u8 = args.next().and_then(|p| p.parse().ok()).unwrap_or(4);
     let scenario = match args.next().as_deref() {
         Some("archipelago") => Scenario::Archipelago,
+        Some("fog" | "fog-islands") => Scenario::FogIslands,
         _ => Scenario::Classic,
     };
     let mut times = Vec::new();

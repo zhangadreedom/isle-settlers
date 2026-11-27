@@ -52,21 +52,23 @@ pub enum Terrain {
     Sea = 6,
     /// Seafaring maps: produces a resource of the owner's choice.
     Gold = 7,
+    /// Fog maps: unexplored tile, revealed when a route reaches it.
+    Fog = 8,
 }
 
 impl Terrain {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 
     /// Land carries buildings and roads; the sea carries ships.
     #[inline]
     pub const fn is_land(self) -> bool {
-        !matches!(self, Terrain::Sea)
+        !matches!(self, Terrain::Sea | Terrain::Fog)
     }
 
     /// Carries a number token.
     #[inline]
     pub const fn produces(self) -> bool {
-        !matches!(self, Terrain::Desert | Terrain::Sea)
+        !matches!(self, Terrain::Desert | Terrain::Sea | Terrain::Fog)
     }
 
     /// Resource produced by this terrain, if any.
@@ -78,7 +80,7 @@ impl Terrain {
             Terrain::Pasture => Some(Resource::Wool),
             Terrain::Fields => Some(Resource::Grain),
             Terrain::Mountains => Some(Resource::Ore),
-            Terrain::Desert | Terrain::Sea | Terrain::Gold => None,
+            Terrain::Desert | Terrain::Sea | Terrain::Gold | Terrain::Fog => None,
         }
     }
 }

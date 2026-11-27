@@ -296,7 +296,9 @@ impl GameState {
 
             Action::MoveRobber { tile, victim } => {
                 self.require_phase(Phase::MoveRobber)?;
-                if tile as usize >= topo.num_tiles {
+                if tile as usize >= topo.num_tiles
+                    || self.board.terrain[tile as usize] == crate::Terrain::Fog
+                {
                     return Err(E::InvalidTile);
                 }
                 // A sea tile moves the pirate, a land tile the robber.
@@ -441,6 +443,7 @@ impl GameState {
                     };
                 } else {
                     self.phase = if self.produce(sum, sink) {
+                        self.after_gold = Phase::Main;
                         Phase::Gold { vertex: None }
                     } else {
                         Phase::Main
@@ -459,8 +462,10 @@ impl GameState {
                 self.roads[p] |= 1u128 << e;
                 self.players[p].roads_left -= 1;
                 sink.emit(Event::RoadBuilt { player, edge: e });
+                let gold = self.reveal_fog_at_edge(player, e, sink);
                 self.update_longest_road_after_build(player, sink);
                 self.after_route_piece(player);
+                self.owe_discovered_gold(player, gold, sink);
             }
 
             Action::BuildShip(e) => {
@@ -478,19 +483,23 @@ impl GameState {
                     self.new_ships |= bit;
                 }
                 sink.emit(Event::ShipBuilt { player, edge: e });
+                let gold = self.reveal_fog_at_edge(player, e, sink);
                 self.update_longest_road_after_build(player, sink);
                 self.after_route_piece(player);
+                self.owe_discovered_gold(player, gold, sink);
             }
 
             Action::MoveShip { from, to } => {
                 self.ships[p] = (self.ships[p] & !(1u128 << from)) | (1u128 << to);
                 self.ship_moved = true;
                 sink.emit(Event::ShipMoved { player, from, to });
+                let gold = self.reveal_fog_at_edge(player, to, sink);
                 let len = self.compute_longest_road(player);
                 if len != self.players[p].longest_road {
                     self.players[p].longest_road = len;
                     self.reassign_longest_road(sink);
                 }
+                self.owe_discovered_gold(player, gold, sink);
             }
 
             Action::ChooseGold(set) => {
@@ -506,7 +515,7 @@ impl GameState {
                 {
                     self.phase = match vertex {
                         Some(vertex) => Phase::SetupRoad { vertex },
-                        None => Phase::Main,
+                        None => std::mem::replace(&mut self.after_gold, Phase::Main),
                     };
                 }
             }
@@ -790,6 +799,7 @@ impl GameState {
                 self.winner = Some(self.current);
                 self.phase = Phase::GameOver;
                 self.trade = None;
+                self.pending_gold = [0; MAX_PLAYERS];
                 sink.emit(Event::GameWon {
                     player: self.current,
                     points: vp,
@@ -803,7 +813,84 @@ impl GameState {
         matches!(
             self.phase,
             Phase::SetupSettlement | Phase::SetupRoad { .. } | Phase::Gold { vertex: Some(_) }
-        )
+        ) || (matches!(self.phase, Phase::Gold { .. })
+            && matches!(
+                self.after_gold,
+                Phase::SetupSettlement | Phase::SetupRoad { .. }
+            ))
+    }
+
+    /// Reveals every unexplored fog tile touching either endpoint of `edge`,
+    /// paying 1 resource card per regular land tile discovered and returning
+    /// the number of gold fields discovered.
+    fn reveal_fog_at_edge<S: EventSink + ?Sized>(
+        &mut self,
+        player: u8,
+        edge: u8,
+        sink: &mut S,
+    ) -> u8 {
+        if self.fog_terrain_len == 0 {
+            return 0;
+        }
+        let topo = self.topo();
+        let [a, b] = topo.edge_vertices[edge as usize];
+        let mut mask = 0u64;
+        for v in [a, b] {
+            for &t in &topo.vertex_tiles[v as usize] {
+                if t != NONE && self.board.terrain[t as usize] == crate::Terrain::Fog {
+                    mask |= 1u64 << t;
+                }
+            }
+        }
+        let mut gold = 0u8;
+        while mask != 0 {
+            let tile = mask.trailing_zeros() as u8;
+            mask &= mask - 1;
+            self.fog_terrain_len -= 1;
+            let terrain = self.fog_terrain[self.fog_terrain_len as usize];
+            let number = if terrain.produces() {
+                self.fog_numbers_len -= 1;
+                self.fog_numbers[self.fog_numbers_len as usize]
+            } else {
+                0
+            };
+            self.board.reveal_tile(tile, terrain, number);
+            let mut reward = None;
+            if let Some(r) = terrain.resource() {
+                if self.bank[r] > 0 {
+                    self.bank[r] -= 1;
+                    self.players[player as usize].hand[r] += 1;
+                    reward = Some(r);
+                }
+            } else if terrain == crate::Terrain::Gold {
+                gold += 1;
+            }
+            sink.emit(Event::TileRevealed {
+                player,
+                tile,
+                terrain,
+                number,
+                reward,
+            });
+        }
+        gold
+    }
+
+    fn owe_discovered_gold<S: EventSink + ?Sized>(
+        &mut self,
+        player: u8,
+        gold: u8,
+        sink: &mut S,
+    ) {
+        if gold == 0 || self.bank.total() == 0 {
+            return;
+        }
+        self.pending_gold[player as usize] = gold;
+        let mut owed = [0; MAX_PLAYERS];
+        owed[player as usize] = gold;
+        sink.emit(Event::GoldOwed { owed });
+        self.after_gold = self.phase;
+        self.phase = Phase::Gold { vertex: None };
     }
 
     /// After a road or ship: setup moves on, Road Building counts down.

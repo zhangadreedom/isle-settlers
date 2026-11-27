@@ -557,3 +557,59 @@ async fn archipelago_rooms_play_out_and_restore() {
     server.stop().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn fog_islands_rooms_play_out_and_reveal_tiles() {
+    let dir = temp_dir("fog-islands");
+    let config = ServerConfig {
+        data_dir: Some(dir.clone()),
+        ..fast_config()
+    };
+    let server = Server::start(config.clone()).await;
+    let mut host = Client::connect(server.addr).await;
+    host.send(&ClientMsg::Create {
+        players: 3,
+        bots: BotLevel::Normal,
+        name: "Captain".into(),
+        ranked: false,
+        scenario: isle_core::Scenario::FogIslands,
+        session: None,
+    })
+    .await;
+    host.until(|c| c.room.is_some()).await;
+    assert_eq!(
+        host.room.as_ref().unwrap().scenario,
+        isle_core::Scenario::FogIslands
+    );
+    host.send(&ClientMsg::Start).await;
+    host.until(|c| c.view.is_some()).await;
+    let initial_fog = host
+        .view
+        .as_ref()
+        .unwrap()
+        .fog
+        .as_ref()
+        .expect("fog view present")
+        .terrain
+        .iter()
+        .filter(|&&t| t == isle_core::Terrain::Fog)
+        .count();
+    assert_eq!(initial_fog, 13);
+
+    let end = timeout(Duration::from_secs(120), play_to_end(host))
+        .await
+        .expect("finished");
+    let view = end.view.as_ref().unwrap();
+    assert!(view.winner.is_some());
+    let final_fog = view
+        .fog
+        .as_ref()
+        .unwrap()
+        .terrain
+        .iter()
+        .filter(|&&t| t == isle_core::Terrain::Fog)
+        .count();
+    assert!(final_fog < 13, "expected fog tiles to be uncovered, still {final_fog}");
+    server.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

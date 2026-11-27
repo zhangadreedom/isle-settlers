@@ -60,7 +60,8 @@ fn parse_args() -> Args {
                 a.scenario = match val().as_str() {
                     "classic" => Scenario::Classic,
                     "archipelago" => Scenario::Archipelago,
-                    _ => usage("--scenario must be classic or archipelago"),
+                    "fog" | "fog-islands" | "fog_islands" => Scenario::FogIslands,
+                    _ => usage("--scenario must be classic, archipelago or fog"),
                 }
             }
             "--check" => a.check = true,
@@ -70,7 +71,7 @@ fn parse_args() -> Args {
         }
     }
     if !(2..=a.scenario.max_players()).contains(&a.players) {
-        usage("--players must be 2-6 (2-4 on the archipelago)");
+        usage("--players must be 2-6 (2-4 on seafaring maps)");
     }
     if a.bots.is_empty() {
         a.bots = vec![bot; a.players as usize];
@@ -90,7 +91,7 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: isle-sim [--games N] [--players 2-6] [--scenario classic|archipelago]\n\
+        "usage: isle-sim [--games N] [--players 2-6] [--scenario classic|archipelago|fog]\n\
          \x20               [--seed S] [--threads T]\n\
          \x20               [--bot NAME | --bots NAME,NAME,...] [--rotate] [--max-turns N] [--check]\n\
          bots: random, weighted, greedy, mcts, mcts:N (N iterations), mcts:N/key=value/..."
@@ -111,6 +112,8 @@ struct Stats {
     /// summed over players.
     islands: u64,
     ships: u64,
+    /// Fog maps: tiles uncovered across all games.
+    revealed: u64,
 }
 
 fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
@@ -139,6 +142,9 @@ fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
         for p in 0..n {
             s.islands += g.players[p].islands.count_ones() as u64;
             s.ships += g.ships[p].count_ones() as u64;
+        }
+        if g.board.layout.has_fog() {
+            s.revealed += (isle_core::state::MAX_FOG_TILES as u64) - g.fog_terrain_len as u64;
         }
         s.games += 1;
         s.turns += outcome.turns as u64;
@@ -179,6 +185,7 @@ fn main() {
         total.actions += s.actions;
         total.islands += s.islands;
         total.ships += s.ships;
+        total.revealed += s.revealed;
         for p in 0..MAX_PLAYERS {
             total.wins[p] += s.wins[p];
             total.wins_by_bot[p] += s.wins_by_bot[p];
@@ -222,6 +229,13 @@ fn main() {
             "ships at end    {:.2} per player",
             total.ships as f64 / per_player
         );
+        if args.scenario == Scenario::FogIslands {
+            println!(
+                "fog revealed    {:.2} / {} tiles",
+                total.revealed as f64 / g,
+                isle_core::state::MAX_FOG_TILES
+            );
+        }
     }
     let wins: Vec<String> = (0..args.players as usize)
         .map(|p| {

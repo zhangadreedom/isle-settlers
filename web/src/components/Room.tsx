@@ -147,6 +147,11 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                     航海 · 群岛
                   </span>
                 </Show>
+                <Show when={room().scenario === 'FogIslands'}>
+                  <span class="mode-tag sea" title="驶入迷雾翻开未知海域与岛屿，先到 12 分">
+                    航海 · 迷雾
+                  </span>
+                </Show>
               </div>
 
               <ol class="seats">

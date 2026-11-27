@@ -36,6 +36,8 @@ export interface PieceData {
 
 /** Terrain code of the sea (see palette). */
 const SEA_TERRAIN = 6;
+/** Terrain code of unexplored fog (see palette). */
+const FOG_TERRAIN = 8;
 /** Height of ships and the pirate above the water plane. */
 const WATER = -0.06;
 
@@ -224,6 +226,7 @@ const pirateHull = mergeGeometries([
 ])!;
 const pirateSails = mergeGeometries([box(0.025, 0.3, 0.28, 0.1, 0.4, 0), box(0.022, 0.2, 0.2, -0.08, 0.32, 0)])!;
 const seaRingGeometry = new THREE.RingGeometry(0.9, 0.97, 6, 1, Math.PI / 6).rotateX(-Math.PI / 2);
+const fogPadGeometry = new THREE.CylinderGeometry(0.92, 0.96, 0.06, 6);
 const tokenGeometry = new THREE.CylinderGeometry(0.25, 0.25, 0.05, 24);
 const labelGeometry = new THREE.PlaneGeometry(0.5, 0.5).rotateX(-Math.PI / 2);
 const vertexMarkerGeometry = new THREE.CylinderGeometry(0.14, 0.14, 0.05, 20);
@@ -236,6 +239,8 @@ interface Decoration {
   count: number;
   scale: [number, number];
   squash?: number;
+  y?: number;
+  radius?: [number, number];
   /** Optional cap stacked on each instance (snow on peaks). */
   cap?: { geometry: THREE.BufferGeometry; material: THREE.Material };
 }
@@ -259,6 +264,15 @@ const DECORATIONS: Record<number, Decoration> = {
     count: 7,
     scale: [0.8, 1.4],
     squash: 0.75,
+  },
+  8: {
+    geometry: new THREE.DodecahedronGeometry(0.26, 1).translate(0, 0.14, 0),
+    material: std(0xdcebf5, { roughness: 0.92, emissive: 0x162b3a }),
+    count: 5,
+    scale: [0.85, 1.35],
+    squash: 0.55,
+    y: -0.05,
+    radius: [0.06, 0.46],
   },
 };
 
@@ -498,25 +512,43 @@ export class BoardRenderer {
   }
 
   /**
-   * Land-dependent geometry: one beach per island (the classic island is
-   * one), which way each harbor and each coastal ship faces.
+   * Land-dependent geometry: one beach per island (or per-tile hex banks on
+   * concave / dynamically revealed fog islands), and which way each harbor
+   * and each coastal ship faces.
    */
   private setLand(terrain: number[], islands: number[]) {
-    const isSea = (t: number | undefined) => t === undefined || terrain[t] === SEA_TERRAIN;
-    const seafaring = terrain.some((t) => t === SEA_TERRAIN);
+    const isWater = (t: number | undefined) => t === undefined || terrain[t] === SEA_TERRAIN || terrain[t] === FOG_TERRAIN;
+    const seafaring = terrain.some((t) => t === SEA_TERRAIN || t === FOG_TERRAIN);
     const [top, foot] = seafaring ? [ISLAND_BEACH_TOP, ISLAND_BEACH_FOOT] : [BEACH_TOP, BEACH_FOOT];
-    const ids = [...new Set(islands.filter((i) => i > 0))];
-    const banks = ids.map((id) => {
-      const hull = convexHull(this.tileXZ.filter((_, t) => islands[t] === id));
-      return bankGeometry(offsetPolygon(hull, top), offsetPolygon(hull, foot), 0.24);
-    });
+    const perTileBanks = this.topology?.layout === 'FogIslands';
+    const banks: THREE.BufferGeometry[] = [];
+    if (perTileBanks) {
+      const hexRing = (cx: number, cz: number, r: number): [number, number][] =>
+        Array.from({ length: 6 }, (_, k) => {
+          const a = -Math.PI / 2 + (k * Math.PI) / 3;
+          return [cx + Math.cos(a) * r, cz + Math.sin(a) * r];
+        });
+      terrain.forEach((t, i) => {
+        if (!isWater(i) && t >= 0) {
+          const [cx, cz] = this.tileXZ[i];
+          banks.push(bankGeometry(hexRing(cx, cz, 1.12), hexRing(cx, cz, 1.36), 0.24));
+        }
+      });
+    } else {
+      const ids = [...new Set(islands.filter((i) => i > 0))];
+      for (const id of ids) {
+        const hull = convexHull(this.tileXZ.filter((_, t) => islands[t] === id));
+        banks.push(bankGeometry(offsetPolygon(hull, top), offsetPolygon(hull, foot), 0.24));
+      }
+    }
     this.beach.geometry.dispose();
-    this.beach.geometry = banks.length > 1 ? mergeGeometries(banks) : (banks[0] ?? new THREE.BufferGeometry());
+    this.beach.geometry = banks.length > 1 ? mergeGeometries(banks)! : (banks[0] ?? new THREE.BufferGeometry());
+    if (banks.length > 1) banks.forEach((b) => b.dispose());
 
     // Away from the land tile of an edge, towards the water.
     const outward = (e: number): [number, number] => {
-      const landTile = this.edgeTiles[e].find((t) => !isSea(t));
-      const seaTile = this.edgeTiles[e].find((t) => isSea(t));
+      const landTile = this.edgeTiles[e].find((t) => !isWater(t));
+      const seaTile = this.edgeTiles[e].find((t) => isWater(t));
       const { x, z } = this.edgeXZ[e];
       if (landTile === undefined) return [0, 0];
       const [cx, cz] = this.tileXZ[landTile];
@@ -534,26 +566,33 @@ export class BoardRenderer {
   }
 
   /** Rebuilds tiles, number tokens, decorations and harbors for a new map. */
-  setBoard({ terrain, numbers, harbors, islands }: BoardData, topology: Topology) {
+  setBoard(data: BoardData, topology: Topology) {
     if (topology !== this.topology) this.setTopology(topology);
-    this.setLand(terrain, islands);
     this.camera.position.copy(CAMERA_DIR).multiplyScalar(this.fitDistance || 14);
     this.controls.update();
-    for (const d of this.disposables) d.dispose();
-    this.disposables = [];
-    this.board.clear();
     this.roadPieces.clear();
     this.shipPieces.clear();
     this.buildingPieces.clear();
     this.robberFrom = null;
     this.pirateFrom = this.pirateTo = null;
+    this.updateBoard(data);
+  }
+
+  /** Refreshes board tiles, fog, beaches and tokens in place without resetting the camera or pieces. */
+  updateBoard({ terrain, numbers, harbors, islands }: BoardData) {
+    this.setLand(terrain, islands);
+    for (const d of this.disposables) d.dispose();
+    this.disposables = [];
+    this.board.clear();
 
     // Land tiles are raised hexes; sea tiles inside the map are open water,
-    // marked by a faint ring so the sailing grid reads.
-    const land = [...terrain.keys()].filter((i) => terrain[i] !== SEA_TERRAIN);
+    // marked by a faint ring so the sailing grid reads; fog tiles hold a
+    // soft misty pad topped by clouds.
+    const land = [...terrain.keys()].filter((i) => terrain[i] !== SEA_TERRAIN && terrain[i] !== FOG_TERRAIN);
     const sea = [...terrain.keys()].filter((i) => terrain[i] === SEA_TERRAIN);
+    const fog = [...terrain.keys()].filter((i) => terrain[i] === FOG_TERRAIN);
     const tileMaterial = std(0xffffff);
-    const tiles = this.instanced(hexGeometry, tileMaterial, land.length, true);
+    const tiles = this.instanced(hexGeometry, tileMaterial, Math.max(1, land.length), true);
     tiles.castShadow = false;
     const m = new THREE.Matrix4();
     const color = new THREE.Color();
@@ -573,6 +612,15 @@ export class BoardRenderer {
       this.commit(rings, sea.length);
       this.board.add(rings);
       this.disposables.push(ringMaterial, rings);
+    }
+    if (fog.length) {
+      const fogMaterial = std(TERRAIN_COLORS[FOG_TERRAIN], { transparent: true, opacity: 0.55, roughness: 0.9 });
+      const pads = this.instanced(fogPadGeometry, fogMaterial, fog.length);
+      pads.castShadow = false;
+      fog.forEach((t, i) => pads.setMatrixAt(i, m.makeTranslation(this.tileXZ[t][0], -0.09, this.tileXZ[t][1])));
+      this.commit(pads, fog.length);
+      this.board.add(pads);
+      this.disposables.push(fogMaterial, pads);
     }
 
     this.addDecorations(terrain);
@@ -597,7 +645,7 @@ export class BoardRenderer {
       const [ox, oz] = this.edgeSeaward[e] ?? [0, 0];
       const coastal = ox !== 0 || oz !== 0;
       const at = { x: x + ox * (coastal ? 0.42 : 0), z: z + oz * (coastal ? 0.42 : 0), angle };
-      nextShips.set(e, prev?.owner === owner ? prev : { ...at, owner, born: now });
+      nextShips.set(e, { ...at, owner, born: prev?.owner === owner ? prev.born : now });
     });
     this.shipPieces = nextShips;
 
@@ -931,13 +979,15 @@ export class BoardRenderer {
         const rand = prng(t * 7919 + Number(code) * 104729);
         const [cx, cz] = this.tileXZ[t];
         const offset = rand() * Math.PI * 2;
+        const [rLo, rHi] = deco.radius ?? [0.42, 0.64];
+        const baseY = deco.y ?? TOP;
         for (let k = 0; k < deco.count; k++) {
           const angle = offset + (k / deco.count) * Math.PI * 2 + (rand() - 0.5) * 0.6;
-          const r = 0.42 + rand() * 0.22;
+          const r = k === 0 && deco.radius ? rLo * 0.5 : rLo + rand() * (rHi - rLo);
           const sc = deco.scale[0] + rand() * (deco.scale[1] - deco.scale[0]);
           q.setFromAxisAngle(up, rand() * Math.PI * 2);
           s.set(sc, sc * (deco.squash ?? 1), sc);
-          m.compose(p.set(cx + Math.cos(angle) * r, TOP, cz + Math.sin(angle) * r), q, s);
+          m.compose(p.set(cx + Math.cos(angle) * r, baseY, cz + Math.sin(angle) * r), q, s);
           mesh.setMatrixAt(n, m);
           cap?.setMatrixAt(n, m);
           n++;
