@@ -1,7 +1,7 @@
 import { createSignal, For, Show } from 'solid-js';
 import { EMBEDDED } from '../embed';
 import type { BotKind } from '../engine';
-import type { BotLevel, Scenario } from '../generated/proto';
+import type { BotLevel, HouseRules, Scenario } from '../generated/proto';
 import type { LocalOptions } from '../game/source';
 import { account, accountsEnabled } from '../net/account';
 import { saveName, savedName } from '../net/connection';
@@ -17,10 +17,18 @@ export interface CreateRoom {
   name: string;
   ranked: boolean;
   scenario: Scenario;
+  rules: HouseRules;
 }
 
 /** Seats each scenario can be played with. */
-const MAX_SEATS: Record<Scenario, number> = { Classic: 6, Archipelago: 4, FogIslands: 4 };
+const MAX_SEATS: Record<Scenario, number> = { Classic: 6, Archipelago: 6, FogIslands: 6, Citadels: 6 };
+
+const SCENARIO_DESC: Record<Scenario, string> = {
+  Classic: '在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，支持传统特殊建造或双人搭档回合。',
+  Archipelago: '航海 · 群岛：从西边的主岛出发，造船驶过海峡，首次在东边外岛建村庄奖励 2 分；金矿任选资源，海盗封锁航线。先到 12 分获胜，支持 2–6 人。',
+  FogIslands: '航海 · 迷雾：从月牙主岛扬帆驶入迷雾，航线触及未知格即翻开地形并获发现奖励，首次登陆迷雾新大陆奖励 2 分。先到 12 分获胜，支持 2–6 人。',
+  Citadels: '城邦与铁卫：第二轮直接起城，城市产出造纸/织布/铸币升级三系科技与 4 分大都会；招募并激活实体铁卫抵御黑帆舰队入侵。先到 13 分获胜，支持 2–6 人。',
+};
 
 export function Lobby(props: {
   ready: boolean;
@@ -49,12 +57,23 @@ export function Lobby(props: {
   const [name, setName] = createSignal(savedName());
   const [code, setCode] = createSignal('');
   const [ranked, setRanked] = createSignal(true);
+  const [customVp, setCustomVp] = createSignal<number | null>(null);
+  const [friendlyRobber, setFriendlyRobber] = createSignal(false);
+  const [pairedTurns, setPairedTurns] = createSignal(false);
+  const [turnTimerSecs, setTurnTimerSecs] = createSignal(0);
+
+  const rules = (): HouseRules => ({
+    victoryPoints: customVp(),
+    friendlyRobber: friendlyRobber(),
+    pairedTurns: pairedTurns(),
+    turnTimerSecs: turnTimerSecs(),
+  });
 
   const startLocal = (spectate: boolean) => {
     const n = players();
     const s = seat();
     const humanSeat = spectate ? null : s === 'random' ? Math.floor(Math.random() * n) : Math.min(s, n - 1);
-    props.onStartLocal({ players: n, humanSeat, bot: bot(), seed: props.seed, fast: fast(), scenario: scenario() });
+    props.onStartLocal({ players: n, humanSeat, bot: bot(), seed: props.seed, fast: fast(), scenario: scenario(), rules: rules() });
   };
 
   const createRoom = () => {
@@ -62,7 +81,7 @@ export function Lobby(props: {
     const n = signedIn ?? (name().trim() || '玩家');
     if (!signedIn) saveName(n);
     const level: Record<string, BotLevel> = { weighted: 'Easy', greedy: 'Normal', mcts: 'Hard' };
-    props.onCreateRoom({ players: players(), bots: level[bot()] ?? 'Normal', name: n, ranked: ranked(), scenario: scenario() });
+    props.onCreateRoom({ players: players(), bots: level[bot()] ?? 'Normal', name: n, ranked: ranked(), scenario: scenario(), rules: rules() });
   };
 
   // Accept a bare code or a pasted invite link.
@@ -72,21 +91,7 @@ export function Lobby(props: {
     <div class="lobby-wrap">
       <div class="panel lobby">
         <h1>Isle Settlers</h1>
-        <p class="muted">
-          <Show
-            when={scenario() === 'Archipelago'}
-            fallback={
-              <Show
-                when={scenario() === 'FogIslands'}
-                fallback="在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，每回合结束后其他人可以特殊建造。"
-              >
-                航海 · 迷雾：从西侧月牙主岛扬帆驶入迷雾，船或道路触及未知格即翻开地形——发现产资源陆地立即奖励 1 张资源（金矿任选 1 张），首次在迷雾新大陆建村庄奖励 2 分。先到 12 分者获胜，2–4 人。
-              </Show>
-            }
-          >
-            航海 · 群岛：从西边的主岛出发，造船驶过海峡，第一次在东边的小岛上建村庄奖励 2 分；金矿产出任选资源，海盗会封锁航线。先到 12 分者获胜，2–4 人。
-          </Show>
-        </p>
+        <p class="muted">{SCENARIO_DESC[scenario()]}</p>
 
         <Show when={!EMBEDDED}>
           <div class="tabs">
@@ -125,9 +130,16 @@ export function Lobby(props: {
               <button
                 classList={{ on: scenario() === 'FogIslands' }}
                 onClick={() => setScenario('FogIslands')}
-                title="未知海域探索翻牌，发现新陆地得资源与登岛分，2–4 人"
+                title="未知海域探索翻牌，发现新陆地得资源与登岛分，2–6 人"
               >
                 航海 · 迷雾
+              </button>
+              <button
+                classList={{ on: scenario() === 'Citadels' }}
+                onClick={() => setScenario('Citadels')}
+                title="商品产出、三系城邦升级与大都会、实体铁卫抵御黑帆舰队，2–6 人"
+              >
+                城邦与铁卫
               </button>
             </div>
           </div>
@@ -162,6 +174,76 @@ export function Lobby(props: {
               </button>
             </div>
           </div>
+
+          <details class="house-rules">
+            <summary>自定义房规与计时</summary>
+            <div class="rules-box">
+              <div class="field">
+                <span>胜利分</span>
+                <div class="seg small">
+                  <button classList={{ on: customVp() === null }} onClick={() => setCustomVp(null)}>
+                    默认
+                  </button>
+                  <For each={[8, 10, 12, 13, 15]}>
+                    {(vp) => (
+                      <button classList={{ on: customVp() === vp }} onClick={() => setCustomVp(vp)}>
+                        {vp} 分
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </div>
+              <div class="field">
+                <span>友好强盗</span>
+                <div class="seg small">
+                  <button classList={{ on: !friendlyRobber() }} onClick={() => setFriendlyRobber(false)}>
+                    标准
+                  </button>
+                  <button
+                    classList={{ on: friendlyRobber() }}
+                    onClick={() => setFriendlyRobber(true)}
+                    title="只要有其他选择，强盗与海盗不能移入公开分 ≤ 2 分玩家的地块"
+                  >
+                    开启（保护 ≤2 分）
+                  </button>
+                </div>
+              </div>
+              <Show when={players() > 4}>
+                <div class="field">
+                  <span>5–6人规则</span>
+                  <div class="seg small">
+                    <button classList={{ on: !pairedTurns() }} onClick={() => setPairedTurns(false)}>
+                      传统特殊建造
+                    </button>
+                    <button
+                      classList={{ on: pairedTurns() }}
+                      onClick={() => setPairedTurns(true)}
+                      title="6 版规则：仅隔 3 座位的搭档进行副回合，可银行贸易与打卡"
+                    >
+                      双人搭档回合
+                    </button>
+                  </div>
+                </div>
+              </Show>
+              <Show when={tab() === 'online'}>
+                <div class="field">
+                  <span>每步限时</span>
+                  <div class="seg small">
+                    <button classList={{ on: turnTimerSecs() === 0 }} onClick={() => setTurnTimerSecs(0)}>
+                      不限时
+                    </button>
+                    <For each={[30, 60, 90]}>
+                      {(secs) => (
+                        <button classList={{ on: turnTimerSecs() === secs }} onClick={() => setTurnTimerSecs(secs)}>
+                          {secs} 秒
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </div>
+              </Show>
+            </div>
+          </details>
         </Show>
 
         <Show when={tab() === 'local'}>

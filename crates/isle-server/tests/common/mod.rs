@@ -112,6 +112,7 @@ impl Client {
             name: name.into(),
             ranked,
             scenario: Default::default(),
+            rules: Default::default(),
             session: session.map(str::to_owned),
         })
         .await;

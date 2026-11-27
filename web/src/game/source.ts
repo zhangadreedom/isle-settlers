@@ -4,7 +4,19 @@
 import { createSignal, type Accessor } from 'solid-js';
 import { EngineError, WorkerMatch, type BotKind, type Replay } from '../engine';
 import type { MatchState } from './worker';
-import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, ReplayPlayer, ReplayRecord, Scenario, Snapshot } from '../generated/proto';
+import type {
+  Action,
+  BoardInfo,
+  ChatLine,
+  Event,
+  HouseRules,
+  LegalActions,
+  PlayerView,
+  ReplayPlayer,
+  ReplayRecord,
+  Scenario,
+  Snapshot,
+} from '../generated/proto';
 import type { Connection } from '../net/connection';
 
 export interface SeatMeta {
@@ -24,6 +36,8 @@ export interface SourceState {
   resync: boolean;
   /** Recent events to rebuild the log from, on resync. */
   log?: Event[];
+  /** Online turn timer: milliseconds left before autopilot steps in. */
+  turnRemainingMs?: number | null;
 }
 
 export interface SourceHandlers {
@@ -77,6 +91,7 @@ export interface GameSource {
 export interface LocalOptions {
   players: number;
   scenario: Scenario;
+  rules: HouseRules;
   /** Human seat, or null to watch bots play. */
   humanSeat: number | null;
   bot: BotKind;
@@ -91,7 +106,7 @@ export interface LocalOptions {
  */
 export async function createLocalSource(opts: LocalOptions, onFinished?: (record: ReplayRecord) => void): Promise<GameSource> {
   const worker = new WorkerMatch();
-  const first = await worker.create(opts.players, opts.seed, opts.humanSeat, opts.bot, opts.scenario);
+  const first = await worker.create(opts.players, opts.seed, opts.humanSeat, opts.bot, opts.scenario, opts.rules);
   const [thinking, setThinking] = createSignal(-1);
   let handlers: SourceHandlers | null = null;
   let current: MatchState = first;
@@ -231,14 +246,14 @@ export function createOnlineSource(conn: Connection, first: Snapshot): GameSourc
       const resync = (s: Snapshot) => {
         inFlight = false;
         setView(s.view);
-        h.state({ view: s.view, legal: s.legal, events: [], resync: true, log: s.log });
+        h.state({ view: s.view, legal: s.legal, events: [], resync: true, log: s.log, turnRemainingMs: s.turnRemainingMs });
       };
       unsubscribe.push(
         conn.onSnapshot(resync),
         conn.onUpdate((u) => {
           inFlight = false;
           setView(u.view);
-          h.state({ view: u.view, legal: u.legal, events: u.events, resync: false });
+          h.state({ view: u.view, legal: u.legal, events: u.events, resync: false, turnRemainingMs: u.turnRemainingMs });
         }),
         conn.onError((code) => {
           inFlight = false;

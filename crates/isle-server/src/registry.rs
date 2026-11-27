@@ -83,7 +83,7 @@ impl Registry {
         out: Outbox,
     ) -> Result<(RoomSender, Attached), String> {
         let players = options.players;
-        if !(2..=options.scenario.max_players()).contains(&players) {
+        if !(2..=options.scenario.max_players()).contains(&players) || !options.rules.is_valid() {
             return Err("BadMessage".into());
         }
         let id = {

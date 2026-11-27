@@ -1,7 +1,8 @@
 //! Game state and read-only queries.
 
-use crate::board::{Board, FOG_HOME_NUMBER_POOL, FOG_NUMBER_POOL, FOG_TERRAIN_POOL};
-use crate::resources::{ResourceSet, Terrain};
+use crate::bitset::BitSet;
+use crate::board::Board;
+use crate::resources::{CityTrack, CommoditySet, ResourceSet, Terrain};
 use crate::rng::Rng;
 use crate::topology::*;
 
@@ -9,15 +10,19 @@ use crate::topology::*;
 pub const MAX_PLAYERS: usize = 6;
 /// Size of the largest development deck.
 pub const MAX_DEV_DECK: usize = 34;
-/// Unexplored tiles on a fog map.
-pub const MAX_FOG_TILES: usize = 13;
-/// Number tokens in the hidden fog stack.
-pub const MAX_FOG_NUMBERS: usize = 9;
+/// Unexplored tiles on the largest fog map.
+pub const MAX_FOG_TILES: usize = 18;
+/// Number tokens in the largest hidden fog stack.
+pub const MAX_FOG_NUMBERS: usize = 13;
 pub const MAX_ROADS: u8 = 15;
 /// Ships per player on seafaring maps.
 pub const MAX_SHIPS: u8 = 15;
 pub const MAX_SETTLEMENTS: u8 = 5;
 pub const MAX_CITIES: u8 = 4;
+/// Knights per rank (Basic, Strong, Mighty) per player in Citadels mode.
+pub const MAX_KNIGHTS_PER_LEVEL: u8 = 2;
+/// Steps before the barbarian fleet lands in Citadels mode.
+pub const BARBARIAN_STEPS: u8 = 7;
 /// Players holding more cards than this discard half when a 7 is rolled.
 pub const DISCARD_LIMIT: u32 = 7;
 pub const LONGEST_ROAD_MIN: u8 = 5;
@@ -47,12 +52,12 @@ impl DevCard {
 
     /// Copies of each card in the deck of a board.
     pub const fn count_in_deck(self, layout: BoardLayout) -> u8 {
-        match (self, layout) {
-            (DevCard::Knight, BoardLayout::Extended) => 20,
-            (DevCard::Knight, _) => 14,
+        match (self, layout.is_extended()) {
+            (DevCard::Knight, true) => 20,
+            (DevCard::Knight, false) => 14,
             (DevCard::VictoryPoint, _) => 5,
-            (_, BoardLayout::Extended) => 3,
-            (_, _) => 2,
+            (_, true) => 3,
+            (_, false) => 2,
         }
     }
 
@@ -69,55 +74,49 @@ pub type DevCounts = [u8; 5];
 impl BoardLayout {
     /// Cards of each resource in the bank at the start.
     pub const fn bank_per_resource(self) -> u8 {
-        match self {
-            BoardLayout::Extended => 24,
-            _ => 19,
-        }
+        if self.is_extended() { 24 } else { 19 }
+    }
+
+    /// Cards of each commodity in the bank at the start (Citadels mode).
+    pub const fn bank_per_commodity(self) -> u8 {
+        if self.is_extended() { 18 } else { 12 }
     }
 
     /// Development cards in the deck.
     pub const fn dev_deck_size(self) -> usize {
-        match self {
-            BoardLayout::Extended => 34,
-            _ => 25,
-        }
+        if self.is_extended() { 34 } else { 25 }
     }
 
-    /// After each turn, the other players may build in turn order.
+    /// After each turn, out-of-turn building (special build or paired turn) occurs.
     pub const fn has_special_build(self) -> bool {
-        matches!(self, BoardLayout::Extended)
+        self.is_extended()
     }
 
     /// Seats the board is designed for.
     pub const fn max_players(self) -> u8 {
-        match self {
-            BoardLayout::Extended => 6,
-            _ => 4,
-        }
+        if self.is_extended() { 6 } else { 4 }
     }
 
     /// Points for a player's first settlement on each island other than
     /// the ones they started on.
     pub const fn island_bonus(self) -> u8 {
-        match self {
-            BoardLayout::Archipelago | BoardLayout::FogIslands => 2,
-            _ => 0,
-        }
+        if self.has_ships() { 2 } else { 0 }
     }
 }
 
-/// What is played: the classic island (sized by the number of players) or
-/// a seafaring map.
+/// What is played: the classic island, a seafaring map, or Citadels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Scenario {
     #[default]
     Classic,
-    /// Seafaring: the archipelago, 2–4 players.
+    /// Seafaring: the archipelago, 2–6 players.
     Archipelago,
-    /// Seafaring: unexplored fog tiles revealed by ships, 2–4 players.
+    /// Seafaring: unexplored fog tiles revealed by ships, 2–6 players.
     FogIslands,
+    /// Citadels (Cities & Knights): commodities, city tracks, knights and barbarian raids, 2–6 players.
+    Citadels,
 }
 
 impl Scenario {
@@ -125,15 +124,18 @@ impl Scenario {
         match self {
             Scenario::Classic => 10,
             Scenario::Archipelago | Scenario::FogIslands => 12,
+            Scenario::Citadels => 13,
         }
     }
 
     /// Seats this scenario can be played with.
     pub const fn max_players(self) -> u8 {
-        match self {
-            Scenario::Classic => MAX_PLAYERS as u8,
-            Scenario::Archipelago | Scenario::FogIslands => 4,
-        }
+        MAX_PLAYERS as u8
+    }
+
+    #[inline]
+    pub const fn is_citadels(self) -> bool {
+        matches!(self, Scenario::Citadels)
     }
 }
 
@@ -149,6 +151,12 @@ pub struct GameConfig {
     /// Absent in records from before seafaring: classic.
     #[cfg_attr(feature = "serde", serde(default))]
     pub scenario: Scenario,
+    /// Friendly robber: do not move the robber/pirate onto players with <= 2 public VP while avoidable.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub friendly_robber: bool,
+    /// 5–6 players: use Paired Players turn instead of all-seat Special Build.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paired_turns: bool,
 }
 
 impl GameConfig {
@@ -170,13 +178,16 @@ impl GameConfig {
         }
     }
 
-    /// Board used by this configuration: the classic island grows to the
-    /// extended one for 5–6 seats.
+    /// Board used by this configuration: islands grow to their extended
+    /// layouts for 5–6 seats.
     #[inline]
     pub fn layout(&self) -> BoardLayout {
+        let ext = self.num_players > 4;
         match self.scenario {
-            Scenario::Classic => BoardLayout::for_players(self.num_players),
+            Scenario::Classic | Scenario::Citadels => BoardLayout::for_players(self.num_players),
+            Scenario::Archipelago if ext => BoardLayout::ArchipelagoExtended,
             Scenario::Archipelago => BoardLayout::Archipelago,
+            Scenario::FogIslands if ext => BoardLayout::FogIslandsExtended,
             Scenario::FogIslands => BoardLayout::FogIslands,
         }
     }
@@ -189,6 +200,8 @@ impl Default for GameConfig {
             victory_points: 10,
             balanced_board: true,
             scenario: Scenario::Classic,
+            friendly_robber: false,
+            paired_turns: false,
         }
     }
 }
@@ -237,6 +250,11 @@ pub enum Phase {
     SpecialBuild {
         builder: u8,
     },
+    /// 5–6 player Paired Players variant: one partner seat may build, trade
+    /// with the bank/harbors and play a development card, then end with `EndTurn`.
+    PairedTurn {
+        partner: u8,
+    },
     GameOver,
 }
 
@@ -264,6 +282,8 @@ pub struct TradeOffer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PlayerState {
     pub hand: ResourceSet,
+    /// Citadels: urban commodities (Paper, Cloth, Coin).
+    pub commodities: CommoditySet,
     /// Development cards that may be played this turn, plus victory point cards.
     pub dev_cards: DevCounts,
     /// Development cards bought this turn (not playable until the next turn).
@@ -274,6 +294,12 @@ pub struct PlayerState {
     pub ships_left: u8,
     pub settlements_left: u8,
     pub cities_left: u8,
+    /// Citadels: knights remaining by rank (`[Basic, Strong, Mighty]`).
+    pub knights_left: [u8; 3],
+    /// Citadels: urban improvement level `0..=5` per `CityTrack`.
+    pub city_progress: [u8; 3],
+    /// Citadels: public victory points earned as sole top defender against barbarians.
+    pub defender_points: u8,
     /// Islands this player started on (bit `i` = island `i`).
     pub home_islands: u8,
     /// Islands that earned this player the settling bonus.
@@ -288,6 +314,7 @@ impl PlayerState {
     const fn new() -> Self {
         PlayerState {
             hand: ResourceSet::EMPTY,
+            commodities: CommoditySet::EMPTY,
             dev_cards: [0; 5],
             new_dev_cards: [0; 5],
             played_dev_cards: [0; 5],
@@ -295,11 +322,19 @@ impl PlayerState {
             ships_left: MAX_SHIPS,
             settlements_left: MAX_SETTLEMENTS,
             cities_left: MAX_CITIES,
+            knights_left: [MAX_KNIGHTS_PER_LEVEL; 3],
+            city_progress: [0; 3],
+            defender_points: 0,
             home_islands: 0,
             islands: 0,
             longest_road: 0,
             harbors: 0,
         }
+    }
+
+    #[inline]
+    pub fn total_cards(&self) -> u32 {
+        self.hand.total() + self.commodities.total()
     }
 
     #[inline]
@@ -328,12 +363,14 @@ pub struct GameState {
     pub config: GameConfig,
     pub board: Board,
     pub players: [PlayerState; MAX_PLAYERS],
-    pub settlements: [u128; MAX_PLAYERS],
-    pub cities: [u128; MAX_PLAYERS],
-    pub roads: [u128; MAX_PLAYERS],
+    pub settlements: [BitSet; MAX_PLAYERS],
+    pub cities: [BitSet; MAX_PLAYERS],
+    pub roads: [BitSet; MAX_PLAYERS],
     /// Seafaring: ships, on edges along the sea.
-    pub ships: [u128; MAX_PLAYERS],
+    pub ships: [BitSet; MAX_PLAYERS],
     pub bank: ResourceSet,
+    /// Citadels: commodity supply in the bank.
+    pub commodity_bank: CommoditySet,
     /// Shuffled deck; cards are drawn from the end of `dev_deck[..dev_deck_len]`.
     pub dev_deck: [DevCard; MAX_DEV_DECK],
     pub dev_deck_len: u8,
@@ -349,6 +386,8 @@ pub struct GameState {
     pub phase: Phase,
     /// Phase resumed once every pending gold choice is made.
     pub after_gold: Phase,
+    /// Partner seat when inside a Paired Players secondary turn (including interrupts).
+    pub in_paired_turn: Option<u8>,
     pub current: u8,
     /// Index into the snake order of initial placements.
     pub setup_step: u8,
@@ -357,16 +396,32 @@ pub struct GameState {
     /// Dice rolled this turn, `None` before rolling.
     pub dice: Option<(u8, u8)>,
     pub dev_card_played: bool,
-    /// The current player moved a ship this turn.
+    /// The acting player moved a ship this turn.
     pub ship_moved: bool,
-    /// Ships the current player built this turn (they may not move yet).
-    pub new_ships: u128,
+    /// Ships the acting player built this turn (they may not move yet).
+    pub new_ships: BitSet,
     pub pending_discard: [u8; MAX_PLAYERS],
-    /// Gold resources each player still has to pick.
+    /// Gold (or Aqueduct) resources each player still has to pick.
     pub pending_gold: [u8; MAX_PLAYERS],
     pub trade: Option<TradeOffer>,
     pub longest_road_owner: Option<u8>,
     pub largest_army_owner: Option<u8>,
+    /// Citadels: owner seat per vertex (`NONE` if no knight).
+    pub knight_owner: [u8; MAX_VERTICES],
+    /// Citadels: rank (`1..=3`) of the knight at each vertex (`0` if none).
+    pub knight_level: [u8; MAX_VERTICES],
+    /// Citadels: vertices holding an active knight.
+    pub knight_active: BitSet,
+    /// Citadels: knights activated this turn (defend immediately, may act next turn).
+    pub knight_fresh: BitSet,
+    /// Citadels: knights already promoted this turn.
+    pub knight_promoted: BitSet,
+    /// Citadels: city vertex crowned as the Metropolis for each `CityTrack` (`NONE` if unclaimed).
+    pub metropolises: [u8; 3],
+    /// Citadels: owner seat of each `CityTrack`'s Metropolis.
+    pub metropolis_owners: [Option<u8>; 3],
+    /// Citadels: barbarian fleet progress (`0..BARBARIAN_STEPS`).
+    pub barbarian_pos: u8,
     pub winner: Option<u8>,
     pub rng: Rng,
 }
@@ -388,7 +443,7 @@ impl GameState {
         if !(2..=config.scenario.max_players()).contains(&config.num_players) {
             return Err(ConfigError::PlayerCount);
         }
-        if config.victory_points < 3 {
+        if config.victory_points < 3 || config.victory_points > 20 {
             return Err(ConfigError::VictoryPoints);
         }
         let layout = config.layout();
@@ -412,22 +467,30 @@ impl GameState {
         let mut fog_numbers = [0u8; MAX_FOG_NUMBERS];
         let mut fog_numbers_len = 0u8;
         if layout.has_fog() {
-            fog_terrain.copy_from_slice(&FOG_TERRAIN_POOL);
-            fog_terrain_len = MAX_FOG_TILES as u8;
-            rng.shuffle(&mut fog_terrain);
-            fog_numbers.copy_from_slice(&FOG_NUMBER_POOL);
-            fog_numbers_len = MAX_FOG_NUMBERS as u8;
-            rng.shuffle(&mut fog_numbers);
+            let ft = layout.fog_terrain_pool();
+            fog_terrain[..ft.len()].copy_from_slice(ft);
+            fog_terrain_len = ft.len() as u8;
+            rng.shuffle(&mut fog_terrain[..ft.len()]);
+            let fn_src = layout.fog_number_pool();
+            fog_numbers[..fn_src.len()].copy_from_slice(fn_src);
+            fog_numbers_len = fn_src.len() as u8;
+            rng.shuffle(&mut fog_numbers[..fn_src.len()]);
         }
+        let commodity_bank = if config.scenario.is_citadels() {
+            CommoditySet([layout.bank_per_commodity(); 3])
+        } else {
+            CommoditySet::EMPTY
+        };
         Ok(GameState {
             config,
             board,
             players: [PlayerState::new(); MAX_PLAYERS],
-            settlements: [0; MAX_PLAYERS],
-            cities: [0; MAX_PLAYERS],
-            roads: [0; MAX_PLAYERS],
-            ships: [0; MAX_PLAYERS],
+            settlements: [BitSet::EMPTY; MAX_PLAYERS],
+            cities: [BitSet::EMPTY; MAX_PLAYERS],
+            roads: [BitSet::EMPTY; MAX_PLAYERS],
+            ships: [BitSet::EMPTY; MAX_PLAYERS],
             bank: ResourceSet([layout.bank_per_resource(); 5]),
+            commodity_bank,
             dev_deck,
             dev_deck_len: deck_len as u8,
             fog_terrain,
@@ -438,18 +501,27 @@ impl GameState {
             pirate: board.pirate_start,
             phase: Phase::SetupSettlement,
             after_gold: Phase::Main,
+            in_paired_turn: None,
             current: 0,
             setup_step: 0,
             turn: 0,
             dice: None,
             dev_card_played: false,
             ship_moved: false,
-            new_ships: 0,
+            new_ships: BitSet::EMPTY,
             pending_discard: [0; MAX_PLAYERS],
             pending_gold: [0; MAX_PLAYERS],
             trade: None,
             longest_road_owner: None,
             largest_army_owner: None,
+            knight_owner: [NONE; MAX_VERTICES],
+            knight_level: [0; MAX_VERTICES],
+            knight_active: BitSet::EMPTY,
+            knight_fresh: BitSet::EMPTY,
+            knight_promoted: BitSet::EMPTY,
+            metropolises: [NONE; 3],
+            metropolis_owners: [None; 3],
+            barbarian_pos: 0,
             winner: None,
             rng,
         })
@@ -467,12 +539,16 @@ impl GameState {
     }
 
     /// The seat whose decisions drive the game outside discards and trade
-    /// responses: the builder during a special building phase, otherwise
-    /// the player whose turn it is.
+    /// responses: the builder during a special building phase, the partner
+    /// during a paired turn (including its interrupts), otherwise `current`.
     #[inline]
     pub fn active_player(&self) -> u8 {
+        if let Some(partner) = self.in_paired_turn {
+            return partner;
+        }
         match self.phase {
             Phase::SpecialBuild { builder } => builder,
+            Phase::PairedTurn { partner } => partner,
             _ => self.current,
         }
     }
@@ -511,39 +587,91 @@ impl GameState {
     }
 
     #[inline]
-    pub fn buildings_of(&self, p: u8) -> u128 {
+    pub fn buildings_of(&self, p: u8) -> BitSet {
         self.settlements[p as usize] | self.cities[p as usize]
     }
 
     #[inline]
-    pub fn occupied_vertices(&self) -> u128 {
-        (0..self.num_players()).fold(0, |m, p| m | self.settlements[p] | self.cities[p])
+    pub fn occupied_vertices(&self) -> BitSet {
+        (0..self.num_players()).fold(BitSet::EMPTY, |m, p| m | self.settlements[p] | self.cities[p])
+    }
+
+    /// All vertices holding a knight of any seat.
+    pub fn all_knights(&self) -> BitSet {
+        let mut m = BitSet::EMPTY;
+        for v in 0..self.topo().num_vertices {
+            if self.knight_owner[v] != NONE {
+                m.insert(v as u8);
+            }
+        }
+        m
+    }
+
+    /// Vertices holding a knight of seat `p`.
+    pub fn knights_of(&self, p: u8) -> BitSet {
+        let mut m = BitSet::EMPTY;
+        for v in 0..self.topo().num_vertices {
+            if self.knight_owner[v] == p {
+                m.insert(v as u8);
+            }
+        }
+        m
+    }
+
+    /// Vertices holding an opponent's knight.
+    #[inline]
+    pub fn opponent_knights(&self, p: u8) -> BitSet {
+        self.all_knights() & !self.knights_of(p)
+    }
+
+    /// Whether city vertex `v` holds a Metropolis.
+    #[inline]
+    pub fn is_metropolis(&self, v: u8) -> bool {
+        self.metropolises.contains(&v)
+    }
+
+    /// Cities of `p` that are not crowned as a Metropolis.
+    pub fn non_metropolis_cities(&self, p: u8) -> BitSet {
+        let mut c = self.cities[p as usize];
+        for &mv in &self.metropolises {
+            if mv != NONE {
+                c.remove(mv);
+            }
+        }
+        c
+    }
+
+    /// Active knight strength contributed by seat `p`.
+    pub fn active_knight_strength(&self, p: u8) -> u8 {
+        vertices_in(self.knights_of(p) & self.knight_active)
+            .map(|v| self.knight_level[v as usize])
+            .sum()
     }
 
     /// Edges holding a road or a ship.
     #[inline]
-    pub fn occupied_edges(&self) -> u128 {
-        (0..self.num_players()).fold(0, |m, p| m | self.roads[p] | self.ships[p])
+    pub fn occupied_edges(&self) -> BitSet {
+        (0..self.num_players()).fold(BitSet::EMPTY, |m, p| m | self.roads[p] | self.ships[p])
     }
 
     pub fn vertex_owner(&self, v: u8) -> Option<u8> {
-        let bit = 1u128 << v;
-        (0..self.num_players() as u8).find(|&p| self.buildings_of(p) & bit != 0)
+        let bit = BitSet::bit(v);
+        (0..self.num_players() as u8).find(|&p| !(self.buildings_of(p) & bit).is_empty())
     }
 
     /// Owner of the road on `e`.
     pub fn edge_owner(&self, e: u8) -> Option<u8> {
-        let bit = 1u128 << e;
-        (0..self.num_players() as u8).find(|&p| self.roads[p as usize] & bit != 0)
+        let bit = BitSet::bit(e);
+        (0..self.num_players() as u8).find(|&p| !(self.roads[p as usize] & bit).is_empty())
     }
 
     /// Owner of the ship on `e`.
     pub fn ship_owner(&self, e: u8) -> Option<u8> {
-        let bit = 1u128 << e;
-        (0..self.num_players() as u8).find(|&p| self.ships[p as usize] & bit != 0)
+        let bit = BitSet::bit(e);
+        (0..self.num_players() as u8).find(|&p| !(self.ships[p as usize] & bit).is_empty())
     }
 
-    /// Points visible to everyone (buildings and special cards).
+    /// Points visible to everyone (buildings, metropolises, defender honours and special cards).
     pub fn public_victory_points(&self, p: u8) -> u8 {
         let i = p as usize;
         let mut vp = self.settlements[i].count_ones() as u8 + 2 * self.cities[i].count_ones() as u8;
@@ -553,6 +681,12 @@ impl GameState {
         if self.largest_army_owner == Some(p) {
             vp += 2;
         }
+        let metros = self
+            .metropolis_owners
+            .iter()
+            .filter(|&&o| o == Some(p))
+            .count() as u8;
+        vp += 2 * metros + self.players[i].defender_points;
         vp + self.board.layout.island_bonus() * self.players[i].islands.count_ones() as u8
     }
 
@@ -574,13 +708,42 @@ impl GameState {
         }
     }
 
+    /// Best maritime ratio for giving a commodity in Citadels mode: 2 with
+    /// Trade Lv3 (Merchant Guild), otherwise 4.
+    #[inline]
+    pub fn commodity_trade_ratio(&self, p: u8) -> u8 {
+        if self.players[p as usize].city_progress[CityTrack::Trade.index()] >= 3 {
+            2
+        } else {
+            4
+        }
+    }
+
+    /// Whether advancing `track` by one step claims or steals its Metropolis
+    /// (requiring `p` to pick one of their non-metropolis cities).
+    pub fn upgrade_claims_metropolis(&self, p: u8, track: CityTrack) -> bool {
+        let idx = track.index();
+        let next = self.players[p as usize].city_progress[idx] + 1;
+        if self.non_metropolis_cities(p).is_empty() {
+            return false;
+        }
+        match next {
+            4 => self.metropolis_owners[idx].is_none(),
+            5 => match self.metropolis_owners[idx] {
+                None => true,
+                Some(owner) => owner != p && self.players[owner as usize].city_progress[idx] < 5,
+            },
+            _ => false,
+        }
+    }
+
     /// Vertices where `p` may build a settlement on land, keeping the
-    /// distance rule; with `require_road`, at the end of their own road or
-    /// ship. (Initial placements use [`setup_spots`](Self::setup_spots).)
-    pub fn settlement_spots(&self, p: u8, require_road: bool) -> u128 {
+    /// distance rule and avoiding knights; with `require_road`, at the end of
+    /// their own road or ship. (Initial placements use [`setup_spots`](Self::setup_spots).)
+    pub fn settlement_spots(&self, p: u8, require_road: bool) -> BitSet {
         let topo = self.topo();
         let occ = self.occupied_vertices();
-        let free = self.board.land_vertices & !(occ | topo.neighbors_of(occ));
+        let free = self.board.land_vertices & !(occ | topo.neighbors_of(occ) | self.all_knights());
         if require_road {
             free & topo.endpoints_of(self.roads[p as usize] | self.ships[p as usize])
         } else {
@@ -588,20 +751,122 @@ impl GameState {
         }
     }
 
+    /// Vertices where `p` may recruit a new level-1 knight: empty land
+    /// intersections touching `p`'s roads or ships.
+    pub fn knight_recruit_spots(&self, p: u8) -> BitSet {
+        let topo = self.topo();
+        let taken = self.occupied_vertices() | self.all_knights();
+        self.board.land_vertices
+            & !taken
+            & topo.endpoints_of(self.roads[p as usize] | self.ships[p as usize])
+    }
+
+    /// Vertices reachable along `p`'s connected route from `from` where an
+    /// active knight at `from` may move (empty land vertices, or vertices
+    /// holding a strictly weaker opponent knight).
+    pub fn knight_move_targets(&self, p: u8, from: u8) -> BitSet {
+        let my_lvl = self.knight_level[from as usize];
+        if my_lvl == 0 {
+            return BitSet::EMPTY;
+        }
+        let topo = self.topo();
+        let own_b = self.buildings_of(p);
+        let opp_b = self.occupied_vertices() & !own_b;
+        let opp_k = self.opponent_knights(p);
+        let blocked = opp_b | opp_k;
+        let routes = self.roads[p as usize] | self.ships[p as usize];
+        let mut seen = BitSet::bit(from);
+        let mut queue = [0u8; MAX_VERTICES];
+        let mut head = 0usize;
+        let mut tail = 0usize;
+        queue[tail] = from;
+        tail += 1;
+        let mut targets = BitSet::EMPTY;
+        while head < tail {
+            let v = queue[head];
+            head += 1;
+            for k in 0..3 {
+                let e = topo.vertex_edges[v as usize][k];
+                if e == NONE || !routes.contains(e) {
+                    continue;
+                }
+                let u = topo.vertex_vertices[v as usize][k];
+                if seen.contains(u) {
+                    continue;
+                }
+                seen.insert(u);
+                if self.board.land_vertices.contains(u) {
+                    if !self.occupied_vertices().contains(u) && self.knight_owner[u as usize] == NONE
+                    {
+                        targets.insert(u);
+                    } else if opp_k.contains(u) && self.knight_level[u as usize] < my_lvl {
+                        targets.insert(u);
+                    }
+                }
+                if !blocked.contains(u) {
+                    queue[tail] = u;
+                    tail += 1;
+                }
+            }
+        }
+        targets
+    }
+
+    /// Lowest-numbered empty land vertex connected to `at` along `owner`'s
+    /// routes (excluding `exclude`), for a displaced knight's retreat.
+    pub fn knight_retreat_spot(&self, owner: u8, at: u8, exclude: u8) -> Option<u8> {
+        let topo = self.topo();
+        let own_b = self.buildings_of(owner);
+        let blocked = (self.occupied_vertices() & !own_b) | self.opponent_knights(owner);
+        let routes = self.roads[owner as usize] | self.ships[owner as usize];
+        let mut seen = BitSet::bit(at);
+        let mut queue = [0u8; MAX_VERTICES];
+        let (mut head, mut tail) = (0usize, 1usize);
+        queue[0] = at;
+        let mut out = BitSet::EMPTY;
+        while head < tail {
+            let v = queue[head];
+            head += 1;
+            for k in 0..3 {
+                let e = topo.vertex_edges[v as usize][k];
+                if e == NONE || !routes.contains(e) {
+                    continue;
+                }
+                let u = topo.vertex_vertices[v as usize][k];
+                if seen.contains(u) {
+                    continue;
+                }
+                seen.insert(u);
+                if u != exclude
+                    && self.board.land_vertices.contains(u)
+                    && !self.occupied_vertices().contains(u)
+                    && self.knight_owner[u as usize] == NONE
+                {
+                    out.insert(u);
+                }
+                if !blocked.contains(u) {
+                    queue[tail] = u;
+                    tail += 1;
+                }
+            }
+        }
+        vertices_in(out).next()
+    }
+
     /// Vertices open for an initial settlement (on seafaring maps only the
     /// home island).
     #[inline]
-    pub fn setup_spots(&self) -> u128 {
+    pub fn setup_spots(&self) -> BitSet {
         self.settlement_spots(0, false) & self.board.setup_vertices
     }
 
     /// Edges where `p` may place a road connected to their network. A road
-    /// cannot continue through an intersection occupied by an opponent, nor
-    /// directly from a ship.
-    pub fn road_spots(&self, p: u8) -> u128 {
+    /// cannot continue through an intersection occupied by an opponent or
+    /// opponent knight, nor directly from a ship.
+    pub fn road_spots(&self, p: u8) -> BitSet {
         let topo = self.topo();
         let own = self.buildings_of(p);
-        let opponents = self.occupied_vertices() & !own;
+        let opponents = (self.occupied_vertices() & !own) | self.opponent_knights(p);
         let reach = own | (topo.endpoints_of(self.roads[p as usize]) & !opponents);
         topo.edges_touching(reach) & self.board.land_edges & !self.occupied_edges()
     }
@@ -609,9 +874,9 @@ impl GameState {
     /// Edges of the tile the pirate is on (no ship may be built or moved
     /// there).
     #[inline]
-    pub fn pirate_edges(&self) -> u128 {
+    pub fn pirate_edges(&self) -> BitSet {
         if self.pirate == NONE {
-            0
+            BitSet::EMPTY
         } else {
             self.topo().tile_edge_mask(self.pirate)
         }
@@ -620,14 +885,15 @@ impl GameState {
     /// Edges where `p` may place a ship, if `ships` were their fleet: along
     /// the sea, away from the pirate, next to their own building or the open
     /// end of one of their ships. Ships do not continue through an
-    /// intersection occupied by an opponent, nor directly from a road.
-    pub fn ship_spots_with(&self, p: u8, ships: u128) -> u128 {
+    /// intersection occupied by an opponent or opponent knight, nor directly
+    /// from a road.
+    pub fn ship_spots_with(&self, p: u8, ships: BitSet) -> BitSet {
         if !self.board.layout.has_ships() {
-            return 0;
+            return BitSet::EMPTY;
         }
         let topo = self.topo();
         let own = self.buildings_of(p);
-        let opponents = self.occupied_vertices() & !own;
+        let opponents = (self.occupied_vertices() & !own) | self.opponent_knights(p);
         let reach = own | (topo.endpoints_of(ships) & !opponents);
         let taken = self.occupied_edges() & !(self.ships[p as usize] & !ships);
         topo.edges_touching(reach) & self.board.sea_edges & !self.pirate_edges() & !taken
@@ -635,37 +901,71 @@ impl GameState {
 
     /// Edges where `p` may build a ship now.
     #[inline]
-    pub fn ship_spots(&self, p: u8) -> u128 {
+    pub fn ship_spots(&self, p: u8) -> BitSet {
         self.ship_spots_with(p, self.ships[p as usize])
     }
 
     /// `p`'s ships that may move this turn: not built this turn, away from
     /// the pirate, and at the open end of a line (one end touches neither
-    /// their building nor another of their ships).
-    pub fn movable_ships(&self, p: u8) -> u128 {
+    /// their building, their knight, nor another of their ships).
+    pub fn movable_ships(&self, p: u8) -> BitSet {
         let ships = self.ships[p as usize];
-        if ships == 0 {
-            return 0;
+        if ships.is_empty() {
+            return BitSet::EMPTY;
         }
         let topo = self.topo();
-        let own = self.buildings_of(p);
-        let mut out = 0;
+        let own = self.buildings_of(p) | self.knights_of(p);
+        let mut out = BitSet::EMPTY;
         for e in edges_in(ships & !self.new_ships & !self.pirate_edges()) {
-            let others = ships & !(1u128 << e);
+            let others = ships & !BitSet::bit(e);
             let open = topo.edge_vertices[e as usize].iter().any(|&v| {
-                own & (1u128 << v) == 0 && topo.vertex_edge_mask[v as usize] & others == 0
+                !own.contains(v) && (topo.vertex_edge_mask[v as usize] & others).is_empty()
             });
             if open {
-                out |= 1u128 << e;
+                out.insert(e);
             }
         }
         out
     }
 
     /// Where the ship on `from` may move to.
-    pub fn ship_moves(&self, p: u8, from: u8) -> u128 {
-        let rest = self.ships[p as usize] & !(1u128 << from);
-        self.ship_spots_with(p, rest) & !(1u128 << from)
+    pub fn ship_moves(&self, p: u8, from: u8) -> BitSet {
+        let rest = self.ships[p as usize] & !BitSet::bit(from);
+        self.ship_spots_with(p, rest) & !BitSet::bit(from)
+    }
+
+    /// Whether moving the robber/pirate to `tile` touches an opponent with
+    /// 2 or fewer public victory points.
+    pub fn tile_has_novice(&self, tile: u8, thief: u8) -> bool {
+        let topo = self.topo();
+        let sea = self.board.is_sea(tile);
+        let tv = topo.tile_vertex_mask[tile as usize];
+        let te = if sea { topo.tile_edge_mask(tile) } else { BitSet::EMPTY };
+        (0..self.num_players() as u8).any(|q| {
+            if q == thief || self.public_victory_points(q) > 2 {
+                return false;
+            }
+            if sea {
+                !(self.ships[q as usize] & te).is_empty()
+            } else {
+                !(self.buildings_of(q) & tv).is_empty()
+            }
+        })
+    }
+
+    /// Whether `tile` is disallowed by the Friendly Robber house rule (only
+    /// enforced when at least one non-novice destination exists).
+    pub fn friendly_robber_blocks(&self, tile: u8, thief: u8) -> bool {
+        if !self.config.friendly_robber || !self.tile_has_novice(tile, thief) {
+            return false;
+        }
+        (0..self.topo().num_tiles as u8).any(|t| {
+            t != self.robber
+                && t != self.pirate
+                && self.board.terrain[t as usize] != Terrain::Fog
+                && !(self.board.is_sea(t) && self.pirate == NONE)
+                && !self.tile_has_novice(t, thief)
+        })
     }
 
     /// Bitmask of players `thief` may rob after moving the robber to a land
@@ -675,30 +975,30 @@ impl GameState {
         let topo = self.topo();
         let sea = self.board.is_sea(tile);
         let tv = topo.tile_vertex_mask[tile as usize];
-        let te = if sea { topo.tile_edge_mask(tile) } else { 0 };
+        let te = if sea { topo.tile_edge_mask(tile) } else { BitSet::EMPTY };
         (0..self.num_players() as u8)
             .filter(|&q| {
                 let near = if sea {
-                    self.ships[q as usize] & te != 0
+                    !(self.ships[q as usize] & te).is_empty()
                 } else {
-                    self.buildings_of(q) & tv != 0
+                    !(self.buildings_of(q) & tv).is_empty()
                 };
-                q != thief && near && !self.players[q as usize].hand.is_empty()
+                q != thief && near && self.players[q as usize].total_cards() > 0
             })
             .fold(0, |m, q| m | 1 << q)
     }
 
     /// Length of `p`'s longest continuous trade route: roads, and on
-    /// seafaring maps ships. Opponent buildings split routes; a route turns
-    /// from road to ship only at `p`'s own settlement or city.
+    /// seafaring maps ships. Opponent buildings and opponent knights split
+    /// routes; a route turns from road to ship only at `p`'s own building.
     pub fn compute_longest_road(&self, p: u8) -> u8 {
         let (roads, ships) = (self.roads[p as usize], self.ships[p as usize]);
-        if roads | ships == 0 {
+        if (roads | ships).is_empty() {
             return 0;
         }
         let topo = self.topo();
         let own = self.buildings_of(p);
-        let blocked = self.occupied_vertices() & !own;
+        let blocked = (self.occupied_vertices() & !own) | self.opponent_knights(p);
         let route = Route {
             topo,
             roads,
@@ -707,7 +1007,7 @@ impl GameState {
             blocked,
         };
         vertices_in(topo.endpoints_of(roads | ships))
-            .map(|v| route.longest_from(v, None, 0))
+            .map(|v| route.longest_from(v, None, BitSet::EMPTY))
             .max()
             .unwrap_or(0)
     }
@@ -727,6 +1027,20 @@ impl GameState {
                 return Err(format!("resource {r} not conserved: {total}"));
             }
         }
+        let expected_comm = if self.config.scenario.is_citadels() {
+            layout.bank_per_commodity() as u32
+        } else {
+            0
+        };
+        for c in 0..3 {
+            let total: u32 = self.commodity_bank.0[c] as u32
+                + (0..n)
+                    .map(|p| self.players[p].commodities.0[c] as u32)
+                    .sum::<u32>();
+            if total != expected_comm {
+                return Err(format!("commodity {c} not conserved: {total}"));
+            }
+        }
         for card in DevCard::ALL {
             let c = card.index();
             let in_deck = self.dev_deck[..self.dev_deck_len as usize]
@@ -743,18 +1057,23 @@ impl GameState {
                 return Err(format!("dev card {card:?} not conserved"));
             }
         }
-        let mut seen_v = 0u128;
-        let mut seen_e = 0u128;
+        let mut seen_v = BitSet::EMPTY;
+        let mut seen_e = BitSet::EMPTY;
+        let all_k = self.all_knights();
         for p in 0..n {
             let ps = &self.players[p];
-            if self.settlements[p] & self.cities[p] != 0 {
+            if !(self.settlements[p] & self.cities[p]).is_empty() {
                 return Err(format!(
                     "player {p} has a settlement and a city on one vertex"
                 ));
             }
             let b = self.settlements[p] | self.cities[p];
             let pieces = self.roads[p] | self.ships[p];
-            if b & seen_v != 0 || pieces & seen_e != 0 || self.roads[p] & self.ships[p] != 0 {
+            if !(b & seen_v).is_empty()
+                || !(pieces & seen_e).is_empty()
+                || !(self.roads[p] & self.ships[p]).is_empty()
+                || !(b & all_k).is_empty()
+            {
                 return Err("two pieces share a spot".into());
             }
             seen_v |= b;
@@ -766,10 +1085,18 @@ impl GameState {
             {
                 return Err(format!("player {p} piece counts inconsistent"));
             }
-            if b & !self.board.land_vertices != 0
-                || self.roads[p] & !self.board.land_edges != 0
-                || self.ships[p] & !self.board.sea_edges != 0
-                || (self.ships[p] != 0 && !layout.has_ships())
+            for lvl in 1..=3u8 {
+                let on_board = (0..topo.num_vertices)
+                    .filter(|&v| self.knight_owner[v] == p as u8 && self.knight_level[v] == lvl)
+                    .count() as u8;
+                if on_board + ps.knights_left[(lvl - 1) as usize] != MAX_KNIGHTS_PER_LEVEL {
+                    return Err(format!("player {p} knight level {lvl} count inconsistent"));
+                }
+            }
+            if !(b & !self.board.land_vertices).is_empty()
+                || !(self.roads[p] & !self.board.land_edges).is_empty()
+                || !(self.ships[p] & !self.board.sea_edges).is_empty()
+                || (!self.ships[p].is_empty() && !layout.has_ships())
             {
                 return Err(format!("player {p} has a piece on the wrong ground"));
             }
@@ -794,8 +1121,16 @@ impl GameState {
                 return Err("pending discard outside discard phase".into());
             }
         }
+        for t in 0..3 {
+            match (self.metropolis_owners[t], self.metropolises[t]) {
+                (None, NONE) => {}
+                (Some(owner), mv)
+                    if (owner as usize) < n && self.cities[owner as usize].contains(mv) => {}
+                _ => return Err(format!("metropolis {t} inconsistent")),
+            }
+        }
         for v in vertices_in(seen_v) {
-            if topo.vertex_adj_mask[v as usize] & seen_v != 0 {
+            if !(topo.vertex_adj_mask[v as usize] & seen_v).is_empty() {
                 return Err(format!("distance rule violated at vertex {v}"));
             }
         }
@@ -821,10 +1156,14 @@ impl GameState {
         {
             return Err("pirate off the sea".into());
         }
-        if self.new_ships & !self.ships[self.current as usize] != 0 {
-            return Err("new ships that are not the current player's".into());
+        let mover = self.active_player() as usize;
+        if mover < n && !(self.new_ships & !self.ships[mover]).is_empty() {
+            return Err("new ships that are not the acting player's".into());
         }
-        if (seen_v & !topo.all_vertices) != 0 || (seen_e & !topo.all_edges) != 0 {
+        if !(seen_v & !topo.all_vertices).is_empty()
+            || !(seen_e & !topo.all_edges).is_empty()
+            || !(all_k & !self.board.land_vertices).is_empty()
+        {
             return Err("piece off board".into());
         }
         if layout.has_fog() {
@@ -872,7 +1211,11 @@ impl GameState {
                 num_counts[num as usize] += 1;
             }
             let mut expected_nums = [0u8; 13];
-            for &num in FOG_HOME_NUMBER_POOL.iter().chain(FOG_NUMBER_POOL.iter()) {
+            for &num in layout
+                .number_pool()
+                .iter()
+                .chain(layout.fog_number_pool().iter())
+            {
                 expected_nums[num as usize] += 1;
             }
             if num_counts != expected_nums {
@@ -881,7 +1224,7 @@ impl GameState {
             let route_vertices = topo.endpoints_of(seen_e);
             for t in 0..topo.num_tiles {
                 if self.board.terrain[t] == Terrain::Fog
-                    && route_vertices & topo.tile_vertex_mask[t] != 0
+                    && !(route_vertices & topo.tile_vertex_mask[t]).is_empty()
                 {
                     return Err(format!("route touches unrevealed fog tile {t}"));
                 }
@@ -890,9 +1233,20 @@ impl GameState {
             return Err("non-fog board has fog stacks".into());
         }
         if let Phase::SpecialBuild { builder } = self.phase
-            && (!layout.has_special_build() || builder == self.current || builder as usize >= n)
+            && (!layout.has_special_build()
+                || self.config.paired_turns
+                || builder == self.current
+                || builder as usize >= n)
         {
             return Err("invalid special building phase".into());
+        }
+        if let Phase::PairedTurn { partner } = self.phase
+            && (!layout.has_special_build()
+                || !self.config.paired_turns
+                || partner == self.current
+                || partner as usize >= n)
+        {
+            return Err("invalid paired turn phase".into());
         }
         if (self.phase == Phase::GameOver) != self.winner.is_some() {
             return Err("winner and phase disagree".into());
@@ -904,19 +1258,19 @@ impl GameState {
 /// One player's pieces for the longest-route search.
 struct Route<'a> {
     topo: &'a Topology,
-    roads: u128,
-    ships: u128,
+    roads: BitSet,
+    ships: BitSet,
     /// The player's own buildings, where roads and ships join.
-    own: u128,
-    /// Intersections occupied by opponents.
-    blocked: u128,
+    own: BitSet,
+    /// Intersections occupied by opponents or opponent knights.
+    blocked: BitSet,
 }
 
 impl Route<'_> {
     /// Longest trail (no edge reused) starting at `v`, having arrived by a
     /// ship (`Some(true)`), a road (`Some(false)`) or not at all, never
     /// passing through a blocked vertex.
-    fn longest_from(&self, v: u8, arrived_by_ship: Option<bool>, used: u128) -> u8 {
+    fn longest_from(&self, v: u8, arrived_by_ship: Option<bool>, used: BitSet) -> u8 {
         let topo = self.topo;
         let mut best = 0;
         let links = &topo.vertex_edges[v as usize];
@@ -925,16 +1279,16 @@ impl Route<'_> {
             if e == NONE {
                 break;
             }
-            let bit = 1u128 << e;
-            if (self.roads | self.ships) & bit == 0 || used & bit != 0 {
+            let bit = BitSet::bit(e);
+            if ((self.roads | self.ships) & bit).is_empty() || !(used & bit).is_empty() {
                 continue;
             }
-            let ship = self.ships & bit != 0;
-            if arrived_by_ship.is_some_and(|s| s != ship) && self.own & (1u128 << v) == 0 {
+            let ship = self.ships.contains(e);
+            if arrived_by_ship.is_some_and(|s| s != ship) && !self.own.contains(v) {
                 continue;
             }
             let u = topo.vertex_vertices[v as usize][k];
-            let len = if self.blocked & (1u128 << u) != 0 {
+            let len = if self.blocked.contains(u) {
                 1
             } else {
                 1 + self.longest_from(u, Some(ship), used | bit)

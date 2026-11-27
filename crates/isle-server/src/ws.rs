@@ -95,6 +95,7 @@ async fn serve(socket: WebSocket, state: AppState) {
             name,
             ranked,
             scenario,
+            rules,
             session,
         }))) => match seat_account(&state, session).await {
             Ok(account) => {
@@ -103,6 +104,7 @@ async fn serve(socket: WebSocket, state: AppState) {
                     bots,
                     ranked,
                     scenario,
+                    rules,
                 };
                 state
                     .registry

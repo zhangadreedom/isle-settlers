@@ -75,7 +75,31 @@ const FOG_ISLANDS_ROWS: &[&str] = &[
     "M M M . ? ? ?",
 ];
 
-const SPECS: [Spec; 4] = [
+/// Extended archipelago (5–6 players): 21-tile home island and three outer
+/// gold islands across 46 tiles.
+const ARCHIPELAGO_EXTENDED_ROWS: &[&str] = &[
+    "M M M . . b b",
+    " M M M . . b",
+    "M M M . . . .",
+    " M M M . ~ d",
+    "M M M . . . d",
+    " M M M . . .",
+    "M M M . . c c",
+];
+
+/// Extended fog islands (5–6 players): 20-tile crescent home island and
+/// eighteen unexplored fog tiles across 46 tiles.
+const FOG_ISLANDS_EXTENDED_ROWS: &[&str] = &[
+    "M M M . ? ? ?",
+    " M M M . ? ?",
+    "M M M . ? ? ?",
+    " M M . ~ ? ?",
+    "M M M . ? ? ?",
+    " M M M . ? ?",
+    "M M M . ? ? ?",
+];
+
+const SPECS: [Spec; 6] = [
     // Gaps of 3, 3, 4 coastal edges, repeated three times.
     Spec {
         name: "BASE",
@@ -116,6 +140,42 @@ const SPECS: [Spec; 4] = [
             (28, 2),
             (26, 2),
             (20, 4),
+            (7, 4),
+        ]),
+    },
+    // Nine around the extended home island, one on north and south outer islands.
+    Spec {
+        name: "ARCHIPELAGO_EXTENDED",
+        shape: Shape::Map(ARCHIPELAGO_EXTENDED_ROWS),
+        harbors: Harbors::Sides(&[
+            (1, 0),
+            (9, 1),
+            (22, 1),
+            (35, 1),
+            (40, 2),
+            (39, 4),
+            (26, 4),
+            (13, 4),
+            (0, 5),
+            (6, 0),
+            (45, 2),
+        ]),
+    },
+    // Eleven symmetric harbors around the extended crescent home island.
+    Spec {
+        name: "FOG_ISLANDS_EXTENDED",
+        shape: Shape::Map(FOG_ISLANDS_EXTENDED_ROWS),
+        harbors: Harbors::Sides(&[
+            (0, 0),
+            (2, 0),
+            (9, 1),
+            (21, 1),
+            (35, 1),
+            (41, 2),
+            (39, 2),
+            (33, 4),
+            (26, 4),
+            (13, 4),
             (7, 4),
         ]),
     },
@@ -284,7 +344,13 @@ fn generate(spec: &Spec, out: &mut String) -> (usize, usize, usize, usize) {
         format!("[{}, {}, {}]", a[0], a[1], a[2])
     };
     let arr6 = |a: &[usize; 6]| format!("[{}]", list(a.iter().map(|v| v.to_string()).collect()));
-    let mask = |bits: Vec<usize>| format!("{:#x}", bits.into_iter().fold(0u128, |m, b| m | 1 << b));
+    let mask = |bits: Vec<usize>| {
+        let mut w = [0u64; 3];
+        for b in bits {
+            w[b >> 6] |= 1u64 << (b & 63);
+        }
+        format!("BitSet::from_words({:#x}, {:#x}, {:#x})", w[0], w[1], w[2])
+    };
 
     let _ = writeln!(out, "pub static {}: Topology = Topology {{", spec.name);
     let _ = writeln!(
@@ -491,7 +557,7 @@ fn main() {
                 "the base board must keep its shape"
             );
         }
-        assert!(v <= 128 && e <= 128, "{}: masks are u128", spec.name);
+        assert!(v <= 192 && e <= 192, "{}: masks are BitSet(192)", spec.name);
         max = (max.0.max(t), max.1.max(v), max.2.max(e), max.3.max(h));
     }
     let _ = writeln!(

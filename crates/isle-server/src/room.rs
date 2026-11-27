@@ -10,8 +10,8 @@ use std::time::Duration;
 use isle_ai::{Bot, bot_by_name};
 use isle_core::{Action, Event, GameConfig, GameState, Phase, Scenario, TradeResponse};
 use isle_proto::net::{
-    BotLevel, ChatLine, ClientMsg, LegalActions, RoomInfo, SeatView, ServerMsg, Snapshot, Update,
-    clean_chat, clean_name,
+    BotLevel, ChatLine, ClientMsg, HouseRules, LegalActions, RoomInfo, SeatView, ServerMsg,
+    Snapshot, Update, clean_chat, clean_name,
 };
 use isle_proto::ranking::RatingChange;
 use isle_proto::{ReplayPlayer, ReplayRecord, board_info, player_view};
@@ -34,6 +34,17 @@ pub struct RoomOptions {
     pub bots: BotLevel,
     pub ranked: bool,
     pub scenario: Scenario,
+    pub rules: HouseRules,
+}
+
+fn build_game_config(scenario: Scenario, players: u8, rules: HouseRules) -> GameConfig {
+    let mut config = GameConfig::scenario(scenario, players);
+    if let Some(vp) = rules.victory_points {
+        config.victory_points = vp;
+    }
+    config.friendly_robber = rules.friendly_robber;
+    config.paired_turns = rules.paired_turns;
+    config
 }
 
 /// Frames queued for one connection's writer task.
@@ -135,11 +146,13 @@ impl Game {
                     _ => "greedy",
                 };
                 let seed = seed.rotate_left(i as u32 * 8) ^ i as u64;
-                Some(
-                    bot_by_name(name, seed)
-                        .or_else(|| bot_by_name("greedy", seed))
-                        .expect("known bot"),
-                )
+                let mut bot = bot_by_name(name, seed)
+                    .or_else(|| bot_by_name("greedy", seed))
+                    .expect("known bot");
+                if matches!(s.kind, SeatKind::Bot(_)) {
+                    bot.set_propose_trades(true);
+                }
+                Some(bot)
             })
             .collect();
         Game {
@@ -174,6 +187,7 @@ pub struct Room {
     /// The game counts for ratings (with two or more signed-in players).
     ranked: bool,
     scenario: Scenario,
+    rules: HouseRules,
     /// Rating changes of the finished ranked game.
     rating: Vec<RatingChange>,
     /// When to (re)read or compute the ratings of a finished ranked game.
@@ -186,6 +200,7 @@ pub struct Room {
     conns: HashMap<ConnId, Conn>,
     next_conn: ConnId,
     bot_due: Option<Instant>,
+    turn_deadline: Option<Instant>,
     save_due: Option<Instant>,
     idle_since: Option<Instant>,
     /// Autopilot state last announced to clients, per seat.
@@ -206,7 +221,11 @@ impl Room {
             bots,
             ranked,
             scenario,
+            mut rules,
         } = options;
+        if rules.turn_timer_secs == 0 && registry.config().default_turn_timer_secs > 0 {
+            rules.turn_timer_secs = registry.config().default_turn_timer_secs;
+        }
         let token = ids::token();
         let name = display_name(&creator, account.as_ref(), "玩家 1");
         let now = Instant::now();
@@ -231,6 +250,7 @@ impl Room {
             accounts: registry.accounts().cloned(),
             ranked,
             scenario,
+            rules,
             rating: Vec::new(),
             rate_due: None,
             seed: ids::seed(),
@@ -242,6 +262,7 @@ impl Room {
             conns: HashMap::new(),
             next_conn: 1,
             bot_due: None,
+            turn_deadline: None,
             save_due: Some(now),
             idle_since: Some(now),
         };
@@ -282,7 +303,7 @@ impl Room {
             return Err("invalid seats".into());
         }
         let game = if record.started {
-            let config = GameConfig::scenario(record.scenario, seats.len() as u8);
+            let config = build_game_config(record.scenario, seats.len() as u8, record.rules);
             let state = GameState::new(config, record.seed).map_err(|e| format!("{e:?}"))?;
             let mut game = Game::new(state, &seats, record.seed, registry.config());
             let mut events = Vec::new();
@@ -306,6 +327,7 @@ impl Room {
             accounts: registry.accounts().cloned(),
             ranked: record.ranked,
             scenario: record.scenario,
+            rules: record.rules,
             rating: Vec::new(),
             rate_due: None,
             seed: record.seed,
@@ -317,6 +339,7 @@ impl Room {
             conns: HashMap::new(),
             next_conn: 1,
             bot_due: None,
+            turn_deadline: None,
             save_due: None,
             idle_since: Some(now),
         };
@@ -370,6 +393,7 @@ impl Room {
     fn next_wake(&self) -> Option<Instant> {
         let mut wake = [
             self.bot_due,
+            self.turn_deadline,
             self.save_due,
             self.rate_due,
             self.idle_deadline(),
@@ -377,6 +401,26 @@ impl Room {
         ];
         wake.sort();
         wake.into_iter().flatten().next()
+    }
+
+    fn refresh_turn_deadline(&mut self, now: Instant) {
+        self.turn_deadline = if self.rules.turn_timer_secs > 0
+            && self.humans_online()
+            && self.game.as_ref().is_some_and(|g| g.state.winner.is_none())
+        {
+            Some(now + Duration::from_secs(self.rules.turn_timer_secs as u64))
+        } else {
+            None
+        };
+    }
+
+    fn turn_remaining_ms(&self, now: Instant) -> Option<u32> {
+        let deadline = self.turn_deadline?;
+        if !self.humans_online() || self.game.as_ref().is_none_or(|g| g.state.winner.is_some()) {
+            return None;
+        }
+        let rem = deadline.saturating_duration_since(now).as_millis();
+        Some(rem.min(u32::MAX as u128) as u32)
     }
 
     fn idle_deadline(&self) -> Option<Instant> {
@@ -407,6 +451,17 @@ impl Room {
             self.bot_due = None;
             self.machine_step().await;
         }
+        let now = Instant::now();
+        if self.turn_deadline.is_some_and(|t| t <= now) {
+            if let Some(p) = self.blocking_human(now) {
+                self.step_seat_with_bot(p).await;
+            }
+            let now = Instant::now();
+            if self.turn_deadline.is_some_and(|t| t <= now) {
+                self.refresh_turn_deadline(now);
+            }
+        }
+        let now = Instant::now();
         let autopilot: Vec<bool> = (0..self.seats.len() as u8)
             .map(|i| self.on_autopilot(i, now))
             .collect();
@@ -501,9 +556,46 @@ impl Room {
                             && offer.responses[q as usize] == TradeResponse::Pending
                             && self.is_machine(q, now)
                     })
-                    .or_else(|| self.is_machine(s.current, now).then_some(s.current))
+                    .or_else(|| {
+                        let any_accepted = (0..n).any(|q| {
+                            q != s.current
+                                && offer.responses[q as usize] == TradeResponse::Accepted
+                        });
+                        let all_replied = (0..n).all(|q| {
+                            q == s.current || offer.responses[q as usize] != TradeResponse::Pending
+                        });
+                        (self.is_machine(s.current, now) && (any_accepted || all_replied))
+                            .then_some(s.current)
+                    })
             }
             _ => s.to_move().filter(|&p| self.is_machine(p, now)),
+        }
+    }
+
+    /// Connected human seat currently holding up the game, if any.
+    fn blocking_human(&self, now: Instant) -> Option<u8> {
+        let game = self.game.as_ref()?;
+        if !self.humans_online() || self.machine_actor(now).is_some() {
+            return None;
+        }
+        let s = &game.state;
+        let n = s.num_players() as u8;
+        match s.phase {
+            Phase::GameOver => None,
+            Phase::Discard => {
+                (0..n).find(|&p| s.pending_discard[p as usize] > 0 && !self.is_machine(p, now))
+            }
+            Phase::Main if s.trade.is_some() => {
+                let offer = s.trade.expect("checked");
+                (0..n)
+                    .find(|&q| {
+                        q != s.current
+                            && offer.responses[q as usize] == TradeResponse::Pending
+                            && !self.is_machine(q, now)
+                    })
+                    .or_else(|| (!self.is_machine(s.current, now)).then_some(s.current))
+            }
+            _ => s.to_move().filter(|&p| !self.is_machine(p, now)),
         }
     }
 
@@ -593,10 +685,14 @@ impl Room {
                 last_chat: None,
             },
         );
+        let was_online = self.humans_online();
         if let Some(s) = seat {
             let s = &mut self.seats[s as usize];
             s.connections += 1;
             s.disconnected_at = None;
+        }
+        if !was_online && self.humans_online() {
+            self.refresh_turn_deadline(now);
         }
         self.idle_since = None;
 
@@ -610,7 +706,7 @@ impl Room {
         );
         self.broadcast_room(now);
         if self.game.is_some() {
-            let snapshot = self.snapshot(seat);
+            let snapshot = self.snapshot(seat, now);
             self.send(conn, &snapshot);
         }
         self.reschedule(now);
@@ -627,6 +723,9 @@ impl Room {
             if seat.connections == 0 {
                 seat.disconnected_at = Some(now);
             }
+        }
+        if !self.humans_online() {
+            self.turn_deadline = None;
         }
         if self.conns.is_empty() {
             self.idle_since = Some(now);
@@ -698,6 +797,22 @@ impl Room {
                 Ok(())
             }
 
+            ClientMsg::SetRules { rules } => {
+                if seat != Some(self.host) {
+                    return Err("NotHost".into());
+                }
+                if self.game.is_some() {
+                    return Err("AlreadyStarted".into());
+                }
+                if !rules.is_valid() {
+                    return Err("BadMessage".into());
+                }
+                self.rules = rules;
+                self.mark_dirty(now);
+                self.broadcast_room(now);
+                Ok(())
+            }
+
             ClientMsg::Start => {
                 if seat != Some(self.host) {
                     return Err("NotHost".into());
@@ -710,15 +825,16 @@ impl Room {
                         s.kind = SeatKind::Bot(self.bot_level);
                     }
                 }
-                let config = GameConfig::scenario(self.scenario, self.seats.len() as u8);
+                let config = build_game_config(self.scenario, self.seats.len() as u8, self.rules);
                 let state = GameState::new(config, self.seed).map_err(|e| format!("{e:?}"))?;
                 self.game = Some(Game::new(state, &self.seats, self.seed, &self.config));
+                self.refresh_turn_deadline(now);
                 tracing::info!(room = %self.id, "game started");
                 self.mark_dirty(now);
                 self.broadcast_room(now);
                 let ids: Vec<ConnId> = self.conns.keys().copied().collect();
                 for c in ids {
-                    let snapshot = self.snapshot(self.conns[&c].seat);
+                    let snapshot = self.snapshot(self.conns[&c].seat, now);
                     self.send(c, &snapshot);
                 }
                 self.reschedule(now);
@@ -751,12 +867,16 @@ impl Room {
         let Some(p) = self.machine_actor(Instant::now()) else {
             return;
         };
-        let game = self.game.as_mut().expect("machine actor implies a game");
+        self.step_seat_with_bot(p).await;
+    }
+
+    async fn step_seat_with_bot(&mut self, p: u8) {
+        let game = self.game.as_mut().expect("game running");
         let state = game.state;
         let mut legal = Vec::new();
         state.legal_actions(p, &mut legal);
         if legal.is_empty() {
-            tracing::error!(room = %self.id, seat = p, "no legal action for machine actor");
+            tracing::error!(room = %self.id, seat = p, "no legal action for actor");
             return;
         }
         let Some(mut bot) = game.bots[p as usize].take() else {
@@ -791,7 +911,8 @@ impl Room {
         if let Some(w) = game.state.winner {
             tracing::info!(room = %self.id, winner = w, actions = game.actions.len(), "game over");
         }
-        self.broadcast_update(&events);
+        self.refresh_turn_deadline(now);
+        self.broadcast_update(&events, now);
         if self.archive_if_finished() {
             self.broadcast_room(now);
         }
@@ -941,6 +1062,7 @@ impl Room {
             ranked: self.ranked,
             rating: self.rating.clone(),
             scenario: self.scenario,
+            rules: self.rules,
         }
     }
 
@@ -956,19 +1078,21 @@ impl Room {
         }
     }
 
-    fn snapshot(&self, viewer: Option<u8>) -> ServerMsg {
+    fn snapshot(&self, viewer: Option<u8>, now: Instant) -> ServerMsg {
         let game = self.game.as_ref().expect("game running");
         ServerMsg::Snapshot(Snapshot {
             board: board_info(&game.state),
             view: player_view(&game.state, viewer),
             legal: self.legal_for(viewer),
             log: game.log.iter().map(|e| e.redacted_for(viewer)).collect(),
+            turn_remaining_ms: self.turn_remaining_ms(now),
         })
     }
 
     /// Sends each connection the update projected for its seat. Views are
     /// built once per distinct viewer.
-    fn broadcast_update(&mut self, events: &[Event]) {
+    fn broadcast_update(&mut self, events: &[Event], now: Instant) {
+        let turn_remaining_ms = self.turn_remaining_ms(now);
         let game = self.game.as_ref().expect("game running");
         let mut frames: HashMap<Option<u8>, Arc<str>> = HashMap::new();
         let viewers: Vec<(ConnId, Option<u8>)> =
@@ -979,6 +1103,7 @@ impl Room {
                     view: player_view(&game.state, *viewer),
                     legal: self.legal_for(*viewer),
                     events: events.iter().map(|e| e.redacted_for(*viewer)).collect(),
+                    turn_remaining_ms,
                 });
                 serde_json::to_string(&msg).expect("serializable").into()
             });
@@ -1056,6 +1181,7 @@ impl Room {
             replay: self.replay_id.clone(),
             ranked: self.ranked,
             scenario: self.scenario,
+            rules: self.rules,
         }
     }
 

@@ -5,8 +5,8 @@
 //! large to enumerate; bots generate those themselves and validate them with
 //! [`GameState::check`].
 
-use crate::action::Action;
-use crate::resources::{Resource, ResourceSet, cost};
+use crate::action::{Action, TradeGood};
+use crate::resources::{CityTrack, Commodity, CommoditySet, Resource, ResourceSet, cost};
 use crate::state::*;
 use crate::topology::*;
 
@@ -23,7 +23,7 @@ impl GameState {
         if player != self.active_player() {
             match self.phase {
                 Phase::Discard if self.pending_discard[player as usize] > 0 => {
-                    push_discards(ps.hand, self.pending_discard[player as usize], out);
+                    self.push_player_discards(player, out);
                 }
                 Phase::Main => {
                     if let Some(offer) = self.trade {
@@ -63,38 +63,17 @@ impl GameState {
             }
             Phase::Discard => {
                 if self.pending_discard[player as usize] > 0 {
-                    push_discards(ps.hand, self.pending_discard[player as usize], out);
+                    self.push_player_discards(player, out);
                 }
             }
             Phase::MoveRobber => {
-                // Land tiles move the robber, sea tiles the pirate.
-                for tile in 0..self.topo().num_tiles as u8 {
-                    if tile == self.robber || tile == self.pirate {
-                        continue;
-                    }
-                    if self.board.terrain[tile as usize] == crate::Terrain::Fog {
-                        continue;
-                    }
-                    if self.board.is_sea(tile) && self.pirate == NONE {
-                        continue;
-                    }
-                    let victims = self.robber_victims(tile, player);
-                    if victims == 0 {
-                        out.push(Action::MoveRobber { tile, victim: None });
-                    } else {
-                        for q in 0..self.num_players() as u8 {
-                            if victims & (1 << q) != 0 {
-                                out.push(Action::MoveRobber {
-                                    tile,
-                                    victim: Some(q),
-                                });
-                            }
-                        }
-                    }
-                }
+                self.push_robber_moves(player, None, out);
             }
-            Phase::Main => {
+            Phase::Main | Phase::PairedTurn { .. } => {
                 self.push_builds(player, out);
+                if self.config.scenario.is_citadels() {
+                    self.push_citadel_actions(player, out);
+                }
                 if !self.ship_moved {
                     for from in edges_in(self.movable_ships(player)) {
                         for to in edges_in(self.ship_moves(player, from)) {
@@ -112,7 +91,9 @@ impl GameState {
                         }
                     }
                 }
-                if let Some(offer) = self.trade {
+                if self.phase == Phase::Main
+                    && let Some(offer) = self.trade
+                {
                     for q in 0..self.num_players() as u8 {
                         if offer.responses[q as usize] == TradeResponse::Accepted
                             && ps.hand.contains(&offer.give)
@@ -138,6 +119,152 @@ impl GameState {
             }
             Phase::SpecialBuild { .. } => self.push_builds(player, out),
             Phase::GameOver => {}
+        }
+    }
+
+    fn push_player_discards(&self, player: u8, out: &mut Vec<Action>) {
+        let ps = &self.players[player as usize];
+        let need = self.pending_discard[player as usize];
+        if self.config.scenario.is_citadels() {
+            push_citadel_discards(ps.hand, ps.commodities, need, out);
+        } else {
+            push_discards(ps.hand, need, out);
+        }
+    }
+
+    fn push_robber_moves(&self, player: u8, knight_vertex: Option<u8>, out: &mut Vec<Action>) {
+        let topo = self.topo();
+        for tile in 0..topo.num_tiles as u8 {
+            if tile == self.robber || tile == self.pirate {
+                continue;
+            }
+            if self.board.terrain[tile as usize] == crate::Terrain::Fog {
+                continue;
+            }
+            if self.board.is_sea(tile) && self.pirate == NONE {
+                continue;
+            }
+            if let Some(kv) = knight_vertex {
+                let near = if self.board.is_sea(tile) {
+                    self.pirate != NONE && topo.tile_vertex_mask[self.pirate as usize].contains(kv)
+                } else {
+                    topo.tile_vertex_mask[self.robber as usize].contains(kv)
+                };
+                if !near {
+                    continue;
+                }
+            }
+            if self.friendly_robber_blocks(tile, player) {
+                continue;
+            }
+            let victims = self.robber_victims(tile, player);
+            let push_one = |victim, out: &mut Vec<Action>| match knight_vertex {
+                Some(vertex) => out.push(Action::ChaseRobber {
+                    vertex,
+                    tile,
+                    victim,
+                }),
+                None => out.push(Action::MoveRobber { tile, victim }),
+            };
+            if victims == 0 {
+                push_one(None, out);
+            } else {
+                for q in 0..self.num_players() as u8 {
+                    if victims & (1 << q) != 0 {
+                        push_one(Some(q), out);
+                    }
+                }
+            }
+        }
+    }
+
+    fn push_citadel_actions(&self, player: u8, out: &mut Vec<Action>) {
+        let ps = &self.players[player as usize];
+        // City improvements.
+        if !self.cities[player as usize].is_empty() {
+            for track in CityTrack::ALL {
+                let cur = ps.city_progress[track.index()];
+                if cur < 5 && ps.commodities[track.commodity()] >= cur + 1 {
+                    if self.upgrade_claims_metropolis(player, track) {
+                        for mv in vertices_in(self.non_metropolis_cities(player)) {
+                            out.push(Action::UpgradeCity {
+                                track,
+                                metropolis: Some(mv),
+                            });
+                        }
+                    } else {
+                        out.push(Action::UpgradeCity {
+                            track,
+                            metropolis: None,
+                        });
+                    }
+                }
+            }
+        }
+        // Commodity trades.
+        let comm_ratio = self.commodity_trade_ratio(player);
+        for c in Commodity::ALL {
+            if ps.commodities[c] >= comm_ratio {
+                for r in Resource::ALL {
+                    if self.bank[r] > 0 {
+                        out.push(Action::MaritimeTradeGood {
+                            give: TradeGood::Commodity(c),
+                            get: TradeGood::Resource(r),
+                        });
+                    }
+                }
+                for c2 in Commodity::ALL {
+                    if c2 != c && self.commodity_bank[c2] > 0 {
+                        out.push(Action::MaritimeTradeGood {
+                            give: TradeGood::Commodity(c),
+                            get: TradeGood::Commodity(c2),
+                        });
+                    }
+                }
+            }
+        }
+        for r in Resource::ALL {
+            if ps.hand[r] >= self.trade_ratio(player, r) {
+                for c in Commodity::ALL {
+                    if self.commodity_bank[c] > 0 {
+                        out.push(Action::MaritimeTradeGood {
+                            give: TradeGood::Resource(r),
+                            get: TradeGood::Commodity(c),
+                        });
+                    }
+                }
+            }
+        }
+        // Knights.
+        if ps.knights_left[0] > 0 && ps.hand.contains(&cost::KNIGHT) {
+            for v in vertices_in(self.knight_recruit_spots(player)) {
+                out.push(Action::RecruitKnight(v));
+            }
+        }
+        let max_lvl = if ps.city_progress[CityTrack::Politics.index()] >= 3 {
+            3
+        } else {
+            2
+        };
+        for v in vertices_in(self.knights_of(player)) {
+            if !self.knight_active.contains(v) && ps.hand.contains(&cost::ACTIVATE_KNIGHT) {
+                out.push(Action::ActivateKnight(v));
+            }
+            let lvl = self.knight_level[v as usize];
+            if !self.knight_promoted.contains(v)
+                && lvl > 0
+                && lvl < max_lvl
+                && ps.knights_left[lvl as usize] > 0
+                && ps.hand.contains(&cost::KNIGHT)
+            {
+                out.push(Action::PromoteKnight(v));
+            }
+            if self.knight_active.contains(v) && !self.knight_fresh.contains(v) {
+                for to in vertices_in(self.knight_move_targets(player, v)) {
+                    out.push(Action::MoveKnight { from: v, to });
+                }
+                self.push_robber_moves(player, Some(v), out);
+            }
         }
     }
 
@@ -179,8 +306,8 @@ impl GameState {
         if has(DevCard::Knight) {
             out.push(Action::PlayKnight);
         }
-        let route = (ps.roads_left > 0 && self.road_spots(player) != 0)
-            || (ps.ships_left > 0 && self.ship_spots(player) != 0);
+        let route = (ps.roads_left > 0 && !self.road_spots(player).is_empty())
+            || (ps.ships_left > 0 && !self.ship_spots(player).is_empty());
         if has(DevCard::RoadBuilding) && route {
             out.push(Action::PlayRoadBuilding);
         }
@@ -228,6 +355,51 @@ impl GameState {
 /// Every distinct way to discard `need` cards from `hand`.
 fn push_discards(hand: ResourceSet, need: u8, out: &mut Vec<Action>) {
     push_subsets(hand, need, Action::Discard, out);
+}
+
+/// Every distinct way to discard `need` cards across `hand` + `commodities`.
+fn push_citadel_discards(
+    hand: ResourceSet,
+    commodities: CommoditySet,
+    need: u8,
+    out: &mut Vec<Action>,
+) {
+    fn rec(
+        i: usize,
+        remaining: u8,
+        from: &[u8; 8],
+        cur: &mut [u8; 8],
+        out: &mut Vec<Action>,
+    ) {
+        if i == 7 {
+            if remaining <= from[7] {
+                cur[7] = remaining;
+                out.push(Action::DiscardCitadel {
+                    resources: ResourceSet([cur[0], cur[1], cur[2], cur[3], cur[4]]),
+                    commodities: CommoditySet([cur[5], cur[6], cur[7]]),
+                });
+            }
+            return;
+        }
+        let rest: u8 = from[i + 1..].iter().sum();
+        let lo = remaining.saturating_sub(rest);
+        let hi = from[i].min(remaining);
+        for c in lo..=hi {
+            cur[i] = c;
+            rec(i + 1, remaining - c, from, cur, out);
+        }
+    }
+    let from = [
+        hand.0[0],
+        hand.0[1],
+        hand.0[2],
+        hand.0[3],
+        hand.0[4],
+        commodities.0[0],
+        commodities.0[1],
+        commodities.0[2],
+    ];
+    rec(0, need, &from, &mut [0; 8], out);
 }
 
 /// Every distinct set of `need` cards taken from `from`.

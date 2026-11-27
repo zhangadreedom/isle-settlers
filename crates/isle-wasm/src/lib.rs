@@ -44,7 +44,7 @@ pub struct LocalMatch {
 impl LocalMatch {
     /// New match. `human_seat` is the human's seat, or -1 to watch bots only.
     /// `bot` is a bot name (`greedy`, `weighted`, `random`); `scenario` is
-    /// `Classic` or `Archipelago`.
+    /// `Classic`, `Archipelago`, `FogIslands` or `Citadels`.
     #[wasm_bindgen(constructor)]
     pub fn new(
         num_players: u8,
@@ -57,6 +57,33 @@ impl LocalMatch {
         let scenario = parse_scenario(scenario)?;
         Ok(LocalMatch {
             host: MatchHost::new(num_players, seed as u64, human, bot, scenario).map_err(err)?,
+        })
+    }
+
+    /// New match with custom house rules (`victory_points == 0` uses the
+    /// scenario default).
+    #[wasm_bindgen(js_name = withRules)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_rules(
+        num_players: u8,
+        seed: u32,
+        human_seat: i32,
+        bot: &str,
+        scenario: &str,
+        victory_points: u8,
+        friendly_robber: bool,
+        paired_turns: bool,
+    ) -> Result<LocalMatch, JsError> {
+        let human = u8::try_from(human_seat).ok();
+        let scenario = parse_scenario(scenario)?;
+        let mut config = GameConfig::scenario(scenario, num_players);
+        if victory_points != 0 {
+            config.victory_points = victory_points;
+        }
+        config.friendly_robber = friendly_robber;
+        config.paired_turns = paired_turns;
+        Ok(LocalMatch {
+            host: MatchHost::with_config(config, seed as u64, human, bot).map_err(err)?,
         })
     }
 
@@ -160,11 +187,14 @@ impl Replay {
     /// (`ReplayRecord.actions`), checking it by playing it through. Throws
     /// with `BadReplaySeed`, `BadReplayConfig` or `BadReplayAction<i>`.
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         num_players: u8,
         victory_points: u8,
         balanced_board: bool,
         scenario: &str,
+        friendly_robber: bool,
+        paired_turns: bool,
         seed: &str,
         actions: &[u8],
     ) -> Result<Replay, JsError> {
@@ -176,6 +206,8 @@ impl Replay {
             victory_points,
             balanced_board,
             scenario,
+            friendly_robber,
+            paired_turns,
         };
         let start = GameState::new(config, seed).map_err(|_| fail(ReplayError::Config))?;
         let actions = decode_actions(actions).map_err(fail)?;
@@ -290,18 +322,19 @@ struct TopologyInfo {
     harbor_edges: Vec<u8>,
 }
 
-/// `Classic`, `Archipelago` or `FogIslands` (the serialized `Scenario`).
+/// `Classic`, `Archipelago`, `FogIslands` or `Citadels` (the serialized `Scenario`).
 fn parse_scenario(name: &str) -> Result<Scenario, JsError> {
     match name {
         "Classic" | "" => Ok(Scenario::Classic),
         "Archipelago" => Ok(Scenario::Archipelago),
         "FogIslands" => Ok(Scenario::FogIslands),
+        "Citadels" => Ok(Scenario::Citadels),
         _ => Err(JsError::new("UnknownScenario")),
     }
 }
 
-/// Topology tables of `layout` (`"Base"`, `"Extended"`, `"Archipelago"` or
-/// `"FogIslands"`) as JSON.
+/// Topology tables of `layout` (`"Base"`, `"Extended"`, `"Archipelago"`,
+/// `"FogIslands"`, `"ArchipelagoExtended"` or `"FogIslandsExtended"`) as JSON.
 #[wasm_bindgen]
 pub fn topology(layout: &str) -> Result<String, JsError> {
     let layout = match layout {
@@ -309,6 +342,8 @@ pub fn topology(layout: &str) -> Result<String, JsError> {
         "Extended" => BoardLayout::Extended,
         "Archipelago" => BoardLayout::Archipelago,
         "FogIslands" => BoardLayout::FogIslands,
+        "ArchipelagoExtended" => BoardLayout::ArchipelagoExtended,
+        "FogIslandsExtended" => BoardLayout::FogIslandsExtended,
         _ => return Err(JsError::new("UnknownLayout")),
     };
     let t = layout.topology();
@@ -327,21 +362,37 @@ mod tests {
 
     #[test]
     fn replay_seeking_matches_stepping() {
-        for (players, scenario) in [
-            (5, Scenario::Classic),
-            (4, Scenario::Archipelago),
-            (4, Scenario::FogIslands),
+        for (players, scenario, friendly_robber, paired_turns) in [
+            (5, Scenario::Classic, true, true),
+            (4, Scenario::Archipelago, false, false),
+            (6, Scenario::Archipelago, true, false),
+            (4, Scenario::FogIslands, false, false),
+            (4, Scenario::Citadels, false, false),
         ] {
-            let mut host = MatchHost::new(players, 21, None, "greedy", scenario).unwrap();
-            while host.step_bot().is_some() {}
-            assert!(host.state.winner.is_some());
-            let record = host.replay("");
+            let mut m = LocalMatch::with_rules(
+                players,
+                21,
+                -1,
+                "greedy",
+                &format!("{scenario:?}"),
+                0,
+                friendly_robber,
+                paired_turns,
+            )
+            .unwrap();
+            while m.host.step_bot().is_some() {}
+            assert!(m.host.state.winner.is_some());
+            let record = m.host.replay("");
             let c = record.config;
+            assert_eq!(c.friendly_robber, friendly_robber);
+            assert_eq!(c.paired_turns, paired_turns);
             let mut replay = Replay::new(
                 c.num_players,
                 c.victory_points,
                 c.balanced_board,
                 &format!("{:?}", c.scenario),
+                c.friendly_robber,
+                c.paired_turns,
                 &record.seed,
                 &record.actions,
             )
@@ -353,7 +404,7 @@ mod tests {
                 states.push(replay.state);
             }
             assert_eq!(states.len(), len + 1);
-            assert_eq!(replay.state, host.state);
+            assert_eq!(replay.state, m.host.state);
             for pos in [len, 0, 31, 32, 33, len / 2, 1, len - 1, 64] {
                 replay.seek(pos as u32);
                 assert_eq!(replay.position() as usize, pos);
@@ -366,7 +417,14 @@ mod tests {
 
     #[test]
     fn topology_tables_cover_every_layout() {
-        for layout in ["Base", "Extended", "Archipelago", "FogIslands"] {
+        for layout in [
+            "Base",
+            "Extended",
+            "Archipelago",
+            "FogIslands",
+            "ArchipelagoExtended",
+            "FogIslandsExtended",
+        ] {
             assert!(topology(layout).is_ok(), "{layout}");
         }
     }

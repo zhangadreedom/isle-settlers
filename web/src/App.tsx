@@ -3,6 +3,7 @@ import type { BoardRenderer, Insets, PickKind } from './board/BoardRenderer';
 import { DiceView, Flights, GameLog, HandBar, PlayerList } from './components/Hud';
 import { Lobby, randomSeed, type CreateRoom } from './components/Lobby';
 import {
+  CityUpgradeModal,
   DiscardModal,
   GameOverModal,
   GoldModal,
@@ -77,6 +78,7 @@ export default function App() {
   const [previewPlayers, setPreviewPlayers] = createSignal(4);
   const [previewScenario, setPreviewScenario] = createSignal<Scenario>('Classic');
   const [tradeOpen, setTradeOpen] = createSignal(false);
+  const [citadelOpen, setCitadelOpen] = createSignal(false);
   const [devModal, setDevModal] = createSignal<'YearOfPlenty' | 'Monopoly' | null>(null);
   // The log (with chat) starts open on wide screens and as a toggle on phones.
   const [logOpen, setLogOpen] = createSignal(window.innerWidth > 720);
@@ -262,8 +264,14 @@ export default function App() {
     const g = game();
     if (!g) return;
     const v = g.view();
-    if (!((v.phase.type === 'Main' && v.current === g.me) || (v.phase.type === 'SpecialBuild' && v.toMove === g.me))) {
+    if (
+      !(
+        (v.phase.type === 'Main' && v.current === g.me) ||
+        ((v.phase.type === 'SpecialBuild' || v.phase.type === 'PairedTurn') && v.toMove === g.me)
+      )
+    ) {
       setTradeOpen(false);
+      setCitadelOpen(false);
       setDevModal(null);
     }
   });
@@ -350,6 +358,13 @@ export default function App() {
               <Show when={conn()?.room()?.ranked}>
                 <span class="room-tag mode-tag ranked">排位赛</span>
               </Show>
+              <Show when={g().turnSecondsLeft()}>
+                {(secs) => (
+                  <span class="turn-timer" classList={{ urgent: secs() <= 10 }} title="每步倒计时，超时将由 AI 代打一步">
+                    ⏱ {secs()}s
+                  </span>
+                )}
+              </Show>
               <Show when={g().replay}>
                 <span class="room-tag muted">回放</span>
               </Show>
@@ -360,7 +375,12 @@ export default function App() {
             <DiceView game={g()} />
             <PlayerList game={g()} />
             <GameLog game={g()} open={logOpen()} onToggle={() => setLogOpen(!logOpen())} />
-            <HandBar game={g()} onTrade={() => setTradeOpen(true)} onDevCard={(c) => playDevCard(g(), c)} />
+            <HandBar
+              game={g()}
+              onTrade={() => setTradeOpen(true)}
+              onCitadel={() => setCitadelOpen(true)}
+              onDevCard={(c) => playDevCard(g(), c)}
+            />
             <Flights game={g()} />
 
             <Show when={!g().replay && g().me !== null && g().view().phase.type === 'Discard' && g().view().pendingDiscard[g().me!] > 0}>
@@ -376,6 +396,9 @@ export default function App() {
             </Show>
             <Show when={tradeOpen()}>
               <TradeModal game={g()} onClose={() => setTradeOpen(false)} />
+            </Show>
+            <Show when={citadelOpen()}>
+              <CityUpgradeModal game={g()} onClose={() => setCitadelOpen(false)} />
             </Show>
             <Show when={devModal() === 'YearOfPlenty'}>
               <YearOfPlentyModal game={g()} onClose={() => setDevModal(null)} />

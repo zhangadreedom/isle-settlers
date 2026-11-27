@@ -13,7 +13,7 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CITY_FLAG, EMPTY, type Topology } from '../engine';
-import { BEACH, PLAYER_COLORS, RESOURCE_COLORS, RESOURCE_LABELS, SEA, SKY, TERRAIN_COLORS } from './palette';
+import { BEACH, METROPOLIS_COLORS, PLAYER_COLORS, RESOURCE_COLORS, RESOURCE_LABELS, SEA, SKY, TERRAIN_COLORS } from './palette';
 
 /** Static layout as numeric codes (see palette for terrain/harbor codes). */
 export interface BoardData {
@@ -24,6 +24,13 @@ export interface BoardData {
   islands: number[];
 }
 
+export interface KnightData {
+  vertex: number;
+  owner: number;
+  level: number;
+  active: boolean;
+}
+
 export interface PieceData {
   buildings: number[];
   roads: number[];
@@ -32,6 +39,10 @@ export interface PieceData {
   robber: number;
   /** Seafaring: the pirate's sea tile. */
   pirate?: number | null;
+  /** Citadels: knights on vertices. */
+  knights?: KnightData[];
+  /** Citadels: metropolis vertex per CityTrack (`null` if unclaimed). */
+  metropolises?: (number | null)[];
 }
 
 /** Terrain code of the sea (see palette). */
@@ -70,8 +81,8 @@ const PIPS = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
 /** Margin (world units) kept visible around the outermost tile centres: tiles plus harbor labels. */
 const MARGIN_X = 1.74;
 const MARGIN_Z = 1.42;
-/** Instance capacity for per-spot meshes; covers the largest board. */
-const MAX_SPOTS = 128;
+/** Instance capacity for per-spot meshes; covers 5–6 player seafaring boards (165 edges). */
+const MAX_SPOTS = 192;
 /** Beach outline: distance from the outermost tile centres at the top and the foot of the sand. */
 const BEACH_TOP = 1.55;
 const BEACH_FOOT = 1.94;
@@ -198,6 +209,27 @@ const cityGeometry = mergeGeometries([
   box(0.2, 0.36, 0.26, -0.12, 0.18, 0),
   prism(0.28, 0.14, 0.26).translate(0.11, 0.18, 0),
   prism(0.25, 0.12, 0.28).translate(-0.12, 0.36, 0),
+])!;
+
+/** Citadels: armored knight figure on a hexagonal plinth. */
+const knightGeometry = mergeGeometries([
+  new THREE.CylinderGeometry(0.15, 0.17, 0.07, 6).translate(0, 0.035, 0).toNonIndexed(),
+  new THREE.CylinderGeometry(0.085, 0.12, 0.22, 6).translate(0, 0.18, 0).toNonIndexed(),
+  new THREE.SphereGeometry(0.085, 8, 6).translate(0, 0.33, 0).toNonIndexed(),
+  box(0.04, 0.11, 0.14, 0, 0.4, 0),
+])!;
+
+/** Golden banner/halo marking an active knight. */
+const knightBannerGeometry = mergeGeometries([
+  new THREE.RingGeometry(0.18, 0.24, 6, 1, Math.PI / 6).rotateX(-Math.PI / 2).translate(0, 0.015, 0).toNonIndexed(),
+  new THREE.OctahedronGeometry(0.065, 0).translate(0, 0.52, 0).toNonIndexed(),
+])!;
+
+/** Citadels: golden arch spire crowning a Metropolis city. */
+const metropolisGeometry = mergeGeometries([
+  box(0.48, 0.06, 0.32, 0, 0.42, 0),
+  new THREE.ConeGeometry(0.14, 0.32, 6).translate(-0.12, 0.61, 0).toNonIndexed(),
+  new THREE.OctahedronGeometry(0.07, 0).translate(0.11, 0.52, 0).toNonIndexed(),
 ])!;
 
 const roadGeometry = new THREE.BoxGeometry(0.64, 0.09, 0.12);
@@ -351,6 +383,9 @@ export class BoardRenderer {
   private readonly pirate = new THREE.Group();
   private readonly settlements: THREE.InstancedMesh;
   private readonly cities: THREE.InstancedMesh;
+  private readonly knights: THREE.InstancedMesh;
+  private readonly knightBanners: THREE.InstancedMesh;
+  private readonly metropolises: THREE.InstancedMesh;
   private readonly markers: Record<PickKind, THREE.InstancedMesh>;
   private readonly robber = new THREE.Group();
   private readonly resizeObserver: ResizeObserver;
@@ -381,6 +416,8 @@ export class BoardRenderer {
   private pirateTo: [number, number] | null = null;
   private pirateStart = 0;
   private buildingPieces = new Map<number, Piece & { city: boolean }>();
+  private knightPieces = new Map<number, Piece & { level: number; active: boolean }>();
+  private metropolisPieces: { x: number; z: number; angle: number; track: number }[] = [];
   private robberFrom: [number, number] | null = null;
   private robberTo: [number, number] = [0, 0];
   private robberStart = 0;
@@ -435,12 +472,17 @@ export class BoardRenderer {
     this.scene.add(sea, this.beach, this.board);
 
     const pieceMaterial = std(0xffffff, { roughness: 0.6 });
+    const goldMaterial = std(0xffcf3a, { metalness: 0.5, roughness: 0.3, emissive: 0x5c3d00 });
+    const metroMaterial = std(0xffffff, { metalness: 0.45, roughness: 0.3, emissive: 0x2b2000 });
     this.roads = this.instanced(roadGeometry, pieceMaterial, MAX_SPOTS, true);
     this.ships = this.instanced(shipGeometry, pieceMaterial, MAX_SPOTS, true);
     this.scene.add(this.ships);
     this.settlements = this.instanced(settlementGeometry, pieceMaterial, MAX_SPOTS, true);
     this.cities = this.instanced(cityGeometry, pieceMaterial, MAX_SPOTS, true);
-    this.scene.add(this.roads, this.settlements, this.cities);
+    this.knights = this.instanced(knightGeometry, pieceMaterial, MAX_SPOTS, true);
+    this.knightBanners = this.instanced(knightBannerGeometry, goldMaterial, MAX_SPOTS);
+    this.metropolises = this.instanced(metropolisGeometry, metroMaterial, 6, true);
+    this.scene.add(this.roads, this.settlements, this.cities, this.knights, this.knightBanners, this.metropolises);
 
     const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false });
     this.markers = {
@@ -520,7 +562,8 @@ export class BoardRenderer {
     const isWater = (t: number | undefined) => t === undefined || terrain[t] === SEA_TERRAIN || terrain[t] === FOG_TERRAIN;
     const seafaring = terrain.some((t) => t === SEA_TERRAIN || t === FOG_TERRAIN);
     const [top, foot] = seafaring ? [ISLAND_BEACH_TOP, ISLAND_BEACH_FOOT] : [BEACH_TOP, BEACH_FOOT];
-    const perTileBanks = this.topology?.layout === 'FogIslands';
+    const perTileBanks =
+      this.topology?.layout === 'FogIslands' || this.topology?.layout === 'FogIslandsExtended';
     const banks: THREE.BufferGeometry[] = [];
     if (perTileBanks) {
       const hexRing = (cx: number, cz: number, r: number): [number, number][] =>
@@ -573,6 +616,8 @@ export class BoardRenderer {
     this.roadPieces.clear();
     this.shipPieces.clear();
     this.buildingPieces.clear();
+    this.knightPieces.clear();
+    this.metropolisPieces = [];
     this.robberFrom = null;
     this.pirateFrom = this.pirateTo = null;
     this.updateBoard(data);
@@ -634,8 +679,22 @@ export class BoardRenderer {
    * before drop in; a moved robber walks over. Pass `animate: false` for the
    * first sync of a game.
    */
-  setPieces({ buildings, roads, ships, robber, pirate }: PieceData, animate = true) {
+  setPieces({ buildings, roads, ships, robber, pirate, knights, metropolises }: PieceData, animate = true) {
     const now = animate ? performance.now() : -1e9;
+    const nextKnights = new Map<number, Piece & { level: number; active: boolean }>();
+    (knights ?? []).forEach((k) => {
+      const prev = this.knightPieces.get(k.vertex);
+      const [x, z] = this.vertexXZ[k.vertex] ?? [0, 0];
+      const angle = -Math.atan2(z, x);
+      const born = prev && prev.owner === k.owner && prev.level === k.level ? prev.born : now;
+      nextKnights.set(k.vertex, { x, z, angle, owner: k.owner, level: k.level, active: k.active, born });
+    });
+    this.knightPieces = nextKnights;
+    this.metropolisPieces = (metropolises ?? []).flatMap((v, track) => {
+      if (v === null || v === undefined) return [];
+      const [x, z] = this.vertexXZ[v] ?? [0, 0];
+      return [{ x, z, angle: -Math.atan2(z, x), track }];
+    });
     const nextShips = new Map<number, Piece>();
     (ships ?? []).forEach((owner, e) => {
       if (owner === EMPTY) return;
@@ -893,6 +952,37 @@ export class BoardRenderer {
     }
     this.commit(this.settlements, ns);
     this.commit(this.cities, nc);
+
+    let nk = 0;
+    let nb = 0;
+    for (const k of this.knightPieces.values()) {
+      const tk = Math.min(1, (now - k.born) / DROP_MS);
+      if (tk < 1) animating = true;
+      const rankScale = 0.88 + 0.16 * k.level;
+      const sc = Math.max(0.001, easeOutBack(tk)) * rankScale;
+      q.setFromAxisAngle(up, k.angle);
+      s.set(sc, sc, sc);
+      p.set(k.x, TOP + (1 - Math.min(1, tk * 1.4)) * 1.1, k.z);
+      this.knights.setMatrixAt(nk, m.compose(p, q, s));
+      this.knights.setColorAt(nk, color.setHex(PLAYER_COLORS[k.owner]));
+      nk++;
+      if (k.active) {
+        this.knightBanners.setMatrixAt(nb++, m.compose(p, q, s));
+      }
+    }
+    this.commit(this.knights, nk);
+    this.commit(this.knightBanners, nb);
+
+    let nm = 0;
+    for (const metro of this.metropolisPieces) {
+      q.setFromAxisAngle(up, metro.angle);
+      s.set(1, 1, 1);
+      p.set(metro.x, TOP, metro.z);
+      this.metropolises.setMatrixAt(nm, m.compose(p, q, s));
+      this.metropolises.setColorAt(nm, color.setHex(METROPOLIS_COLORS[metro.track] ?? 0xffca3a));
+      nm++;
+    }
+    this.commit(this.metropolises, nm);
 
     const t = Math.min(1, (now - this.robberStart) / ROBBER_MS);
     const from = this.robberFrom ?? this.robberTo;

@@ -25,6 +25,7 @@
 //! ```
 
 pub mod action;
+pub mod bitset;
 pub mod board;
 mod legal;
 pub mod resources;
@@ -33,12 +34,13 @@ mod rules;
 pub mod state;
 pub mod topology;
 
-pub use action::{Action, Event, EventSink, RuleError};
+pub use action::{Action, Event, EventSink, RuleError, TradeGood};
+pub use bitset::BitSet;
 pub use board::Board;
-pub use resources::{HarborKind, Resource, ResourceSet, Terrain};
+pub use resources::{CityTrack, Commodity, CommoditySet, HarborKind, Resource, ResourceSet, Terrain};
 pub use rng::Rng;
 pub use state::{
-    ConfigError, DevCard, GameConfig, GameState, MAX_PLAYERS, MAX_SHIPS, Phase, PlayerState,
-    Scenario, TradeOffer, TradeResponse,
+    BARBARIAN_STEPS, ConfigError, DevCard, GameConfig, GameState, MAX_KNIGHTS_PER_LEVEL,
+    MAX_PLAYERS, MAX_SHIPS, Phase, PlayerState, Scenario, TradeOffer, TradeResponse,
 };
 pub use topology::{BoardLayout, Topology};

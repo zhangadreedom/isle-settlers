@@ -4,12 +4,23 @@
 import { batch, createSignal } from 'solid-js';
 import type { BoardRenderer, BoardData, Highlights, PickKind } from '../board/BoardRenderer';
 import { topology as topologyOf } from '../engine';
-import type { Action, BoardInfo, ChatLine, Event, LegalActions, PlayerView, ResourceSet } from '../generated/proto';
+import type { Action, BoardInfo, ChatLine, CommoditySet, Event, LegalActions, PlayerView, ResourceSet } from '../generated/proto';
 import type { GameSource, SourceState } from './source';
 import { RESOURCES, describe, errorText } from './text';
 
-/** Build modes; `ship` and `move` (move a ship: pick it, then where) are seafaring. */
-export type BuildMode = 'road' | 'settlement' | 'city' | 'ship' | 'move' | null;
+/** Build & tactical modes on the board. */
+export type BuildMode =
+  | 'road'
+  | 'settlement'
+  | 'city'
+  | 'ship'
+  | 'move'
+  | 'knight'
+  | 'activate'
+  | 'promote'
+  | 'knightMove'
+  | 'chase'
+  | null;
 
 export interface LogEntry {
   id: number;
@@ -39,7 +50,7 @@ export function boardData(info: BoardInfo): BoardData {
   };
 }
 
-const sameSet = (a: ResourceSet, b: ResourceSet) => a.every((x, i) => x === b[i]);
+const sameSet = (a: readonly number[], b: readonly number[]) => a.every((x, i) => x === b[i]);
 
 export function createGame(source: GameSource, renderer: BoardRenderer) {
   const board = boardData(source.board);
@@ -54,12 +65,31 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
   const [toast, setToast] = createSignal<string | null>(null);
   const [dice, setDice] = createSignal<{ values: [number, number]; key: number } | null>(null);
   const [flights, setFlights] = createSignal<Flight[]>([]);
-  const [victimChoice, setVictimChoice] = createSignal<{ tile: number; victims: number[] } | null>(null);
+  const [victimChoice, setVictimChoice] = createSignal<{ tile: number; victims: number[]; knightVertex?: number } | null>(null);
   /** Seafaring: the ship picked to move (mode `move`). */
   const [moveFrom, setMoveFrom] = createSignal<number | null>(null);
+  /** Citadels: the active knight picked to move or chase robber. */
+  const [knightFrom, setKnightFrom] = createSignal<number | null>(null);
   /** Seafaring: a coastal edge that could take a road or a ship. */
   const [routeChoice, setRouteChoice] = createSignal<number | null>(null);
-  const seafaring = source.board.layout === 'Archipelago' || source.board.layout === 'FogIslands';
+  /** Online turn timer: seconds remaining until autopilot acts. */
+  const [turnSecondsLeft, setTurnSecondsLeft] = createSignal<number | null>(null);
+  let deadlineAt: number | null = null;
+  const countdownTimer = window.setInterval(() => {
+    if (deadlineAt === null) {
+      if (turnSecondsLeft() !== null) setTurnSecondsLeft(null);
+      return;
+    }
+    const secs = Math.max(0, Math.ceil((deadlineAt - performance.now()) / 1000));
+    if (secs !== turnSecondsLeft()) setTurnSecondsLeft(secs);
+  }, 250);
+
+  const seafaring =
+    source.board.layout === 'Archipelago' ||
+    source.board.layout === 'FogIslands' ||
+    source.board.layout === 'ArchipelagoExtended' ||
+    source.board.layout === 'FogIslandsExtended';
+  const citadels = source.board.config.scenario === 'Citadels';
 
   let logId = 0;
   let flightId = 0;
@@ -92,6 +122,13 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
 
   function onState(s: SourceState) {
     if (disposed) return;
+    if (s.turnRemainingMs !== undefined) {
+      deadlineAt = s.turnRemainingMs !== null && s.view.winner === null ? performance.now() + s.turnRemainingMs : null;
+      setTurnSecondsLeft(deadlineAt !== null ? Math.max(0, Math.ceil((deadlineAt - performance.now()) / 1000)) : null);
+    } else if (s.view.winner !== null) {
+      deadlineAt = null;
+      setTurnSecondsLeft(null);
+    }
     syncFog(s.view);
     if (s.resync) {
       setLog([]);
@@ -104,17 +141,37 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
       setLegal(s.legal);
       if (mode() && !modeAvailable(mode(), s.legal.actions)) setModeSignal(null);
       if (mode() !== 'move') setMoveFrom(null);
-      if (s.view.phase.type !== 'MoveRobber') setVictimChoice(null);
+      if (mode() !== 'knightMove' && mode() !== 'chase') setKnightFrom(null);
+      if (s.view.phase.type !== 'MoveRobber' && mode() !== 'chase') setVictimChoice(null);
       setRouteChoice(null);
     });
     renderer.setPieces(
-      { buildings: s.view.buildings, roads: s.view.roads, ships: s.view.ships, robber: s.view.robber, pirate: s.view.pirate },
+      {
+        buildings: s.view.buildings,
+        roads: s.view.roads,
+        ships: s.view.ships,
+        robber: s.view.robber,
+        pirate: s.view.pirate,
+        knights: s.view.citadels?.knights,
+        metropolises: s.view.citadels?.metropolises,
+      },
       !s.resync,
     );
     renderer.setHighlights(highlights());
   }
 
-  const MODE_ACTION = { road: 'BuildRoad', settlement: 'BuildSettlement', city: 'BuildCity', ship: 'BuildShip', move: 'MoveShip' } as const;
+  const MODE_ACTION: Record<Exclude<BuildMode, null>, Action['type']> = {
+    road: 'BuildRoad',
+    settlement: 'BuildSettlement',
+    city: 'BuildCity',
+    ship: 'BuildShip',
+    move: 'MoveShip',
+    knight: 'RecruitKnight',
+    activate: 'ActivateKnight',
+    promote: 'PromoteKnight',
+    knightMove: 'MoveKnight',
+    chase: 'ChaseRobber',
+  };
 
   function modeAvailable(m: BuildMode, list: Action[]) {
     return m !== null && list.some((a) => a.type === MODE_ACTION[m]);
@@ -124,8 +181,9 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     const v = view();
     const list = actions();
     if (!v || !list.length) return null;
-    const ids = (type: 'BuildRoad' | 'BuildSettlement' | 'BuildCity' | 'BuildShip') =>
-      list.flatMap((a) => (a.type === type ? [a.value] : []));
+    const ids = (
+      type: 'BuildRoad' | 'BuildSettlement' | 'BuildCity' | 'BuildShip' | 'RecruitKnight' | 'ActivateKnight' | 'PromoteKnight',
+    ) => list.flatMap((a) => (a.type === type ? [a.value] : []));
     switch (v.phase.type) {
       case 'SetupSettlement':
         return { kind: 'vertex', ids: ids('BuildSettlement') };
@@ -136,17 +194,35 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
         return { kind: 'tile', ids: [...new Set(list.flatMap((a) => (a.type === 'MoveRobber' ? [a.value.tile] : [])))] };
       case 'Main':
       case 'SpecialBuild':
+      case 'PairedTurn':
         if (v.toMove !== me() || (v.phase.type === 'Main' && v.current !== me())) return null;
         if (mode() === 'road') return { kind: 'edge', ids: ids('BuildRoad') };
         if (mode() === 'settlement') return { kind: 'vertex', ids: ids('BuildSettlement') };
         if (mode() === 'city') return { kind: 'vertex', ids: ids('BuildCity') };
         if (mode() === 'ship') return { kind: 'edge', ids: ids('BuildShip') };
+        if (mode() === 'knight') return { kind: 'vertex', ids: ids('RecruitKnight') };
+        if (mode() === 'activate') return { kind: 'vertex', ids: ids('ActivateKnight') };
+        if (mode() === 'promote') return { kind: 'vertex', ids: ids('PromoteKnight') };
         if (mode() === 'move') {
           const moves = list.flatMap((a) => (a.type === 'MoveShip' ? [a.value] : []));
           const from = moveFrom();
           return from === null
             ? { kind: 'edge', ids: [...new Set(moves.map((m) => m.from))] }
             : { kind: 'edge', ids: moves.filter((m) => m.from === from).map((m) => m.to) };
+        }
+        if (mode() === 'knightMove') {
+          const moves = list.flatMap((a) => (a.type === 'MoveKnight' ? [a.value] : []));
+          const from = knightFrom();
+          return from === null
+            ? { kind: 'vertex', ids: [...new Set(moves.map((m) => m.from))] }
+            : { kind: 'vertex', ids: moves.filter((m) => m.from === from).map((m) => m.to) };
+        }
+        if (mode() === 'chase') {
+          const chases = list.flatMap((a) => (a.type === 'ChaseRobber' ? [a.value] : []));
+          const kv = knightFrom();
+          return kv === null
+            ? { kind: 'vertex', ids: [...new Set(chases.map((c) => c.vertex))] }
+            : { kind: 'tile', ids: [...new Set(chases.filter((c) => c.vertex === kv).map((c) => c.tile))] };
         }
         return null;
       default:
@@ -174,6 +250,16 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     const v = view();
     if (!v) return;
     if (kind === 'tile') {
+      if (mode() === 'chase' && knightFrom() !== null) {
+        const kv = knightFrom()!;
+        const options = actions().flatMap((a) =>
+          a.type === 'ChaseRobber' && a.value.vertex === kv && a.value.tile === id ? [a.value.victim] : [],
+        );
+        const victims = options.filter((x): x is number => x !== null);
+        if (victims.length > 1) setVictimChoice({ tile: id, victims, knightVertex: kv });
+        else act((a) => a.type === 'ChaseRobber' && a.value.vertex === kv && a.value.tile === id);
+        return;
+      }
       const options = actions().flatMap((a) => (a.type === 'MoveRobber' && a.value.tile === id ? [a.value.victim] : []));
       const victims = options.filter((x): x is number => x !== null);
       if (victims.length > 1) setVictimChoice({ tile: id, victims });
@@ -198,13 +284,42 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
       else act((a) => a.type === 'BuildRoad' && a.value === id);
       return;
     }
-    if ((v.phase.type === 'Main' || v.phase.type === 'SpecialBuild') && mode() === 'city') act((a) => a.type === 'BuildCity' && a.value === id);
+    if (mode() === 'knight') {
+      act((a) => a.type === 'RecruitKnight' && a.value === id);
+      return;
+    }
+    if (mode() === 'activate') {
+      act((a) => a.type === 'ActivateKnight' && a.value === id);
+      return;
+    }
+    if (mode() === 'promote') {
+      act((a) => a.type === 'PromoteKnight' && a.value === id);
+      return;
+    }
+    if (mode() === 'knightMove') {
+      const from = knightFrom();
+      if (from === null) {
+        setKnightFrom(id);
+        renderer.setHighlights(highlights());
+      } else {
+        act((a) => a.type === 'MoveKnight' && a.value.from === from && a.value.to === id);
+      }
+      return;
+    }
+    if (mode() === 'chase') {
+      setKnightFrom(id);
+      renderer.setHighlights(highlights());
+      return;
+    }
+    if ((v.phase.type === 'Main' || v.phase.type === 'SpecialBuild' || v.phase.type === 'PairedTurn') && mode() === 'city')
+      act((a) => a.type === 'BuildCity' && a.value === id);
     else act((a) => a.type === 'BuildSettlement' && a.value === id);
   }
 
   function setMode(m: BuildMode) {
     setModeSignal(mode() === m ? null : m);
     setMoveFrom(null);
+    setKnightFrom(null);
     renderer.setHighlights(highlights());
   }
 
@@ -292,6 +407,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
   function dispose() {
     disposed = true;
     window.clearTimeout(toastTimer);
+    window.clearInterval(countdownTimer);
     renderer.onPick = undefined;
     renderer.setHighlights(null);
     source.dispose();
@@ -312,6 +428,8 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     online: source.online,
     /** Ships, the pirate and gold are in play. */
     seafaring,
+    /** Commodities, city tracks, knights and barbarian raids are in play. */
+    citadels,
     /** Playback controls when watching a replay. */
     replay: source.replay,
     /** The finished game as a replay record (local games and online rooms). */
@@ -324,12 +442,14 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     log,
     mode,
     thinking: () => source.thinking(),
+    turnSecondsLeft,
     seat: (s: number) => source.seat(s),
     toast,
     dice,
     flights,
     victimChoice,
     moveFrom,
+    knightFrom,
     routeChoice,
     clearRouteChoice: () => setRouteChoice(null),
     name,
@@ -344,6 +464,9 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     /** Finds the legal Discard/YearOfPlenty/ChooseGold action matching a set. */
     actSet(type: 'Discard' | 'PlayYearOfPlenty' | 'ChooseGold', set: ResourceSet) {
       return act((a) => a.type === type && sameSet(a.value, set));
+    },
+    actDiscardCitadel(resources: ResourceSet, commodities: CommoditySet) {
+      return act((a) => a.type === 'DiscardCitadel' && sameSet(a.value.resources, resources) && sameSet(a.value.commodities, commodities));
     },
   };
 }

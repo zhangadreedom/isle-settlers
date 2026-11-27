@@ -1,22 +1,43 @@
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js';
+import { createEffect, createSignal, For, Show } from 'solid-js';
 import type { Game } from '../game/controller';
-import type { ReplayRecord, ResourceSet, RoomInfo, TradeResponse } from '../generated/proto';
+import type { CityTrack, CommoditySet, ReplayRecord, ResourceSet, RoomInfo, TradeGood, TradeResponse } from '../generated/proto';
 import { refreshMyProfile } from '../net/ranking';
 import { RatingResult } from './Ranking';
-import { RESOURCES, RESOURCE_NAME, setTotal } from '../game/text';
-import { Modal, ResIcon, SeatDot, SetView, Stepper } from './bits';
+import {
+  CITY_TRACKS,
+  COMMODITIES,
+  COMMODITY_NAME,
+  RESOURCES,
+  RESOURCE_NAME,
+  TRACK_COMMODITY,
+  TRACK_NAME,
+  TRACK_PERK,
+  setTotal,
+} from '../game/text';
+import { CommIcon, Modal, ResIcon, SeatDot, SetView, Stepper } from './bits';
 import { EMBEDDED } from '../embed';
 import { downloadReplay } from './Hud';
 
 const empty = (): ResourceSet => [0, 0, 0, 0, 0];
+const emptyComm = (): CommoditySet => [0, 0, 0];
 const withCount = (s: ResourceSet, i: number, v: number): ResourceSet => s.map((x, j) => (j === i ? v : x)) as ResourceSet;
+const withCommCount = (s: CommoditySet, i: number, v: number): CommoditySet => s.map((x, j) => (j === i ? v : x)) as CommoditySet;
 
 export function DiscardModal(props: { game: Game }) {
   const g = props.game;
   const need = () => (g.me === null ? 0 : g.view().pendingDiscard[g.me]);
   const hand = () => g.view().me?.hand ?? empty();
+  const comm = () => g.view().me?.commodities ?? emptyComm();
   const [pick, setPick] = createSignal<ResourceSet>(empty());
-  const total = () => setTotal(pick());
+  const [pickComm, setPickComm] = createSignal<CommoditySet>(emptyComm());
+  const total = () => setTotal(pick()) + setTotal(pickComm());
+  const submit = () => {
+    const ok = g.citadels ? g.actDiscardCitadel(pick(), pickComm()) : g.actSet('Discard', pick());
+    if (ok) {
+      setPick(empty());
+      setPickComm(emptyComm());
+    }
+  };
   return (
     <Modal title={`弃掉 ${need()} 张牌`}>
       <p class="muted">掷出了 7，你的手牌超过 7 张，需要弃掉一半（向下取整）。</p>
@@ -31,12 +52,24 @@ export function DiscardModal(props: { game: Game }) {
             />
           )}
         </For>
+        <Show when={g.citadels}>
+          <For each={COMMODITIES}>
+            {(_, i) => (
+              <Stepper
+                label={<CommIcon c={i()} size="md" />}
+                value={pickComm()[i()]}
+                max={Math.min(comm()[i()], pickComm()[i()] + need() - total())}
+                onChange={(v) => setPickComm(withCommCount(pickComm(), i(), v))}
+              />
+            )}
+          </For>
+        </Show>
       </div>
       <footer>
         <span class="muted">
           已选 {total()} / {need()}
         </span>
-        <button class="primary" disabled={total() !== need()} onClick={() => g.actSet('Discard', pick()) && setPick(empty())}>
+        <button class="primary" disabled={total() !== need()} onClick={submit}>
           确认弃牌
         </button>
       </footer>
@@ -56,12 +89,17 @@ export function VictimModal(props: { game: Game }) {
                 <button
                   class="choice"
                   onClick={() => {
-                    g.act((a) => a.type === 'MoveRobber' && a.value.tile === c().tile && a.value.victim === q);
+                    const kv = c().knightVertex;
+                    if (kv !== undefined) {
+                      g.act((a) => a.type === 'ChaseRobber' && a.value.vertex === kv && a.value.tile === c().tile && a.value.victim === q);
+                    } else {
+                      g.act((a) => a.type === 'MoveRobber' && a.value.tile === c().tile && a.value.victim === q);
+                    }
                     g.clearVictimChoice();
                   }}
                 >
                   <SeatDot seat={q} /> {g.name(q)}
-                  <span class="muted">{g.view().players[q].resourceCount} 张牌</span>
+                  <span class="muted">{g.view().players[q].resourceCount + g.view().players[q].commodityCount} 张牌</span>
                 </button>
               )}
             </For>
@@ -192,16 +230,43 @@ const RESPONSE_TEXT: Record<TradeResponse, string> = { Pending: '考虑中…', 
 
 export function TradeModal(props: { game: Game; onClose: () => void }) {
   const g = props.game;
-  const [tab, setTab] = createSignal<'bank' | 'players'>(g.view().trade ? 'players' : 'bank');
+  const isPaired = () => g.view().phase.type === 'PairedTurn';
+  const [tab, setTab] = createSignal<'bank' | 'players'>(g.view().trade && !isPaired() ? 'players' : 'bank');
   const [give, setGive] = createSignal<ResourceSet>(empty());
   const [get, setGet] = createSignal<ResourceSet>(empty());
-  const [bankGive, setBankGive] = createSignal<number | null>(null);
+  const [bankGive, setBankGive] = createSignal<TradeGood | null>(null);
   const me = () => g.view().me!;
   const offer = () => g.view().trade;
 
-  const maritime = createMemo(() =>
-    new Set(g.legal().actions.flatMap((a) => (a.type === 'MaritimeTrade' ? [`${a.value.give}>${a.value.get}`] : []))),
-  );
+  const sameGood = (a: TradeGood, b: TradeGood) => a.type === b.type && a.value === b.value;
+  const canGetGood = (want: TradeGood) => {
+    const giveGood = bankGive();
+    if (!giveGood) return false;
+    if (giveGood.type === 'Resource' && want.type === 'Resource') {
+      return g.legal().actions.some((a) => a.type === 'MaritimeTrade' && a.value.give === giveGood.value && a.value.get === want.value);
+    }
+    return g
+      .legal()
+      .actions.some((a) => a.type === 'MaritimeTradeGood' && sameGood(a.value.give, giveGood) && sameGood(a.value.get, want));
+  };
+  const doBankTrade = (want: TradeGood) => {
+    const giveGood = bankGive();
+    if (!giveGood) return;
+    if (giveGood.type === 'Resource' && want.type === 'Resource') {
+      g.act((a) => a.type === 'MaritimeTrade' && a.value.give === giveGood.value && a.value.get === want.value);
+      const ri = RESOURCES.indexOf(giveGood.value);
+      if (me().hand[ri] < me().tradeRatios[ri]) setBankGive(null);
+    } else {
+      g.act((a) => a.type === 'MaritimeTradeGood' && sameGood(a.value.give, giveGood) && sameGood(a.value.get, want));
+      if (giveGood.type === 'Resource') {
+        const ri = RESOURCES.indexOf(giveGood.value);
+        if (me().hand[ri] < me().tradeRatios[ri]) setBankGive(null);
+      } else {
+        const ci = COMMODITIES.indexOf(giveGood.value);
+        if (me().commodities[ci] < me().commodityTradeRatio) setBankGive(null);
+      }
+    }
+  };
 
   return (
     <Modal title="交易" onClose={props.onClose} wide>
@@ -209,20 +274,28 @@ export function TradeModal(props: { game: Game; onClose: () => void }) {
         <button classList={{ on: tab() === 'bank' }} onClick={() => setTab('bank')}>
           与银行
         </button>
-        <button classList={{ on: tab() === 'players' }} onClick={() => setTab('players')}>
-          与玩家
-        </button>
+        <Show when={!isPaired()}>
+          <button classList={{ on: tab() === 'players' }} onClick={() => setTab('players')}>
+            与玩家
+          </button>
+        </Show>
       </div>
 
       <Show when={tab() === 'bank'}>
-        <p class="muted">选择要给出的资源（按你拥有的港口自动使用最优比例），再选择想要的资源。</p>
+        <p class="muted">选择要给出的资源{g.citadels ? '或商品' : ''}（自动使用最优港口/商馆比例），再选择目标。</p>
         <div class="bank-grid">
           <For each={RESOURCES}>
             {(r, i) => {
               const ratio = () => me().tradeRatios[i()];
               const can = () => me().hand[i()] >= ratio();
+              const item: TradeGood = { type: 'Resource', value: r };
               return (
-                <button class="choice" classList={{ on: bankGive() === i() }} disabled={!can()} onClick={() => setBankGive(i())}>
+                <button
+                  class="choice"
+                  classList={{ on: bankGive() !== null && sameGood(bankGive()!, item) }}
+                  disabled={!can()}
+                  onClick={() => setBankGive(item)}
+                >
                   <ResIcon r={i()} size="md" />
                   <span>
                     {ratio()} {RESOURCE_NAME[r]} → 1
@@ -232,6 +305,29 @@ export function TradeModal(props: { game: Game; onClose: () => void }) {
               );
             }}
           </For>
+          <Show when={g.citadels}>
+            <For each={COMMODITIES}>
+              {(c, i) => {
+                const ratio = () => me().commodityTradeRatio;
+                const can = () => me().commodities[i()] >= ratio();
+                const item: TradeGood = { type: 'Commodity', value: c };
+                return (
+                  <button
+                    class="choice"
+                    classList={{ on: bankGive() !== null && sameGood(bankGive()!, item) }}
+                    disabled={!can()}
+                    onClick={() => setBankGive(item)}
+                  >
+                    <CommIcon c={i()} size="md" />
+                    <span>
+                      {ratio()} {COMMODITY_NAME[c]} → 1
+                    </span>
+                    <span class="muted">有 {me().commodities[i()]}</span>
+                  </button>
+                );
+              }}
+            </For>
+          </Show>
         </div>
         <Show when={bankGive() !== null}>
           <p>换成：</p>
@@ -240,16 +336,26 @@ export function TradeModal(props: { game: Game; onClose: () => void }) {
               {(r, i) => (
                 <button
                   class="choice"
-                  disabled={!maritime().has(`${RESOURCES[bankGive()!]}>${r}`)}
-                  onClick={() => {
-                    g.act((a) => a.type === 'MaritimeTrade' && a.value.give === RESOURCES[bankGive()!] && a.value.get === r);
-                    if (me().hand[bankGive()!] < me().tradeRatios[bankGive()!]) setBankGive(null);
-                  }}
+                  disabled={!canGetGood({ type: 'Resource', value: r })}
+                  onClick={() => doBankTrade({ type: 'Resource', value: r })}
                 >
                   <ResIcon r={i()} size="md" /> {RESOURCE_NAME[r]}
                 </button>
               )}
             </For>
+            <Show when={g.citadels}>
+              <For each={COMMODITIES}>
+                {(c, i) => (
+                  <button
+                    class="choice"
+                    disabled={!canGetGood({ type: 'Commodity', value: c })}
+                    onClick={() => doBankTrade({ type: 'Commodity', value: c })}
+                  >
+                    <CommIcon c={i()} size="md" /> {COMMODITY_NAME[c]}
+                  </button>
+                )}
+              </For>
+            </Show>
           </div>
         </Show>
       </Show>
@@ -414,6 +520,91 @@ export function GameOverModal(props: {
           )}
         </Show>
       </footer>
+    </Modal>
+  );
+}
+
+/** Citadels: three-track urban improvements and Metropolis crowning. */
+export function CityUpgradeModal(props: { game: Game; onClose: () => void }) {
+  const g = props.game;
+  const [metroTrack, setMetroTrack] = createSignal<CityTrack | null>(null);
+  const progress = () => (g.me !== null ? g.view().players[g.me].cityProgress : [0, 0, 0]);
+  const comm = () => g.view().me?.commodities ?? emptyComm();
+
+  const upgradeOptions = (track: CityTrack) =>
+    g.legal().actions.flatMap((a) => (a.type === 'UpgradeCity' && a.value.track === track ? [a.value.metropolis] : []));
+
+  const clickUpgrade = (track: CityTrack) => {
+    const opts = upgradeOptions(track);
+    if (!opts.length) return;
+    if (opts.length === 1) {
+      g.act((a) => a.type === 'UpgradeCity' && a.value.track === track && a.value.metropolis === opts[0]);
+    } else {
+      setMetroTrack(track);
+    }
+  };
+
+  return (
+    <Modal title="城邦科技与大都会" onClose={props.onClose} wide>
+      <p class="muted">
+        拥有城市即可消耗对应商品升级；Lv3 解锁专属特权，率先达 Lv4 加冕大都会（+2 分且免疫黑帆攻城），他人先达 Lv5 可夺走。
+      </p>
+      <div class="tracks-grid">
+        <For each={CITY_TRACKS}>
+          {(track, idx) => {
+            const lvl = () => progress()[idx()];
+            const ci = () => COMMODITIES.indexOf(TRACK_COMMODITY[track]);
+            const owner = () => g.view().citadels?.metropolisOwners[idx()] ?? null;
+            const opts = () => upgradeOptions(track);
+            return (
+              <div class="track-card">
+                <h4>
+                  <span>{TRACK_NAME[track]}</span>
+                  <span>Lv.{lvl()}/5</span>
+                </h4>
+                <div class="track-pips">
+                  <For each={[1, 2, 3, 4, 5]}>{(k) => <span classList={{ on: lvl() >= k }} />}</For>
+                </div>
+                <p class="muted small">{TRACK_PERK[track]}</p>
+                <p class="muted small">
+                  大都会：{owner() !== null ? g.name(owner()!) : '尚未加冕'}
+                </p>
+                <Show
+                  when={lvl() < 5}
+                  fallback={<span class="muted small">已满级</span>}
+                >
+                  <button class="primary small" disabled={opts().length === 0} onClick={() => clickUpgrade(track)}>
+                    升至 Lv.{lvl() + 1}（{lvl() + 1}×
+                    <CommIcon c={ci()} />，现有 {comm()[ci()]}）
+                  </button>
+                </Show>
+              </div>
+            );
+          }}
+        </For>
+      </div>
+      <Show when={metroTrack()}>
+        {(track) => (
+          <div class="rules-box">
+            <h4>选择一座普通城市加冕为【{TRACK_NAME[track()]}大都会】：</h4>
+            <div class="choices row">
+              <For each={upgradeOptions(track()).filter((v): v is number => v !== null)}>
+                {(v, k) => (
+                  <button
+                    class="choice primary"
+                    onClick={() => {
+                      g.act((a) => a.type === 'UpgradeCity' && a.value.track === track() && a.value.metropolis === v);
+                      setMetroTrack(null);
+                    }}
+                  >
+                    城市 #{k() + 1}（格点 {v}）
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+        )}
+      </Show>
     </Modal>
   );
 }

@@ -8,14 +8,17 @@
 //! cards, the order of the development deck, and the RNG state (future dice).
 //! Card *counts* are public.
 
-use isle_core::topology::{edges_in, vertices_in};
+use isle_core::topology::{NONE, edges_in, vertices_in};
 use isle_core::{
-    BoardLayout, GameConfig, GameState, HarborKind, Phase, Resource, ResourceSet, Terrain,
-    TradeOffer,
+    BARBARIAN_STEPS, BoardLayout, GameConfig, GameState, HarborKind, Phase, Resource, ResourceSet,
+    Terrain, TradeOffer,
 };
 use serde::{Deserialize, Serialize};
 
-pub use isle_core::{Action, DevCard, Event, RuleError, TradeResponse};
+pub use isle_core::{
+    Action, CityTrack, Commodity, CommoditySet, DevCard, Event, RuleError, TradeGood,
+    TradeResponse,
+};
 
 pub mod account;
 pub mod net;
@@ -69,6 +72,10 @@ pub struct PlayerPublic {
     pub public_victory_points: u8,
     /// Harbor access bits: 1 << resource for 2:1 harbors, 1 << 5 for 3:1.
     pub harbors: u8,
+    pub commodity_count: u8,
+    pub city_progress: [u8; 3],
+    pub knights_left: [u8; 3],
+    pub defender_points: u8,
 }
 
 /// The viewer's own private information.
@@ -86,6 +93,8 @@ pub struct PrivateInfo {
     pub victory_points: u8,
     /// Best maritime ratio for giving each resource.
     pub trade_ratios: [u8; 5],
+    pub commodities: CommoditySet,
+    pub commodity_trade_ratio: u8,
 }
 
 /// Revealed board state on fog maps, updated as unexplored tiles flip.
@@ -96,6 +105,32 @@ pub struct FogBoard {
     pub terrain: Vec<Terrain>,
     pub numbers: Vec<u8>,
     pub islands: Vec<u8>,
+}
+
+/// A knight piece on an intersection in Citadels mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct KnightView {
+    pub vertex: u8,
+    pub owner: u8,
+    pub level: u8,
+    pub active: bool,
+    pub can_act: bool,
+    pub promoted: bool,
+}
+
+/// Public Citadels (Cities & Knights) board state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct CitadelView {
+    pub commodity_bank: CommoditySet,
+    pub barbarian_pos: u8,
+    pub barbarian_steps: u8,
+    pub metropolises: [Option<u8>; 3],
+    pub metropolis_owners: [Option<u8>; 3],
+    pub knights: Vec<KnightView>,
 }
 
 /// Everything one seat may know about the game right now.
@@ -141,6 +176,9 @@ pub struct PlayerView {
     /// Fog maps: current board tiles as revealed so far.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fog: Option<FogBoard>,
+    /// Citadels mode: commodities, metropolises, knights and barbarian fleet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citadels: Option<CitadelView>,
 }
 
 pub fn board_info(state: &GameState) -> BoardInfo {
@@ -191,6 +229,10 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
                 longest_road: ps.longest_road,
                 public_victory_points: state.public_victory_points(p),
                 harbors: ps.harbors,
+                commodity_count: ps.commodities.total() as u8,
+                city_progress: ps.city_progress,
+                knights_left: ps.knights_left,
+                defender_points: ps.defender_points,
             }
         })
         .collect();
@@ -203,6 +245,8 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
             new_dev_cards: ps.new_dev_cards,
             victory_points: state.victory_points(p),
             trade_ratios: Resource::ALL.map(|r| state.trade_ratio(p, r)),
+            commodities: ps.commodities,
+            commodity_trade_ratio: state.commodity_trade_ratio(p),
         }
     });
     PlayerView {
@@ -214,7 +258,7 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
         dice: state.dice,
         dev_card_played: state.dev_card_played,
         robber: state.robber,
-        pirate: (state.pirate != isle_core::topology::NONE).then_some(state.pirate),
+        pirate: (state.pirate != NONE).then_some(state.pirate),
         ship_moved: state.ship_moved,
         bank: state.bank,
         dev_deck_len: state.dev_deck_len,
@@ -237,6 +281,30 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
             numbers: state.board.numbers[..topo.num_tiles].to_vec(),
             islands: state.board.tile_island[..topo.num_tiles].to_vec(),
         }),
+        citadels: state.config.scenario.is_citadels().then(|| {
+            let knights = (0..topo.num_vertices as u8)
+                .filter(|&v| state.knight_owner[v as usize] != NONE)
+                .map(|v| {
+                    let active = state.knight_active.contains(v);
+                    KnightView {
+                        vertex: v,
+                        owner: state.knight_owner[v as usize],
+                        level: state.knight_level[v as usize],
+                        active,
+                        can_act: active && !state.knight_fresh.contains(v),
+                        promoted: state.knight_promoted.contains(v),
+                    }
+                })
+                .collect();
+            CitadelView {
+                commodity_bank: state.commodity_bank,
+                barbarian_pos: state.barbarian_pos,
+                barbarian_steps: BARBARIAN_STEPS,
+                metropolises: state.metropolises.map(|v| (v != NONE).then_some(v)),
+                metropolis_owners: state.metropolis_owners,
+                knights,
+            }
+        }),
     }
 }
 
@@ -246,12 +314,13 @@ mod tests {
     use isle_ai::{Bot, WeightedRandomBot};
     use isle_core::{GameConfig, Rng};
 
-    /// Mid-game states from bot play (classic and fog islands).
+    /// Mid-game states from bot play (classic, fog islands and citadels).
     fn sample_states() -> Vec<GameState> {
         let mut out = Vec::new();
         for (scenario, seeds) in [
             (isle_core::Scenario::Classic, 0..20u64),
             (isle_core::Scenario::FogIslands, 20..35u64),
+            (isle_core::Scenario::Citadels, 35..50u64),
         ] {
             for seed in seeds {
                 let mut g = GameState::new(GameConfig::scenario(scenario, 4), seed).unwrap();
@@ -274,8 +343,8 @@ mod tests {
     }
 
     /// Changes everything a viewer must not be able to observe: other seats'
-    /// hand composition and development cards (keeping counts), the deck
-    /// order, hidden fog stacks and the RNG.
+    /// hand/commodity composition and development cards (keeping counts), the
+    /// deck order, hidden fog stacks and the RNG.
     fn scramble_hidden(g: &GameState, viewer: u8, seed: u64) -> GameState {
         let mut h = *g;
         for q in 0..h.num_players() {
@@ -285,6 +354,9 @@ mod tests {
             let total = h.players[q].hand.total() as u8;
             h.players[q].hand =
                 ResourceSet::single(Resource::from_index((q + 1) % 5).unwrap(), total);
+            let ctotal = h.players[q].commodities.total() as u8;
+            h.players[q].commodities =
+                CommoditySet::single(Commodity::from_index((q + 1) % 3).unwrap(), ctotal);
             let d = h.players[q].dev_cards;
             h.players[q].dev_cards = [d[1], d[2], d[3], d[4], d[0]];
             let nd = h.players[q].new_dev_cards;
@@ -321,11 +393,18 @@ mod tests {
                 let v = player_view(&g, Some(viewer));
                 let me = v.me.unwrap();
                 assert_eq!(me.hand, g.players[viewer as usize].hand);
+                assert_eq!(me.commodities, g.players[viewer as usize].commodities);
+                assert_eq!(me.commodity_trade_ratio, g.commodity_trade_ratio(viewer));
                 assert_eq!(me.victory_points, g.victory_points(viewer));
                 assert_eq!(
                     v.players[viewer as usize].resource_count as u32,
                     me.hand.total()
                 );
+                assert_eq!(
+                    v.players[viewer as usize].commodity_count as u32,
+                    me.commodities.total()
+                );
+                assert_eq!(v.citadels.is_some(), g.config.scenario.is_citadels());
             }
             assert!(player_view(&g, None).me.is_none());
         }
@@ -354,6 +433,29 @@ mod tests {
                 thief: 0,
                 victim: 1,
                 resource: None
+            }
+        );
+        let cstolen = Event::CommodityStolen {
+            thief: 0,
+            victim: 1,
+            commodity: Some(Commodity::Cloth),
+        };
+        assert_eq!(cstolen.redacted_for(Some(0)), cstolen);
+        assert_eq!(cstolen.redacted_for(Some(1)), cstolen);
+        assert_eq!(
+            cstolen.redacted_for(Some(2)),
+            Event::CommodityStolen {
+                thief: 0,
+                victim: 1,
+                commodity: None
+            }
+        );
+        assert_eq!(
+            cstolen.redacted_for(None),
+            Event::CommodityStolen {
+                thief: 0,
+                victim: 1,
+                commodity: None
             }
         );
         let bought = Event::DevCardBought {

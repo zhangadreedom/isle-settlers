@@ -11,7 +11,9 @@ export function ReplayHistory(props: { ready: boolean; onOpen: (json: string) =>
         ? '航海 · '
         : record.config.scenario === 'FogIslands'
           ? '迷雾 · '
-          : '';
+          : record.config.scenario === 'Citadels'
+            ? '城邦 · '
+            : '';
     const description = `${sea}${record.players.length} 人 · ${winner.name || `AI ${record.winner! + 1}`}获胜 · #${record.seed}`;
     const date = new Date(savedAt).toLocaleString();
     return { record, description, date };

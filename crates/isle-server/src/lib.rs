@@ -70,6 +70,8 @@ pub struct ServerConfig {
     pub client_ip_header: Option<String>,
     /// Ranked games before a player gets a tier and a leaderboard rank.
     pub placement_games: u32,
+    /// Default per-action turn timer in seconds for newly created rooms (`0` = off).
+    pub default_turn_timer_secs: u16,
 }
 
 impl Default for ServerConfig {
@@ -90,6 +92,7 @@ impl Default for ServerConfig {
             auth_refill: Duration::from_secs(6),
             client_ip_header: None,
             placement_games: isle_proto::ranking::PLACEMENT_GAMES,
+            default_turn_timer_secs: 0,
         }
     }
 }

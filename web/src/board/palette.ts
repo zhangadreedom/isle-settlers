@@ -16,6 +16,9 @@ export const TERRAIN_COLORS = [
 export const RESOURCE_COLORS = [0xc0623a, 0x2f7d4a, 0xb9e08f, 0xe2b74a, 0x8a8f99] as const;
 export const RESOURCE_LABELS = ['砖', '木', '羊', '麦', '矿'] as const;
 
+export const COMMODITY_COLORS = [0xd8c394, 0xb06ee8, 0xf0be32] as const;
+export const METROPOLIS_COLORS = [0xffca3a, 0x5aa9ff, 0x3ed694] as const;
+
 export const PLAYER_COLORS = [0xd94841, 0x3b7dd8, 0xf2efe6, 0xf08c00, 0x8e5bd6, 0x22b8c9] as const;
 export const PLAYER_CSS = ['#d94841', '#3b7dd8', '#f2efe6', '#f08c00', '#8e5bd6', '#22b8c9'] as const;
 

@@ -7,7 +7,7 @@
 //! own cards and the random generator — never on the true hidden values — so
 //! a bot that searches determinized states cannot cheat.
 
-use isle_core::{DevCard, GameState, Resource, ResourceSet, Rng};
+use isle_core::{Commodity, CommoditySet, DevCard, GameState, Resource, ResourceSet, Rng};
 
 /// A random full state consistent with `me`'s knowledge of `s`.
 pub fn determinize(s: &GameState, me: u8, rng: &mut Rng) -> GameState {
@@ -36,6 +36,31 @@ pub fn determinize(s: &GameState, me: u8, rng: &mut Rng) -> GameState {
             hand[cards.next().expect("hand sizes match the pool")] += 1;
         }
         d.players[q].hand = hand;
+    }
+
+    // Citadels commodities. Only each seat's total commodity count and the
+    // commodity bank are public; deal the unseen pool out by public counts.
+    if s.config.scenario.is_citadels() {
+        let mut cpool: Vec<Commodity> =
+            Vec::with_capacity(3 * layout.bank_per_commodity() as usize);
+        for c in Commodity::ALL {
+            let elsewhere =
+                layout.bank_per_commodity() - s.commodity_bank[c] - s.players[me].commodities[c];
+            cpool.extend(std::iter::repeat_n(c, elsewhere as usize));
+        }
+        rng.shuffle(&mut cpool);
+        let mut ccards = cpool.into_iter();
+        for q in 0..n {
+            if q == me {
+                continue;
+            }
+            let count = s.players[q].commodities.total();
+            let mut comm = CommoditySet::EMPTY;
+            for _ in 0..count {
+                comm[ccards.next().expect("commodity sizes match the pool")] += 1;
+            }
+            d.players[q].commodities = comm;
+        }
     }
 
     // Development cards. Unseen = the full deck minus my cards and every card
@@ -93,13 +118,15 @@ pub(crate) mod tests {
 
     pub(crate) fn sample_states() -> Vec<GameState> {
         let mut out = Vec::new();
-        for (scenario, seeds) in [
-            (isle_core::Scenario::Classic, 0..14u64),
-            (isle_core::Scenario::FogIslands, 14..24u64),
+        for (scenario, players, seeds) in [
+            (isle_core::Scenario::Classic, 4u8, 0..14u64),
+            (isle_core::Scenario::FogIslands, 4u8, 14..22u64),
+            (isle_core::Scenario::FogIslands, 6u8, 22..28u64),
+            (isle_core::Scenario::Citadels, 4u8, 28..38u64),
         ] {
             for seed in seeds {
-                let mut g = GameState::new(GameConfig::scenario(scenario, 4), seed).unwrap();
-                let mut bots: Vec<WeightedRandomBot> = (0..4)
+                let mut g = GameState::new(GameConfig::scenario(scenario, players), seed).unwrap();
+                let mut bots: Vec<WeightedRandomBot> = (0..players as u64)
                     .map(|k| WeightedRandomBot::new(seed * 9 + k))
                     .collect();
                 let mut legal = Vec::new();
@@ -127,24 +154,55 @@ pub(crate) mod tests {
 
     #[test]
     fn keeps_public_and_own_information_and_conservation() {
-        for g in sample_states() {
-            for me in 0..4u8 {
+        let states = sample_states();
+        let saw_citadel_comm = states.iter().any(|g| {
+            g.config.scenario.is_citadels()
+                && (0..g.num_players()).any(|q| g.players[q].commodities.total() > 0)
+        });
+        assert!(saw_citadel_comm, "expected Citadels states with commodities");
+        for g in states {
+            let n = g.num_players();
+            for me in 0..n as u8 {
                 let d = determinize(&g, me, &mut Rng::new(5));
                 d.check_invariants().unwrap();
                 assert_eq!(d.players[me as usize].hand, g.players[me as usize].hand);
                 assert_eq!(
+                    d.players[me as usize].commodities,
+                    g.players[me as usize].commodities
+                );
+                assert_eq!(
                     d.players[me as usize].dev_cards,
                     g.players[me as usize].dev_cards
                 );
-                for q in 0..4 {
+                for q in 0..n {
                     assert_eq!(d.players[q].hand.total(), g.players[q].hand.total());
+                    assert_eq!(
+                        d.players[q].commodities.total(),
+                        g.players[q].commodities.total()
+                    );
                     assert_eq!(d.players[q].dev_card_count(), g.players[q].dev_card_count());
                     assert_eq!(d.players[q].played_dev_cards, g.players[q].played_dev_cards);
                 }
                 assert_eq!(d.dev_deck_len, g.dev_deck_len);
                 assert_eq!(
-                    (d.bank, d.settlements, d.cities, d.roads, d.phase),
-                    (g.bank, g.settlements, g.cities, g.roads, g.phase)
+                    (
+                        d.bank,
+                        d.commodity_bank,
+                        d.settlements,
+                        d.cities,
+                        d.roads,
+                        d.ships,
+                        d.phase,
+                    ),
+                    (
+                        g.bank,
+                        g.commodity_bank,
+                        g.settlements,
+                        g.cities,
+                        g.roads,
+                        g.ships,
+                        g.phase,
+                    )
                 );
             }
         }
@@ -153,7 +211,7 @@ pub(crate) mod tests {
     #[test]
     fn result_does_not_depend_on_hidden_information() {
         for (i, g) in sample_states().iter().enumerate() {
-            for me in 0..4u8 {
+            for me in 0..g.num_players() as u8 {
                 // Two states that look the same to `me`...
                 let other = scramble(g, me, i as u64 * 31 + me as u64);
                 // ...determinize to exactly the same state with the same RNG.

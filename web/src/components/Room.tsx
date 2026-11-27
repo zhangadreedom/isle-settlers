@@ -152,7 +152,83 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                     航海 · 迷雾
                   </span>
                 </Show>
+                <Show when={room().scenario === 'Citadels'}>
+                  <span class="mode-tag citadel" title="商品、三系城邦升级与大都会、实体铁卫抵御黑帆舰队">
+                    城邦与铁卫
+                  </span>
+                </Show>
+                <Show when={room().rules.victoryPoints !== null}>
+                  <span class="mode-tag">{room().rules.victoryPoints} 分获胜</span>
+                </Show>
+                <Show when={room().rules.friendlyRobber}>
+                  <span class="mode-tag" title="强盗不封锁 ≤2 分玩家">友好强盗</span>
+                </Show>
+                <Show when={room().seats.length > 4 && room().rules.pairedTurns}>
+                  <span class="mode-tag" title="隔 3 座位搭档执行副回合">双人搭档</span>
+                </Show>
+                <Show when={room().rules.turnTimerSecs > 0}>
+                  <span class="mode-tag" title="超时自动代出一步">限时 {room().rules.turnTimerSecs}s</span>
+                </Show>
               </div>
+
+              <Show when={isHost()}>
+                <details class="house-rules">
+                  <summary>修改房间房规与限时</summary>
+                  <div class="rules-box">
+                    <div class="field">
+                      <span>友好强盗</span>
+                      <div class="seg small">
+                        <button
+                          classList={{ on: !room().rules.friendlyRobber }}
+                          onClick={() => c.send({ type: 'SetRules', value: { rules: { ...room().rules, friendlyRobber: false } } })}
+                        >
+                          标准
+                        </button>
+                        <button
+                          classList={{ on: room().rules.friendlyRobber }}
+                          onClick={() => c.send({ type: 'SetRules', value: { rules: { ...room().rules, friendlyRobber: true } } })}
+                        >
+                          开启
+                        </button>
+                      </div>
+                    </div>
+                    <Show when={room().seats.length > 4}>
+                      <div class="field">
+                        <span>5–6人规则</span>
+                        <div class="seg small">
+                          <button
+                            classList={{ on: !room().rules.pairedTurns }}
+                            onClick={() => c.send({ type: 'SetRules', value: { rules: { ...room().rules, pairedTurns: false } } })}
+                          >
+                            特殊建造
+                          </button>
+                          <button
+                            classList={{ on: room().rules.pairedTurns }}
+                            onClick={() => c.send({ type: 'SetRules', value: { rules: { ...room().rules, pairedTurns: true } } })}
+                          >
+                            双人搭档
+                          </button>
+                        </div>
+                      </div>
+                    </Show>
+                    <div class="field">
+                      <span>每步限时</span>
+                      <div class="seg small">
+                        <For each={[0, 30, 60, 90]}>
+                          {(secs) => (
+                            <button
+                              classList={{ on: room().rules.turnTimerSecs === secs }}
+                              onClick={() => c.send({ type: 'SetRules', value: { rules: { ...room().rules, turnTimerSecs: secs } } })}
+                            >
+                              {secs === 0 ? '不限' : `${secs}s`}
+                            </button>
+                          )}
+                        </For>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              </Show>
 
               <ol class="seats">
                 <For each={room().seats}>

@@ -10,14 +10,16 @@ use isle_core::{
 };
 use isle_proto::account::{AccountInfo, ApiError, Credentials, SessionGrant, SessionInfo};
 use isle_proto::net::{
-    BotLevel, ChatLine, ClientMsg, LegalActions, RoomInfo, SeatView, ServerMsg, Snapshot, Update,
+    BotLevel, ChatLine, ClientMsg, HouseRules, LegalActions, RoomInfo, SeatView, ServerMsg,
+    Snapshot, Update,
 };
 use isle_proto::ranking::{
     Leaderboard, LeaderboardEntry, MatchSummary, PlayerProfile, RatingChange, SeatRating, Tier,
 };
 use isle_proto::{
-    Action, BoardInfo, DevCard, Event, FogBoard, PlayerPublic, PlayerView, PrivateInfo,
-    ReplayPlayer, ReplayRecord, RuleError, TradeResponse,
+    Action, BoardInfo, CitadelView, CityTrack, Commodity, CommoditySet, DevCard, Event, FogBoard,
+    KnightView, PlayerPublic, PlayerView, PrivateInfo, ReplayPlayer, ReplayRecord, RuleError,
+    TradeGood, TradeResponse,
 };
 use ts_rs::{Config, TS};
 
@@ -28,6 +30,10 @@ fn render() -> String {
         Terrain::decl(&cfg),
         HarborKind::decl(&cfg),
         ResourceSet::decl(&cfg),
+        Commodity::decl(&cfg),
+        CommoditySet::decl(&cfg),
+        CityTrack::decl(&cfg),
+        TradeGood::decl(&cfg),
         DevCard::decl(&cfg),
         BoardLayout::decl(&cfg),
         Scenario::decl(&cfg),
@@ -40,6 +46,8 @@ fn render() -> String {
         RuleError::decl(&cfg),
         BoardInfo::decl(&cfg),
         FogBoard::decl(&cfg),
+        KnightView::decl(&cfg),
+        CitadelView::decl(&cfg),
         PlayerPublic::decl(&cfg),
         PrivateInfo::decl(&cfg),
         PlayerView::decl(&cfg),
@@ -48,6 +56,7 @@ fn render() -> String {
         SeatRating::decl(&cfg),
         RatingChange::decl(&cfg),
         SeatView::decl(&cfg),
+        HouseRules::decl(&cfg),
         RoomInfo::decl(&cfg),
         LegalActions::decl(&cfg),
         Snapshot::decl(&cfg),

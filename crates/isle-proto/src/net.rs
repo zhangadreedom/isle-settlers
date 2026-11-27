@@ -69,6 +69,30 @@ pub enum SeatView {
     },
 }
 
+/// Optional DIY house rules and per-action turn timer for a room.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct HouseRules {
+    /// Custom victory point target (`None` = scenario default, else `6..=16`).
+    #[serde(default)]
+    pub victory_points: Option<u8>,
+    #[serde(default)]
+    pub friendly_robber: bool,
+    #[serde(default)]
+    pub paired_turns: bool,
+    /// Per-action turn timer in seconds (`0` = disabled, else `1..=300`).
+    #[serde(default)]
+    pub turn_timer_secs: u16,
+}
+
+impl HouseRules {
+    pub fn is_valid(&self) -> bool {
+        self.victory_points.is_none_or(|vp| (6..=16).contains(&vp))
+            && self.turn_timer_secs <= 300
+    }
+}
+
 /// Room membership and lobby state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -90,6 +114,8 @@ pub struct RoomInfo {
     /// Rating changes once a ranked game is over and rated.
     pub rating: Vec<RatingChange>,
     pub scenario: Scenario,
+    #[serde(default)]
+    pub rules: HouseRules,
 }
 
 /// Legal actions for the receiving seat, tagged with the state version they
@@ -110,6 +136,9 @@ pub struct Snapshot {
     pub legal: LegalActions,
     /// Recent events (redacted for this seat), oldest first.
     pub log: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "turnRemainingMs")]
+    pub turn_remaining_ms: Option<u32>,
 }
 
 /// State after an action.
@@ -120,6 +149,9 @@ pub struct Update {
     pub legal: LegalActions,
     /// What happened (redacted for this seat).
     pub events: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "turnRemainingMs")]
+    pub turn_remaining_ms: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,9 +179,11 @@ pub enum ClientMsg {
         /// Ranked room (see [`RoomInfo::ranked`]).
         #[serde(default)]
         ranked: bool,
-        /// Classic or a seafaring map (2–4 seats); absent means classic.
+        /// Classic, a seafaring map or Citadels (2–6 seats); absent means classic.
         #[serde(default)]
         scenario: Scenario,
+        #[serde(default)]
+        rules: HouseRules,
         #[serde(default)]
         #[cfg_attr(feature = "ts", ts(optional = nullable))]
         session: Option<String>,
@@ -180,6 +214,10 @@ pub enum ClientMsg {
     /// Host only, before the start: make the room ranked or casual.
     SetRanked {
         ranked: bool,
+    },
+    /// Host only, before the start: update DIY house rules and turn timer.
+    SetRules {
+        rules: HouseRules,
     },
     /// Host only: start the game. Open seats are filled with bots.
     Start,
@@ -267,6 +305,12 @@ mod tests {
                 name: "A".into(),
                 ranked: true,
                 scenario: Scenario::Archipelago,
+                rules: HouseRules {
+                    victory_points: Some(12),
+                    friendly_robber: true,
+                    paired_turns: false,
+                    turn_timer_secs: 45,
+                },
                 session: Some("ab".repeat(32)),
             },
             ClientMsg::Join {
@@ -284,6 +328,14 @@ mod tests {
                 bot: Some(BotLevel::Easy),
             },
             ClientMsg::SetRanked { ranked: false },
+            ClientMsg::SetRules {
+                rules: HouseRules {
+                    victory_points: Some(8),
+                    friendly_robber: false,
+                    paired_turns: true,
+                    turn_timer_secs: 60,
+                },
+            },
             ClientMsg::Start,
         ];
         for m in msgs {

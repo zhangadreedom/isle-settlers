@@ -61,7 +61,16 @@ impl MatchHost {
         bot: &str,
         scenario: Scenario,
     ) -> Result<MatchHost, HostError> {
-        let config = GameConfig::scenario(scenario, num_players);
+        Self::with_config(GameConfig::scenario(scenario, num_players), seed, human, bot)
+    }
+
+    pub fn with_config(
+        config: GameConfig,
+        seed: u64,
+        human: Option<u8>,
+        bot_name: &str,
+    ) -> Result<MatchHost, HostError> {
+        let num_players = config.num_players;
         let state =
             GameState::new(config, seed).map_err(|e| HostError::Config(format!("{e:?}")))?;
         let human = human.filter(|&h| h < num_players);
@@ -70,9 +79,14 @@ impl MatchHost {
                 if Some(p) == human {
                     Ok(None)
                 } else {
-                    bot_by_name(bot, (seed << 8) | p as u64)
-                        .map(|b| Some(b as Box<dyn Bot>))
-                        .ok_or_else(|| HostError::Config(format!("unknown bot {bot}")))
+                    bot_by_name(bot_name, (seed << 8) | p as u64)
+                        .map(|mut b| {
+                            if human.is_some() {
+                                b.set_propose_trades(true);
+                            }
+                            Some(b as Box<dyn Bot>)
+                        })
+                        .ok_or_else(|| HostError::Config(format!("unknown bot {bot_name}")))
                 }
             })
             .collect::<Result<_, _>>()?;
@@ -84,7 +98,7 @@ impl MatchHost {
             events: Vec::new(),
             version: 0,
             seed,
-            bot_level: BotLevel::of_bot_name(bot),
+            bot_level: BotLevel::of_bot_name(bot_name),
             log: Vec::new(),
         })
     }
@@ -163,8 +177,9 @@ impl MatchHost {
         let is_bot = |p: u8| Some(p) != self.human;
         match s.phase {
             Phase::GameOver => None,
-            // Bots discard first, in seat order; the human may discard any time.
+            // Bots discard/pick gold first, in seat order; the human may act any time.
             Phase::Discard => (0..n).find(|&p| s.pending_discard[p as usize] > 0 && is_bot(p)),
+            Phase::Gold { .. } => (0..n).find(|&p| s.pending_gold[p as usize] > 0 && is_bot(p)),
             Phase::Main if s.trade.is_some() => {
                 let offer = s.trade.expect("checked");
                 (0..n)
@@ -173,7 +188,16 @@ impl MatchHost {
                             && offer.responses[q as usize] == TradeResponse::Pending
                             && is_bot(q)
                     })
-                    .or_else(|| is_bot(s.current).then_some(s.current))
+                    .or_else(|| {
+                        let any_accepted = (0..n).any(|q| {
+                            q != s.current
+                                && offer.responses[q as usize] == TradeResponse::Accepted
+                        });
+                        let all_replied = (0..n).all(|q| {
+                            q == s.current || offer.responses[q as usize] != TradeResponse::Pending
+                        });
+                        (is_bot(s.current) && (any_accepted || all_replied)).then_some(s.current)
+                    })
             }
             _ => s.to_move().filter(|&p| is_bot(p)),
         }

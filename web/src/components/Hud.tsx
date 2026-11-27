@@ -3,15 +3,42 @@ import { Verified } from './Account';
 import type { BuildMode, Game } from '../game/controller';
 import { EMBEDDED } from '../embed';
 import type { ReplayControls } from '../game/source';
-import { BOT_LEVEL_NAME, COSTS, DEV_CARDS, DEV_HELP, DEV_NAME, RESOURCES, RESOURCE_CSS, RESOURCE_SHORT } from '../game/text';
+import {
+  BOT_LEVEL_NAME,
+  CITY_TRACKS,
+  COMMODITIES,
+  COMMODITY_CSS,
+  COMMODITY_SHORT,
+  COSTS,
+  DEV_CARDS,
+  DEV_HELP,
+  DEV_NAME,
+  RESOURCES,
+  RESOURCE_CSS,
+  RESOURCE_SHORT,
+  TRACK_NAME,
+} from '../game/text';
 import type { DevCard } from '../generated/proto';
-import { Die, ResIcon, SeatDot, SetView } from './bits';
+import { CommIcon, Die, ResIcon, SeatDot, SetView } from './bits';
 
 /** Islands in a bonus mask. */
 const islandCount = (mask: number) => [...mask.toString(2)].filter((b) => b === '1').length;
 
 export function PlayerList(props: { game: Game }) {
   const g = props.game;
+  const activeStrength = (seat: number) =>
+    (g.view().citadels?.knights ?? []).filter((k) => k.owner === seat && k.active).reduce((a, k) => a + k.level, 0);
+  const totalDefense = () =>
+    (g.view().citadels?.knights ?? []).filter((k) => k.active).reduce((a, k) => a + k.level, 0);
+  const totalVulnCities = () => {
+    const c = g.view().citadels;
+    if (!c) return 0;
+    const metros = new Set(c.metropolises.filter((v): v is number => v !== null));
+    return g.view().buildings.filter((b, v) => b !== 255 && (b & 0x80) !== 0 && !metros.has(v)).length;
+  };
+  const metrosOf = (seat: number) =>
+    CITY_TRACKS.filter((_, i) => g.view().citadels?.metropolisOwners[i] === seat);
+
   return (
     <aside class="panel players-panel" classList={{ many: g.view().players.length > 4 }} data-inset>
       <For each={g.view().players}>
@@ -24,7 +51,9 @@ export function PlayerList(props: { game: Game }) {
               id={`seat-${p.seat}`}
               classList={{
                 current: g.view().current === p.seat,
-                building: g.view().phase.type === 'SpecialBuild' && g.view().toMove === p.seat,
+                building:
+                  (g.view().phase.type === 'SpecialBuild' || g.view().phase.type === 'PairedTurn') &&
+                  g.view().toMove === p.seat,
                 me: isMe(),
                 winner: g.view().winner === p.seat,
               }}
@@ -64,15 +93,32 @@ export function PlayerList(props: { game: Game }) {
                 </span>
               </div>
               <div class="seat-stats muted">
-                <span title="手牌">牌 {p.resourceCount}</span>
+                <span title="基础资源手牌">牌 {p.resourceCount}</span>
+                <Show when={g.citadels}>
+                  <span title="商品手牌（纸/布/币）">货 {p.commodityCount}</span>
+                </Show>
                 <span title="发展卡">卡 {p.devCardCount}</span>
-                <span title="已出骑士">骑 {p.playedDevCards[0]}</span>
+                <Show when={!g.citadels}>
+                  <span title="已出骑士">骑 {p.playedDevCards[0]}</span>
+                </Show>
+                <Show when={g.citadels}>
+                  <span title="已激活铁卫战力">卫 {activeStrength(p.seat)}</span>
+                  <span title="商贸/军政/学术等级">科 {p.cityProgress.join('/')}</span>
+                </Show>
                 <span title={g.seafaring ? '最长连续商路（道路和船）' : '最长连续道路'}>路 {p.longestRoad}</span>
                 <Show when={g.seafaring}>
                   <span title={`海上的船（还能造 ${p.shipsLeft} 艘）`}>船 {15 - p.shipsLeft}</span>
                 </Show>
               </div>
-              <Show when={g.view().longestRoadOwner === p.seat || g.view().largestArmyOwner === p.seat || islandCount(p.islands) > 0}>
+              <Show
+                when={
+                  g.view().longestRoadOwner === p.seat ||
+                  g.view().largestArmyOwner === p.seat ||
+                  islandCount(p.islands) > 0 ||
+                  p.defenderPoints > 0 ||
+                  metrosOf(p.seat).length > 0
+                }
+              >
                 <div class="badges">
                   <Show when={g.view().longestRoadOwner === p.seat}>
                     <span class="badge">{g.seafaring ? '最长商路' : '最长道路'} +2</span>
@@ -83,12 +129,41 @@ export function PlayerList(props: { game: Game }) {
                   <Show when={islandCount(p.islands) > 0}>
                     <span class="badge" title="首次在新岛屿建村庄的奖励">新岛 +{2 * islandCount(p.islands)}</span>
                   </Show>
+                  <For each={metrosOf(p.seat)}>
+                    {(t) => (
+                      <span class="badge" title={`${TRACK_NAME[t]}大都会（免疫黑帆舰队）`}>
+                        {TRACK_NAME[t]}都 +2
+                      </span>
+                    )}
+                  </For>
+                  <Show when={p.defenderPoints > 0}>
+                    <span class="badge" title="击退黑帆舰队独得首功">卫城 +{p.defenderPoints}</span>
+                  </Show>
                 </div>
               </Show>
             </div>
           );
         }}
       </For>
+      <Show when={g.view().citadels}>
+        {(cit) => (
+          <div
+            class="barbarian-bar"
+            classList={{ danger: totalDefense() < totalVulnCities() }}
+            title="每次掷骰 50% 前进 1 格；满 7 格攻城，比较全岛激活铁卫战力与非大都会城市总数"
+          >
+            <span>黑帆 {cit().barbarianPos}/{cit().barbarianSteps}</span>
+            <span class="barbarian-steps">
+              <For each={[...Array(cit().barbarianSteps).keys()]}>
+                {(i) => <i classList={{ on: i < cit().barbarianPos, danger: cit().barbarianPos >= cit().barbarianSteps - 1 && i < cit().barbarianPos }} />}
+              </For>
+            </span>
+            <span class="muted">
+              铁卫 {totalDefense()} / 城池 {totalVulnCities()}
+            </span>
+          </div>
+        )}
+      </Show>
       <div class="bank muted">
         <span>银行</span>
         <For each={RESOURCES}>
@@ -99,6 +174,18 @@ export function PlayerList(props: { game: Game }) {
             </span>
           )}
         </For>
+        <Show when={g.view().citadels}>
+          {(cit) => (
+            <For each={COMMODITIES}>
+              {(_, i) => (
+                <span class="bank-item">
+                  <CommIcon c={i()} />
+                  {cit().commodityBank[i()]}
+                </span>
+              )}
+            </For>
+          )}
+        </Show>
         <span class="bank-item">发展卡 {g.view().devDeckLen}</span>
       </div>
     </aside>
@@ -184,11 +271,18 @@ const MODE_PROMPT: Record<Exclude<BuildMode, null>, string> = {
   city: '选择位置建造城市（再点一次按钮取消）',
   ship: '选择临海的边造船（再点一次按钮取消）',
   move: '先点一艘可以移动的船，再点它要去的位置（再点一次按钮取消）',
+  knight: '选择道路相连的空交叉点招募初阶铁卫（再点一次取消）',
+  activate: '点选一名未激活的铁卫消耗 1 麦激活（再点一次取消）',
+  promote: '点选一名铁卫消耗 1 羊 1 矿晋升阶位（再点一次取消）',
+  knightMove: '先点一名已激活铁卫，再点调遣目标或更低阶对手铁卫（再点一次取消）',
+  chase: '先点强盗旁已激活的铁卫，再点强盗要去的地块（再点一次取消）',
 };
 
 function modePrompt(g: Game): string {
   const m = g.mode();
   if (m === 'move' && g.moveFrom() !== null) return '点这艘船要去的位置（再点一次按钮取消）';
+  if (m === 'knightMove' && g.knightFrom() !== null) return '点选铁卫要移往的目标交叉点（再点一次取消）';
+  if (m === 'chase' && g.knightFrom() !== null) return '点选要把强盗/海盗赶往的目标格（再点一次取消）';
   return m ? MODE_PROMPT[m] : '';
 }
 
@@ -197,8 +291,13 @@ function prompt(g: Game): string {
   const v = g.view();
   if (v.winner !== null) return `${g.name(v.winner)}获胜`;
   if (g.replay) {
-    const builder = v.phase.type === 'SpecialBuild' ? `，${g.name(v.phase.value.builder)} 特殊建造中` : '';
-    return `回放 · ${g.name(v.current)}的回合${builder}`;
+    const sub =
+      v.phase.type === 'SpecialBuild'
+        ? `，${g.name(v.phase.value.builder)} 特殊建造中`
+        : v.phase.type === 'PairedTurn'
+          ? `，${g.name(v.phase.value.partner)} 搭档副回合`
+          : '';
+    return `回放 · ${g.name(v.current)}的回合${sub}`;
   }
   if (v.phase.type === 'SpecialBuild') {
     const builder = v.phase.value.builder;
@@ -208,11 +307,24 @@ function prompt(g: Game): string {
     }
     return `${g.name(builder)} 特殊建造中…`;
   }
+  if (v.phase.type === 'PairedTurn') {
+    const partner = v.phase.value.partner;
+    if (partner === g.me) {
+      if (g.mode()) return modePrompt(g);
+      return '搭档副回合：可以建造、与银行/港口贸易、打发展卡，或结束副回合';
+    }
+    return `${g.name(partner)} 正在进行搭档副回合…`;
+  }
   if (g.me === null) return `观战中 · ${g.name(v.current)}的回合`;
-  const myTurn = v.current === g.me;
+  const myTurn = v.toMove === g.me || v.current === g.me;
   switch (v.phase.type) {
-    case 'SetupSettlement':
-      return myTurn ? `放置你的第 ${v.players[g.me].settlementsLeft === 5 ? 1 : 2} 个村庄（点击发光的交叉点）` : `${g.name(v.current)} 正在选择开局位置…`;
+    case 'SetupSettlement': {
+      const second = g.citadels && v.players[g.me].settlementsLeft === 4;
+      if (v.current !== g.me) return `${g.name(v.current)} 正在选择开局位置…`;
+      return second
+        ? '放置你的起始城市（点击发光的交叉点，将获得周围起始资源）'
+        : `放置你的第 ${v.players[g.me].settlementsLeft === 5 ? 1 : 2} 个村庄（点击发光的交叉点）`;
+    }
     case 'SetupRoad':
       if (g.seafaring) return myTurn ? '放置一条与村庄相连的道路或船（临海的边可以造船）' : `${g.name(v.current)} 正在放置道路或船…`;
       return myTurn ? '放置一条与村庄相连的道路' : `${g.name(v.current)} 正在放置道路…`;
@@ -245,7 +357,12 @@ function prompt(g: Game): string {
   return '';
 }
 
-export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (card: DevCard) => void }) {
+export function HandBar(props: {
+  game: Game;
+  onTrade: () => void;
+  onCitadel?: () => void;
+  onDevCard: (card: DevCard) => void;
+}) {
   const g = props.game;
   const me = () => g.view().me;
   const playable = (card: DevCard) => {
@@ -255,7 +372,9 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
     return type !== undefined && g.has(type as never);
   };
   const isMain = () => !g.replay && g.view().phase.type === 'Main' && g.view().current === g.me;
+  const isPaired = () => !g.replay && g.view().phase.type === 'PairedTurn' && g.view().toMove === g.me;
   const isSpecialBuild = () => !g.replay && g.view().phase.type === 'SpecialBuild' && g.view().toMove === g.me;
+  const canActMain = () => isMain() || isPaired();
 
   return (
     <div class="handbar-wrap" data-inset>
@@ -273,6 +392,21 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
                   </div>
                 )}
               </For>
+              <Show when={g.citadels}>
+                <For each={COMMODITIES}>
+                  {(c, i) => (
+                    <div
+                      class="card comm-card"
+                      classList={{ empty: m().commodities[i()] === 0 }}
+                      style={{ '--c': COMMODITY_CSS[i()] }}
+                      title="商品卡（用于升级城邦科技与商馆交易）"
+                    >
+                      <span class="card-name">{COMMODITY_SHORT[c]}</span>
+                      <span class="card-count">{m().commodities[i()]}</span>
+                    </div>
+                  )}
+                </For>
+              </Show>
             </div>
 
             <div class="devcards" aria-label="发展卡">
@@ -302,7 +436,7 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
                   掷骰子
                 </button>
               </Show>
-              <Show when={isMain() || isSpecialBuild()}>
+              <Show when={canActMain() || isSpecialBuild()}>
                 <For each={[['road', '道路', 'BuildRoad', 0], ['settlement', '村庄', 'BuildSettlement', 1], ['city', '城市', 'BuildCity', 2]] as const}>
                   {([mode, label, type, costIndex]) => (
                     <button
@@ -322,7 +456,7 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
                     船
                     <SetView set={COSTS[4].cost} />
                   </button>
-                  <Show when={isMain()}>
+                  <Show when={canActMain()}>
                     <button
                       class="build"
                       classList={{ on: g.mode() === 'move' }}
@@ -334,12 +468,71 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
                     </button>
                   </Show>
                 </Show>
+                <Show when={g.citadels && canActMain()}>
+                  <button
+                    class="build"
+                    classList={{ on: g.mode() === 'knight' }}
+                    disabled={!g.has('RecruitKnight')}
+                    onClick={() => g.setMode('knight')}
+                    title="招募初阶铁卫（1 羊 + 1 矿）"
+                  >
+                    铁卫
+                    <SetView set={[0, 0, 1, 0, 1]} />
+                  </button>
+                  <button
+                    class="build"
+                    classList={{ on: g.mode() === 'activate' }}
+                    disabled={!g.has('ActivateKnight')}
+                    onClick={() => g.setMode('activate')}
+                    title="激活铁卫（1 麦），抵御黑帆舰队"
+                  >
+                    激活
+                    <SetView set={[0, 0, 0, 1, 0]} />
+                  </button>
+                  <button
+                    class="build"
+                    classList={{ on: g.mode() === 'promote' }}
+                    disabled={!g.has('PromoteKnight')}
+                    onClick={() => g.setMode('promote')}
+                    title="晋升铁卫阶位（1 羊 + 1 矿）"
+                  >
+                    晋升
+                  </button>
+                  <Show when={g.has('MoveKnight')}>
+                    <button
+                      class="build"
+                      classList={{ on: g.mode() === 'knightMove' }}
+                      onClick={() => g.setMode('knightMove')}
+                      title="调遣已激活铁卫沿道路移动或驱逐对手低阶铁卫"
+                    >
+                      调遣
+                    </button>
+                  </Show>
+                  <Show when={g.has('ChaseRobber')}>
+                    <button
+                      class="build"
+                      classList={{ on: g.mode() === 'chase' }}
+                      onClick={() => g.setMode('chase')}
+                      title="使用相邻激活铁卫驱赶强盗"
+                    >
+                      驱匪
+                    </button>
+                  </Show>
+                  <button
+                    class="build"
+                    classList={{ primary: g.has('UpgradeCity') }}
+                    onClick={() => props.onCitadel?.()}
+                    title="查看并升级商贸/军政/学术城邦科技与大都会"
+                  >
+                    城邦科技
+                  </button>
+                </Show>
                 <button class="build" disabled={!g.has('BuyDevCard')} onClick={() => g.act((a) => a.type === 'BuyDevCard')}>
                   发展卡
                   <SetView set={COSTS[3].cost} />
                 </button>
                 <Show
-                  when={isMain()}
+                  when={canActMain()}
                   fallback={
                     <button class="primary" disabled={!g.has('EndTurn')} onClick={() => g.act((a) => a.type === 'EndTurn')}>
                       跳过
@@ -348,7 +541,7 @@ export function HandBar(props: { game: Game; onTrade: () => void; onDevCard: (ca
                 >
                   <button onClick={props.onTrade}>交易</button>
                   <button class="primary" disabled={!g.has('EndTurn')} onClick={() => g.act((a) => a.type === 'EndTurn')}>
-                    结束回合
+                    {isPaired() ? '结束副回合' : '结束回合'}
                   </button>
                 </Show>
               </Show>

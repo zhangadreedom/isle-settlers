@@ -1,5 +1,6 @@
 //! Board layout: terrain, number tokens and harbors on top of a static topology.
 
+use crate::bitset::BitSet;
 use crate::resources::{HarborKind, Resource, Terrain};
 use crate::rng::Rng;
 use crate::topology::*;
@@ -103,6 +104,53 @@ pub const FOG_HOME_NUMBER_POOL: [u8; 13] = [2, 3, 4, 4, 5, 5, 6, 8, 9, 9, 10, 10
 /// Fog islands: hidden stack of number tokens drawn when land is discovered.
 pub const FOG_NUMBER_POOL: [u8; 9] = [3, 4, 5, 6, 8, 9, 10, 11, 12];
 
+/// Extended archipelago (5–6 players): 21-tile home island.
+pub const EXTENDED_ARCHIPELAGO_HOME_POOL: [Terrain; 21] = {
+    use Terrain::*;
+    [
+        Forest, Forest, Forest, Forest, Forest, Pasture, Pasture, Pasture, Pasture, Pasture,
+        Fields, Fields, Fields, Fields, Hills, Hills, Hills, Mountains, Mountains, Mountains,
+        Desert,
+    ]
+};
+
+/// Extended archipelago: non-gold tiles of the three outer islands.
+pub const EXTENDED_ARCHIPELAGO_OUTER_POOL: [Terrain; 4] = {
+    use Terrain::*;
+    [Pasture, Fields, Hills, Mountains]
+};
+
+/// Extended archipelago: number tokens for the 27 producing tiles.
+pub const EXTENDED_ARCHIPELAGO_NUMBER_POOL: [u8; 27] = [
+    2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 8, 8, 8, 9, 9, 9, 10, 10, 10, 11, 11, 11, 12,
+];
+
+/// Extended fog islands (5–6 players): 20-tile crescent home island.
+pub const EXTENDED_FOG_HOME_POOL: [Terrain; 20] = {
+    use Terrain::*;
+    [
+        Forest, Forest, Forest, Forest, Forest, Pasture, Pasture, Pasture, Pasture, Fields, Fields,
+        Fields, Fields, Hills, Hills, Hills, Mountains, Mountains, Mountains, Desert,
+    ]
+};
+
+/// Extended fog islands: hidden stack of eighteen unexplored tiles (`?`).
+pub const EXTENDED_FOG_TERRAIN_POOL: [Terrain; 18] = {
+    use Terrain::*;
+    [
+        Sea, Sea, Sea, Sea, Sea, Gold, Gold, Gold, Hills, Hills, Mountains, Mountains, Forest,
+        Forest, Pasture, Pasture, Fields, Fields,
+    ]
+};
+
+/// Extended fog islands: number tokens placed on the home island's 19 producing tiles.
+pub const EXTENDED_FOG_HOME_NUMBER_POOL: [u8; 19] = [
+    2, 3, 3, 4, 4, 5, 5, 5, 6, 6, 8, 8, 9, 9, 9, 10, 10, 11, 12,
+];
+
+/// Extended fog islands: hidden stack of 13 number tokens for discovered land.
+pub const EXTENDED_FOG_NUMBER_POOL: [u8; 13] = [2, 3, 4, 4, 5, 6, 8, 9, 10, 10, 11, 11, 12];
+
 /// Number tokens a gold field may carry: neither the likeliest (6, 8) nor
 /// the rarest (2, 12).
 pub const GOLD_NUMBERS: [u8; 6] = [3, 4, 5, 9, 10, 11];
@@ -110,8 +158,8 @@ pub const GOLD_NUMBERS: [u8; 6] = [3, 4, 5, 9, 10, 11];
 /// Number of dice combinations producing each roll (out of 36).
 pub const PIPS: [u8; 13] = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
 
-/// Most tiles sharing one number token (on the extended island).
-pub const MAX_TILES_PER_NUMBER: usize = 3;
+/// Most tiles sharing one number token (on extended fog maps).
+pub const MAX_TILES_PER_NUMBER: usize = 4;
 
 impl BoardLayout {
     /// Terrain tiles of a classic board, one per tile (empty for seafaring
@@ -120,7 +168,28 @@ impl BoardLayout {
         match self {
             BoardLayout::Base => &TERRAIN_POOL,
             BoardLayout::Extended => &EXTENDED_TERRAIN_POOL,
-            BoardLayout::Archipelago | BoardLayout::FogIslands => &[],
+            BoardLayout::Archipelago
+            | BoardLayout::FogIslands
+            | BoardLayout::ArchipelagoExtended
+            | BoardLayout::FogIslandsExtended => &[],
+        }
+    }
+
+    /// Hidden fog terrain pool for fog layouts.
+    pub fn fog_terrain_pool(self) -> &'static [Terrain] {
+        match self {
+            BoardLayout::FogIslands => &FOG_TERRAIN_POOL,
+            BoardLayout::FogIslandsExtended => &EXTENDED_FOG_TERRAIN_POOL,
+            _ => &[],
+        }
+    }
+
+    /// Hidden fog number pool for fog layouts.
+    pub fn fog_number_pool(self) -> &'static [u8] {
+        match self {
+            BoardLayout::FogIslands => &FOG_NUMBER_POOL,
+            BoardLayout::FogIslandsExtended => &EXTENDED_FOG_NUMBER_POOL,
+            _ => &[],
         }
     }
 
@@ -131,9 +200,14 @@ impl BoardLayout {
         match self {
             BoardLayout::Base => add(&TERRAIN_POOL),
             BoardLayout::Extended => add(&EXTENDED_TERRAIN_POOL),
-            BoardLayout::Archipelago => {
-                add(&ARCHIPELAGO_HOME_POOL);
-                add(&ARCHIPELAGO_OUTER_POOL);
+            BoardLayout::Archipelago | BoardLayout::ArchipelagoExtended => {
+                if self == BoardLayout::Archipelago {
+                    add(&ARCHIPELAGO_HOME_POOL);
+                    add(&ARCHIPELAGO_OUTER_POOL);
+                } else {
+                    add(&EXTENDED_ARCHIPELAGO_HOME_POOL);
+                    add(&EXTENDED_ARCHIPELAGO_OUTER_POOL);
+                }
                 let map = self.map().unwrap_or(&[]);
                 let mut islands: Vec<u8> = map
                     .iter()
@@ -145,8 +219,12 @@ impl BoardLayout {
                 n[Terrain::Gold as usize] += islands.len() as u8;
                 n[Terrain::Sea as usize] += map.iter().filter(|&&c| is_sea_char(c)).count() as u8;
             }
-            BoardLayout::FogIslands => {
-                add(&FOG_HOME_POOL);
+            BoardLayout::FogIslands | BoardLayout::FogIslandsExtended => {
+                if self == BoardLayout::FogIslands {
+                    add(&FOG_HOME_POOL);
+                } else {
+                    add(&EXTENDED_FOG_HOME_POOL);
+                }
                 let map = self.map().unwrap_or(&[]);
                 n[Terrain::Sea as usize] += map.iter().filter(|&&c| is_sea_char(c)).count() as u8;
                 n[Terrain::Fog as usize] += map.iter().filter(|&&c| c == b'?').count() as u8;
@@ -158,9 +236,9 @@ impl BoardLayout {
     /// Total terrain counts once every fog tile is accounted for.
     pub fn full_terrain_counts(self) -> [u8; Terrain::COUNT] {
         let mut n = self.terrain_counts();
-        if self == BoardLayout::FogIslands {
+        if self.has_fog() {
             n[Terrain::Fog as usize] = 0;
-            for t in FOG_TERRAIN_POOL {
+            for &t in self.fog_terrain_pool() {
                 n[t as usize] += 1;
             }
         }
@@ -174,14 +252,17 @@ impl BoardLayout {
             BoardLayout::Extended => &EXTENDED_NUMBER_POOL,
             BoardLayout::Archipelago => &ARCHIPELAGO_NUMBER_POOL,
             BoardLayout::FogIslands => &FOG_HOME_NUMBER_POOL,
+            BoardLayout::ArchipelagoExtended => &EXTENDED_ARCHIPELAGO_NUMBER_POOL,
+            BoardLayout::FogIslandsExtended => &EXTENDED_FOG_HOME_NUMBER_POOL,
         }
     }
 
     /// Harbors, one per harbor slot of the topology.
     pub fn harbor_pool(self) -> &'static [HarborKind] {
-        match self {
-            BoardLayout::Extended => &EXTENDED_HARBOR_POOL,
-            _ => &HARBOR_POOL,
+        if self.is_extended() {
+            &EXTENDED_HARBOR_POOL
+        } else {
+            &HARBOR_POOL
         }
     }
 }
@@ -213,13 +294,13 @@ pub struct Board {
     /// Island of the land tiles around each vertex, `0` if all sea.
     pub vertex_island: [u8; MAX_VERTICES],
     /// Vertices touching land: where settlements may stand.
-    pub land_vertices: u128,
+    pub land_vertices: BitSet,
     /// Edges touching land: where roads may go.
-    pub land_edges: u128,
+    pub land_edges: BitSet,
     /// Edges touching the sea or the edge of the map: where ships may go.
-    pub sea_edges: u128,
+    pub sea_edges: BitSet,
     /// Vertices open for initial settlements.
-    pub setup_vertices: u128,
+    pub setup_vertices: BitSet,
     /// Sea tile where the pirate starts, `NONE` without sea.
     pub pirate_start: u8,
 }
@@ -279,17 +360,28 @@ impl Board {
     /// terrain shuffled, and on the archipelago one gold field per small
     /// island (or on fog maps, `Terrain::Fog` over `?` tiles).
     fn generate_map(rng: &mut Rng, layout: BoardLayout, balanced: bool) -> Board {
-        if layout == BoardLayout::FogIslands {
-            return Self::generate_fog(rng, balanced);
+        if layout.has_fog() {
+            return Self::generate_fog(rng, layout, balanced);
         }
         let topo = layout.topology();
         let map = layout.map().expect("seafaring layout");
         let nt = topo.num_tiles;
-        let mut home = ARCHIPELAGO_HOME_POOL;
-        let mut outer = ARCHIPELAGO_OUTER_POOL;
-        rng.shuffle(&mut home);
+        let mut home_buf = [Terrain::Desert; 24];
+        let home_src: &[Terrain] = if layout == BoardLayout::Archipelago {
+            &ARCHIPELAGO_HOME_POOL
+        } else {
+            &EXTENDED_ARCHIPELAGO_HOME_POOL
+        };
+        let home_slice = &mut home_buf[..home_src.len()];
+        home_slice.copy_from_slice(home_src);
+        let mut outer = if layout == BoardLayout::Archipelago {
+            ARCHIPELAGO_OUTER_POOL
+        } else {
+            EXTENDED_ARCHIPELAGO_OUTER_POOL
+        };
+        rng.shuffle(home_slice);
         rng.shuffle(&mut outer);
-        let (mut home, mut outer) = (home.into_iter(), outer.into_iter());
+        let (mut home, mut outer) = (home_slice.iter().copied(), outer.into_iter());
         // One gold field per small island, on a random tile of it.
         let mut gold = [false; MAX_TILES];
         let mut letters: Vec<u8> = map[..nt]
@@ -297,6 +389,7 @@ impl Board {
             .copied()
             .filter(|&c| c != b'M' && !is_sea_char(c))
             .collect();
+        letters.sort_unstable();
         letters.dedup();
         for letter in letters {
             let tiles: Vec<usize> = (0..nt).filter(|&t| map[t] == letter).collect();
@@ -341,14 +434,20 @@ impl Board {
             .expect("generated board is valid")
     }
 
-    fn generate_fog(rng: &mut Rng, balanced: bool) -> Board {
-        let layout = BoardLayout::FogIslands;
+    fn generate_fog(rng: &mut Rng, layout: BoardLayout, balanced: bool) -> Board {
         let topo = layout.topology();
         let map = layout.map().expect("fog map");
         let nt = topo.num_tiles;
-        let mut home = FOG_HOME_POOL;
-        rng.shuffle(&mut home);
-        let mut home = home.into_iter();
+        let mut home_buf = [Terrain::Desert; 24];
+        let home_src: &[Terrain] = if layout == BoardLayout::FogIslands {
+            &FOG_HOME_POOL
+        } else {
+            &EXTENDED_FOG_HOME_POOL
+        };
+        let home_slice = &mut home_buf[..home_src.len()];
+        home_slice.copy_from_slice(home_src);
+        rng.shuffle(home_slice);
+        let mut home = home_slice.iter().copied();
         let mut terrain = [Terrain::Desert; MAX_TILES];
         for t in 0..nt {
             terrain[t] = match map[t] {
@@ -470,16 +569,16 @@ impl Board {
             tile_island[t] = i as u8 + 1;
         }
         let mut vertex_island = [0u8; MAX_VERTICES];
-        let mut land_vertices = 0u128;
-        let mut setup_vertices = 0u128;
+        let mut land_vertices = BitSet::EMPTY;
+        let mut setup_vertices = BitSet::EMPTY;
         for v in 0..topo.num_vertices {
             for &t in &topo.vertex_tiles[v] {
                 if t != NONE && tile_island[t as usize] != 0 {
                     vertex_island[v] = tile_island[t as usize];
-                    land_vertices |= 1u128 << v;
+                    land_vertices.insert(v as u8);
                     // Seafaring maps start everyone on the home island.
                     if map.is_none() || tile_island[t as usize] == 1 {
-                        setup_vertices |= 1u128 << v;
+                        setup_vertices.insert(v as u8);
                     }
                 }
             }
@@ -500,14 +599,14 @@ impl Board {
                 }
             }
         }
-        let (mut land_edges, mut sea_edges) = (0u128, 0u128);
+        let (mut land_edges, mut sea_edges) = (BitSet::EMPTY, BitSet::EMPTY);
         for e in 0..topo.num_edges {
             if edge_land[e] {
-                land_edges |= 1u128 << e;
+                land_edges.insert(e as u8);
             }
             // The map's border is open sea once the tile inside is known.
             if edge_sea[e] || (edge_tiles[e] == 1 && !edge_fog[e]) {
-                sea_edges |= 1u128 << e;
+                sea_edges.insert(e as u8);
             }
         }
         let pirate_start = map
@@ -596,13 +695,13 @@ impl Board {
             self.tile_island[t] = 2;
             for &v in &topo.tile_vertices[t] {
                 self.vertex_island[v as usize] = 2;
-                self.land_vertices |= 1u128 << v;
+                self.land_vertices.insert(v);
             }
             for &e in &topo.tile_edges[t] {
-                self.land_edges |= 1u128 << e;
+                self.land_edges.insert(e);
                 // Outer border edges of newly revealed land face the open sea.
                 if topo.coast_edges.contains(&e) {
-                    self.sea_edges |= 1u128 << e;
+                    self.sea_edges.insert(e);
                 }
             }
         }
