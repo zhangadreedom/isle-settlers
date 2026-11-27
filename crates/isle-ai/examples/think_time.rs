@@ -18,6 +18,7 @@ fn main() {
         Some("archipelago") => Scenario::Archipelago,
         Some("fog" | "fog-islands" | "fog_islands") => Scenario::FogIslands,
         Some("citadels" | "cities" | "ck") => Scenario::Citadels,
+        Some("fishermen" | "fish") => Scenario::Fishermen,
         _ => Scenario::Classic,
     };
     let mut times = Vec::new();

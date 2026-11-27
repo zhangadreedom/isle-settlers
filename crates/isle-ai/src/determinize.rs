@@ -105,6 +105,14 @@ pub fn determinize(s: &GameState, me: u8, rng: &mut Rng) -> GameState {
         rng.shuffle(&mut d.fog_numbers[..nlen]);
     }
 
+    // Balanced 36-card dice deck: only `dice_deck_len` is public in `PlayerView`,
+    // so refill with a fresh shuffled permutation while keeping `dice_deck_len`.
+    if s.config.event_deck {
+        d.dice_deck = isle_core::CANONICAL_DICE_DECK;
+        rng.shuffle(&mut d.dice_deck);
+        d.dice_deck_len = s.dice_deck_len;
+    }
+
     // Future dice and steals.
     d.rng = Rng::new(rng.next_u64());
     d
@@ -118,14 +126,19 @@ pub(crate) mod tests {
 
     pub(crate) fn sample_states() -> Vec<GameState> {
         let mut out = Vec::new();
-        for (scenario, players, seeds) in [
-            (isle_core::Scenario::Classic, 4u8, 0..14u64),
-            (isle_core::Scenario::FogIslands, 4u8, 14..22u64),
-            (isle_core::Scenario::FogIslands, 6u8, 22..28u64),
-            (isle_core::Scenario::Citadels, 4u8, 28..38u64),
+        for (scenario, players, event_deck, seeds) in [
+            (isle_core::Scenario::Classic, 4u8, false, 0..14u64),
+            (isle_core::Scenario::FogIslands, 4u8, false, 14..22u64),
+            (isle_core::Scenario::FogIslands, 6u8, false, 22..28u64),
+            (isle_core::Scenario::Citadels, 4u8, false, 28..38u64),
+            (isle_core::Scenario::Fishermen, 4u8, true, 38..46u64),
         ] {
             for seed in seeds {
-                let mut g = GameState::new(GameConfig::scenario(scenario, players), seed).unwrap();
+                let config = GameConfig {
+                    event_deck,
+                    ..GameConfig::scenario(scenario, players)
+                };
+                let mut g = GameState::new(config, seed).unwrap();
                 let mut bots: Vec<WeightedRandomBot> = (0..players as u64)
                     .map(|k| WeightedRandomBot::new(seed * 9 + k))
                     .collect();

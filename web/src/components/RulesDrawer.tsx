@@ -57,6 +57,17 @@ const SCENARIO_TABS: { id: Scenario; label: string; vp: number; tagline: string;
       '每次掷骰 50% 推进黑帆舰队，满 7 格触发攻城检定：总激活战力 ≥ 普通城市数则独一首功得 +1 卫城分（并列摸发展卡），失守则出力最少者城市降为村庄。',
     ],
   },
+  {
+    id: 'Fishermen',
+    label: '渔场与丰年',
+    vp: 10,
+    tagline: '沿海渔场、内陆丰饶湖与破旧皮靴 · 默认 10 分获胜（支持 2–6 人）',
+    bullets: [
+      '沿海分布带数字标识的专属渔场（4–10点），且荒漠化作内陆湖（无强盗时掷出 2 或 12 点产鱼），聚落收获 1 鱼、城市收获 2 鱼（上限 7 条）。',
+      '主阶段可消耗海鱼执行奇策：2鱼将强盗赶回荒漠、3鱼盲抽对手1张牌、4鱼从银行任选1张资源、5鱼免费铺筑1条道路、7鱼免费摸1张发展卡。',
+      '捕鱼时有小概率捞起【破旧皮靴】！持有皮靴者需要多拿 +1 分才能获胜，可在主阶段将其转送给公开分不低于自己的任意对手。',
+    ],
+  },
 ];
 
 export function RulesModal(props: {
@@ -85,6 +96,9 @@ export function RulesModal(props: {
     }
     if (r?.friendlyRobber) {
       tags.push('友好强盗（≤2分免扰）');
+    }
+    if (r?.eventDeck) {
+      tags.push('36张均衡点数牌');
     }
     if (r?.pairedTurns) {
       tags.push('5–6人双人搭档回合');

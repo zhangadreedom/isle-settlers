@@ -1820,3 +1820,9 @@ details.house-rules[open] summary {
   font-weight: 600;
 }
 
+.boot-badge {
+  background: rgba(217, 72, 65, 0.25);
+  color: #ffbeb9;
+}
+
+

@@ -16,8 +16,8 @@ use isle_core::{
 use serde::{Deserialize, Serialize};
 
 pub use isle_core::{
-    Action, CityTrack, Commodity, CommoditySet, CustomMap, DevCard, Event, RuleError, TradeGood,
-    TradeResponse,
+    Action, CityTrack, Commodity, CommoditySet, CustomMap, DevCard, Event, FishingGround,
+    RuleError, TradeGood, TradeResponse,
 };
 
 pub mod account;
@@ -48,6 +48,9 @@ pub struct BoardInfo {
     pub harbors: Vec<HarborKind>,
     /// Island per tile: 0 for the sea, from 1 (the home island) on.
     pub islands: Vec<u8>,
+    /// Fishermen mode: coastal fishing grounds (`edge` + `number` token).
+    #[serde(default)]
+    pub fishing_grounds: Vec<FishingGround>,
 }
 
 /// Public information about a seat.
@@ -76,6 +79,9 @@ pub struct PlayerPublic {
     pub city_progress: [u8; 3],
     pub knights_left: [u8; 3],
     pub defender_points: u8,
+    /// Fishermen mode: fish tokens currently held (`0..=7`).
+    #[serde(default)]
+    pub fish_count: u8,
 }
 
 /// The viewer's own private information.
@@ -170,6 +176,12 @@ pub struct PlayerView {
     pub trade: Option<TradeOffer>,
     pub longest_road_owner: Option<u8>,
     pub largest_army_owner: Option<u8>,
+    /// Fishermen mode: seat currently holding the Old Boot (`+1` VP needed to win).
+    #[serde(default)]
+    pub old_boot_owner: Option<u8>,
+    /// Balanced dice deck house rule: cards remaining before New Year reshuffle.
+    #[serde(default)]
+    pub dice_deck_left: Option<u8>,
     pub winner: Option<u8>,
     /// Total points per seat, revealed once the game is over.
     pub final_points: Option<Vec<u8>>,
@@ -189,6 +201,7 @@ pub fn board_info(state: &GameState) -> BoardInfo {
         numbers: state.board.numbers[..state.topo().num_tiles].to_vec(),
         harbors: state.board.harbor_kinds().to_vec(),
         islands: state.board.tile_island[..state.topo().num_tiles].to_vec(),
+        fishing_grounds: state.board.active_fishing_grounds().to_vec(),
     }
 }
 
@@ -233,6 +246,7 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
                 city_progress: ps.city_progress,
                 knights_left: ps.knights_left,
                 defender_points: ps.defender_points,
+                fish_count: ps.fish,
             }
         })
         .collect();
@@ -272,6 +286,8 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
         trade: state.trade,
         longest_road_owner: state.longest_road_owner,
         largest_army_owner: state.largest_army_owner,
+        old_boot_owner: state.old_boot_owner,
+        dice_deck_left: state.config.event_deck.then_some(state.dice_deck_len),
         winner: state.winner,
         final_points: state
             .winner
@@ -317,13 +333,18 @@ mod tests {
     /// Mid-game states from bot play (classic, fog islands and citadels).
     fn sample_states() -> Vec<GameState> {
         let mut out = Vec::new();
-        for (scenario, seeds) in [
-            (isle_core::Scenario::Classic, 0..20u64),
-            (isle_core::Scenario::FogIslands, 20..35u64),
-            (isle_core::Scenario::Citadels, 35..50u64),
+        for (scenario, event_deck, seeds) in [
+            (isle_core::Scenario::Classic, false, 0..20u64),
+            (isle_core::Scenario::FogIslands, false, 20..35u64),
+            (isle_core::Scenario::Citadels, false, 35..50u64),
+            (isle_core::Scenario::Fishermen, true, 50..62u64),
         ] {
             for seed in seeds {
-                let mut g = GameState::new(GameConfig::scenario(scenario, 4), seed).unwrap();
+                let config = GameConfig {
+                    event_deck,
+                    ..GameConfig::scenario(scenario, 4)
+                };
+                let mut g = GameState::new(config, seed).unwrap();
                 let mut bots: Vec<WeightedRandomBot> = (0..4)
                     .map(|k| WeightedRandomBot::new(seed * 7 + k))
                     .collect();
@@ -369,6 +390,10 @@ mod tests {
         rng.shuffle(&mut h.fog_terrain[..ft]);
         let fn_len = h.fog_numbers_len as usize;
         rng.shuffle(&mut h.fog_numbers[..fn_len]);
+        if h.config.event_deck {
+            h.dice_deck = isle_core::CANONICAL_DICE_DECK;
+            rng.shuffle(&mut h.dice_deck);
+        }
         h.rng = Rng::new(seed ^ 0xABCD);
         h
     }

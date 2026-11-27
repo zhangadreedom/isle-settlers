@@ -678,6 +678,17 @@ export function playForEvents(events: Event[], me: number | null): void {
       case 'MonopolyTaken':
         if ((me === null || e.value.player === me) && hasAny(e.value.taken)) gained = true;
         break;
+      case 'FishCaught':
+      case 'FishResourceTaken':
+        if (me === null || e.value.player === me) gained = true;
+        break;
+      case 'FishSpent':
+        trade = 'done';
+        break;
+      case 'OldBootDrawn':
+      case 'OldBootPassed':
+        robber ??= 'robber';
+        break;
       case 'GameWon':
         wonSeat = e.value.player;
         break;

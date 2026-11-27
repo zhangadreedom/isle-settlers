@@ -74,6 +74,9 @@ impl GameState {
                 if self.config.scenario.is_citadels() {
                     self.push_citadel_actions(player, out);
                 }
+                if self.can_use_fish() {
+                    self.push_fishermen_actions(player, out);
+                }
                 if !self.ship_moved {
                     for from in edges_in(self.movable_ships(player)) {
                         for to in edges_in(self.ship_moves(player, from)) {
@@ -265,6 +268,43 @@ impl GameState {
                 }
                 self.push_robber_moves(player, Some(v), out);
             }
+        }
+    }
+
+    fn push_fishermen_actions(&self, player: u8, out: &mut Vec<Action>) {
+        let ps = &self.players[player as usize];
+        if self.old_boot_owner == Some(player) {
+            let my_vp = self.public_victory_points(player);
+            for q in 0..self.num_players() as u8 {
+                if q != player && self.public_victory_points(q) >= my_vp {
+                    out.push(Action::PassOldBoot(q));
+                }
+            }
+        }
+        if ps.fish >= 2 && self.board.desert != NONE && self.robber != self.board.desert {
+            out.push(Action::FishDriveOffRobber);
+        }
+        if ps.fish >= 3 {
+            for q in 0..self.num_players() as u8 {
+                if q != player && self.players[q as usize].total_cards() > 0 {
+                    out.push(Action::FishSteal(q));
+                }
+            }
+        }
+        if ps.fish >= 4 {
+            for r in Resource::ALL {
+                if self.bank[r] > 0 {
+                    out.push(Action::FishTakeResource(r));
+                }
+            }
+        }
+        if ps.fish >= 5 && ps.roads_left > 0 {
+            for e in edges_in(self.road_spots(player)) {
+                out.push(Action::FishBuildRoad(e));
+            }
+        }
+        if ps.fish >= 7 && self.dev_deck_len > 0 {
+            out.push(Action::FishBuyDevCard);
         }
     }
 

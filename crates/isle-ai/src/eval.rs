@@ -106,6 +106,30 @@ pub fn commodity_income(s: &GameState, q: u8) -> [f32; 3] {
     out
 }
 
+/// Expected fish tokens caught per dice roll for seat `q` in Fishermen mode.
+pub fn fish_income(s: &GameState, q: u8) -> f32 {
+    let topo = s.topo();
+    let mut out = 0.0f32;
+    for fg in s.board.active_fishing_grounds() {
+        let pips = PIPS[fg.number as usize] as f32;
+        for v in topo.edge_vertices[fg.edge as usize] {
+            if s.settlements[q as usize].contains(v) {
+                out += pips / 36.0;
+            } else if s.cities[q as usize].contains(v) {
+                out += 2.0 * pips / 36.0;
+            }
+        }
+    }
+    if s.board.desert != NONE {
+        let lake_pips = if s.robber == s.board.desert { 1.1 } else { 2.0 };
+        let tv = topo.tile_vertex_mask[s.board.desert as usize];
+        let s_cnt = (s.settlements[q as usize] & tv).count_ones() as f32;
+        let c_cnt = (s.cities[q as usize] & tv).count_ones() as f32;
+        out += (s_cnt + 2.0 * c_cnt) * (lake_pips / 36.0);
+    }
+    out
+}
+
 /// Position strength of every seat, in victory-point units.
 pub fn scores(s: &GameState, w: &Weights, out: &mut [f32; MAX_PLAYERS]) {
     let n = s.num_players();
@@ -193,6 +217,14 @@ pub fn scores(s: &GameState, w: &Weights, out: &mut [f32; MAX_PLAYERS]) {
         }
         if w.sea != 0.0 && s.board.layout.island_bonus() > 0 {
             score += w.sea * crate::sea::island_progress(s, q);
+        }
+
+        if s.config.scenario.is_fishermen() {
+            score += w.income * 0.42 * fish_income(s, q);
+            score += 0.09 * ps.fish as f32;
+            if s.old_boot_owner == Some(q) {
+                score -= 0.85;
+            }
         }
 
         if citadels {

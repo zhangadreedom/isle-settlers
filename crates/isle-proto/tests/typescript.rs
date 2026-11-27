@@ -17,9 +17,9 @@ use isle_proto::ranking::{
     Leaderboard, LeaderboardEntry, MatchSummary, PlayerProfile, RatingChange, SeatRating, Tier,
 };
 use isle_proto::{
-    Action, BoardInfo, CitadelView, CityTrack, Commodity, CommoditySet, DevCard, Event, FogBoard,
-    KnightView, PlayerPublic, PlayerView, PrivateInfo, ReplayPlayer, ReplayRecord, RuleError,
-    TradeGood, TradeResponse,
+    Action, BoardInfo, CitadelView, CityTrack, Commodity, CommoditySet, DevCard, Event,
+    FishingGround, FogBoard, KnightView, PlayerPublic, PlayerView, PrivateInfo, ReplayPlayer,
+    ReplayRecord, RuleError, TradeGood, TradeResponse,
 };
 use ts_rs::{Config, TS};
 
@@ -45,6 +45,7 @@ fn render() -> String {
         Action::decl(&cfg),
         Event::decl(&cfg),
         RuleError::decl(&cfg),
+        FishingGround::decl(&cfg),
         BoardInfo::decl(&cfg),
         FogBoard::decl(&cfg),
         KnightView::decl(&cfg),

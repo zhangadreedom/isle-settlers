@@ -19,9 +19,9 @@ use crate::Bot;
 use crate::determinize::determinize;
 use crate::eval::{Weights, rewards};
 use crate::greedy::{
-    citadel_city_value, knight_spot_value, missing, propose_trade_offer, robber_hurts_me,
-    robber_value, setup_spot_value, spot_value, track_for_commodity, upgrade_city_value,
-    vertex_production,
+    citadel_city_value, fishermen_city_value, knight_spot_value, missing, propose_trade_offer,
+    robber_hurts_me, robber_value, setup_spot_value, spot_value, track_for_commodity,
+    upgrade_city_value, vertex_production,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -528,6 +528,9 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
             Action::BuildSettlement(v) if citadels => {
                 Some(setup_spot_value(s, p, *v) + rng.below(100) as f32 * 0.01)
             }
+            Action::BuildSettlement(v) if s.config.scenario.is_fishermen() => {
+                Some(spot_value(s, p, *v) + rng.below(100) as f32 * 0.01)
+            }
             Action::BuildSettlement(v) => {
                 Some(vertex_production(s, *v) + rng.below(100) as f32 * 0.01)
             }
@@ -639,8 +642,18 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
 
 fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action {
     let citadels = s.config.scenario.is_citadels();
+    let fishermen = s.config.scenario.is_fishermen();
+    if fishermen
+        && let Some(a) = best_of(legal, |a| match a {
+            Action::PassOldBoot(q) => Some(s.public_victory_points(*q) as f32),
+            _ => None,
+        })
+    {
+        return a;
+    }
     if let Some(a) = best_of(legal, |a| match a {
         Action::BuildCity(v) if citadels => Some(citadel_city_value(s, p, *v)),
+        Action::BuildCity(v) if fishermen => Some(fishermen_city_value(s, *v)),
         Action::BuildCity(v) => Some(vertex_production(s, *v)),
         _ => None,
     }) {
@@ -707,6 +720,7 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
     for target in [cost::CITY, cost::SETTLEMENT] {
         if missing(hand, target) == 1 {
             let trade = legal.iter().find(|a| match a {
+                Action::FishTakeResource(get) if fishermen => hand[*get] < target[*get],
                 Action::MaritimeTrade { give, get } => {
                     hand[*get] < target[*get]
                         && hand[*give] as i32 - target[*give] as i32
@@ -724,6 +738,34 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
             });
             if let Some(t) = trade {
                 return *t;
+            }
+        }
+    }
+    if fishermen {
+        if robber_hurts_me(s, p) && legal.contains(&Action::FishDriveOffRobber) {
+            return Action::FishDriveOffRobber;
+        }
+        if legal.contains(&Action::FishBuyDevCard) {
+            return Action::FishBuyDevCard;
+        }
+        if rng.below(2) == 0 {
+            let f_roads: Vec<&Action> = legal
+                .iter()
+                .filter(|a| matches!(a, Action::FishBuildRoad(_)))
+                .collect();
+            if !f_roads.is_empty() {
+                return *f_roads[rng.below(f_roads.len() as u32) as usize];
+            }
+        }
+        if s.players[p as usize].fish >= 5 || rng.below(3) == 0 {
+            if let Some(a) = best_of(legal, |a| match a {
+                Action::FishSteal(q) => Some(
+                    s.public_victory_points(*q) as f32 * 2.0
+                        + s.players[*q as usize].hand.total() as f32,
+                ),
+                _ => None,
+            }) {
+                return a;
             }
         }
     }
@@ -885,5 +927,22 @@ mod tests {
         let mut bots: Vec<&mut dyn Bot> = vec![&mut m, b1, b2, b3];
         let out = play_game(&mut g, &mut bots, 1000, true);
         assert!(out.winner.is_some(), "citadels game with MctsBot did not finish");
+    }
+
+    #[test]
+    fn plays_fishermen_and_event_deck_games_cleanly() {
+        let config = GameConfig {
+            event_deck: true,
+            ..GameConfig::scenario(isle_core::Scenario::Fishermen, 4)
+        };
+        let mut g = GameState::new(config, 13).unwrap();
+        let mut m = MctsBot::with_config(13, small());
+        let mut b: Vec<GreedyBot> = (0..3).map(|k| GreedyBot::new(k + 10)).collect();
+        let [b1, b2, b3] = &mut b[..] else {
+            unreachable!()
+        };
+        let mut bots: Vec<&mut dyn Bot> = vec![&mut m, b1, b2, b3];
+        let out = play_game(&mut g, &mut bots, 1000, true);
+        assert!(out.winner.is_some(), "fishermen game with MctsBot did not finish");
     }
 }

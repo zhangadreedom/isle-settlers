@@ -587,6 +587,103 @@ impl GameState {
                 }
             }
 
+            Action::PassOldBoot(target) => {
+                if !self.can_use_fish() {
+                    return Err(E::WrongPhase);
+                }
+                if self.old_boot_owner != Some(player) {
+                    return Err(E::NoSuchCard);
+                }
+                if target as usize >= self.num_players() || target == player {
+                    return Err(E::InvalidPlayer);
+                }
+                if self.public_victory_points(target) < self.public_victory_points(player) {
+                    return Err(E::InvalidVictim);
+                }
+                Ok(())
+            }
+
+            Action::FishDriveOffRobber => {
+                if !self.can_use_fish() {
+                    return Err(E::WrongPhase);
+                }
+                if ps.fish < 2 {
+                    return Err(E::InsufficientResources);
+                }
+                if self.board.desert == NONE || self.robber == self.board.desert {
+                    return Err(E::RobberMustMove);
+                }
+                Ok(())
+            }
+
+            Action::FishSteal(victim) => {
+                if !self.can_use_fish() {
+                    return Err(E::WrongPhase);
+                }
+                if ps.fish < 3 {
+                    return Err(E::InsufficientResources);
+                }
+                if victim as usize >= self.num_players()
+                    || victim == player
+                    || self.players[victim as usize].total_cards() == 0
+                {
+                    return Err(E::InvalidVictim);
+                }
+                Ok(())
+            }
+
+            Action::FishTakeResource(r) => {
+                if !self.can_use_fish() {
+                    return Err(E::WrongPhase);
+                }
+                if ps.fish < 4 {
+                    return Err(E::InsufficientResources);
+                }
+                if self.bank[r] == 0 {
+                    return Err(E::BankShort);
+                }
+                Ok(())
+            }
+
+            Action::FishBuildRoad(e) => {
+                if !self.can_use_fish() {
+                    return Err(E::WrongPhase);
+                }
+                if ps.fish < 5 {
+                    return Err(E::InsufficientResources);
+                }
+                if ps.roads_left == 0 {
+                    return Err(E::NoPiecesLeft);
+                }
+                if e as usize >= topo.num_edges {
+                    return Err(E::InvalidEdge);
+                }
+                let bit = BitSet::bit(e);
+                if !(self.occupied_edges() & bit).is_empty() {
+                    return Err(E::Occupied);
+                }
+                if (self.board.land_edges & bit).is_empty() {
+                    return Err(E::WrongGround);
+                }
+                if (self.road_spots(player) & bit).is_empty() {
+                    return Err(E::NotConnected);
+                }
+                Ok(())
+            }
+
+            Action::FishBuyDevCard => {
+                if !self.can_use_fish() {
+                    return Err(E::WrongPhase);
+                }
+                if ps.fish < 7 {
+                    return Err(E::InsufficientResources);
+                }
+                if self.dev_deck_len == 0 {
+                    return Err(E::DeckEmpty);
+                }
+                Ok(())
+            }
+
             Action::Discard(_)
             | Action::DiscardCitadel { .. }
             | Action::RespondTrade { .. }
@@ -673,7 +770,17 @@ impl GameState {
 
         match action {
             Action::RollDice => {
-                let dice = (self.rng.die(), self.rng.die());
+                let dice = if self.config.event_deck {
+                    if self.dice_deck_len <= DICE_DECK_RESHUFFLE_AT {
+                        self.dice_deck = CANONICAL_DICE_DECK;
+                        self.rng.shuffle(&mut self.dice_deck);
+                        self.dice_deck_len = DICE_DECK_SIZE as u8;
+                    }
+                    self.dice_deck_len -= 1;
+                    self.dice_deck[self.dice_deck_len as usize]
+                } else {
+                    (self.rng.die(), self.rng.die())
+                };
                 self.dice = Some(dice);
                 sink.emit(Event::DiceRolled { player, dice });
                 if self.config.scenario.is_citadels() {
@@ -695,7 +802,11 @@ impl GameState {
                         Phase::MoveRobber
                     };
                 } else {
-                    self.phase = if self.produce(sum, sink) {
+                    let gold_owed = self.produce(sum, sink);
+                    if self.config.scenario.is_fishermen() {
+                        self.produce_fish(sum, sink);
+                    }
+                    self.phase = if gold_owed {
                         self.after_gold = Phase::Main;
                         Phase::Gold { vertex: None }
                     } else {
@@ -1156,6 +1267,69 @@ impl GameState {
                 sink.emit(Event::TradeCancelled { player });
             }
 
+            Action::PassOldBoot(target) => {
+                self.old_boot_owner = Some(target);
+                sink.emit(Event::OldBootPassed {
+                    from: player,
+                    to: target,
+                });
+            }
+
+            Action::FishDriveOffRobber => {
+                let desert = self.board.desert;
+                self.players[p].fish -= 2;
+                self.robber = desert;
+                sink.emit(Event::FishSpent { player, cost: 2 });
+                sink.emit(Event::RobberMoved {
+                    player,
+                    tile: desert,
+                });
+            }
+
+            Action::FishSteal(victim) => {
+                self.players[p].fish -= 3;
+                sink.emit(Event::FishSpent { player, cost: 3 });
+                self.steal_from(player, victim, sink);
+            }
+
+            Action::FishTakeResource(r) => {
+                self.players[p].fish -= 4;
+                self.bank[r] -= 1;
+                self.players[p].hand[r] += 1;
+                sink.emit(Event::FishSpent { player, cost: 4 });
+                sink.emit(Event::FishResourceTaken {
+                    player,
+                    resource: r,
+                });
+            }
+
+            Action::FishBuildRoad(e) => {
+                self.players[p].fish -= 5;
+                sink.emit(Event::FishSpent { player, cost: 5 });
+                self.roads[p].insert(e);
+                self.players[p].roads_left -= 1;
+                sink.emit(Event::RoadBuilt { player, edge: e });
+                let gold = self.reveal_fog_at_edge(player, e, sink);
+                self.update_longest_road_after_build(player, sink);
+                self.owe_discovered_gold(player, gold, sink);
+            }
+
+            Action::FishBuyDevCard => {
+                self.players[p].fish -= 7;
+                sink.emit(Event::FishSpent { player, cost: 7 });
+                self.dev_deck_len -= 1;
+                let card = self.dev_deck[self.dev_deck_len as usize];
+                if card == DevCard::VictoryPoint {
+                    self.players[p].dev_cards[card.index()] += 1;
+                } else {
+                    self.players[p].new_dev_cards[card.index()] += 1;
+                }
+                sink.emit(Event::DevCardBought {
+                    player,
+                    card: Some(card),
+                });
+            }
+
             Action::EndTurn => {
                 let n = self.num_players();
                 if let Phase::SpecialBuild { builder } = self.phase {
@@ -1222,7 +1396,7 @@ impl GameState {
             && self.in_paired_turn.is_none()
         {
             let vp = self.victory_points(self.current);
-            if vp >= self.config.victory_points {
+            if vp >= self.target_victory_points(self.current) {
                 self.winner = Some(self.current);
                 self.phase = Phase::GameOver;
                 self.trade = None;
@@ -1243,7 +1417,6 @@ impl GameState {
         victim: Option<u8>,
         sink: &mut S,
     ) {
-        let p = player as usize;
         if self.board.is_sea(tile) {
             self.pirate = tile;
             sink.emit(Event::PirateMoved { player, tile });
@@ -1252,29 +1425,34 @@ impl GameState {
             sink.emit(Event::RobberMoved { player, tile });
         }
         if let Some(q) = victim {
-            let hand = self.players[q as usize].hand;
-            let comm = self.players[q as usize].commodities;
-            let h_total = hand.total();
-            let idx = self.rng.below(h_total + comm.total());
-            if idx < h_total {
-                let r = hand.nth_card(idx).expect("victim has resource");
-                self.players[q as usize].hand[r] -= 1;
-                self.players[p].hand[r] += 1;
-                sink.emit(Event::Stolen {
-                    thief: player,
-                    victim: q,
-                    resource: Some(r),
-                });
-            } else {
-                let c = comm.nth_card(idx - h_total).expect("victim has commodity");
-                self.players[q as usize].commodities[c] -= 1;
-                self.players[p].commodities[c] += 1;
-                sink.emit(Event::CommodityStolen {
-                    thief: player,
-                    victim: q,
-                    commodity: Some(c),
-                });
-            }
+            self.steal_from(player, q, sink);
+        }
+    }
+
+    fn steal_from<S: EventSink + ?Sized>(&mut self, player: u8, q: u8, sink: &mut S) {
+        let p = player as usize;
+        let hand = self.players[q as usize].hand;
+        let comm = self.players[q as usize].commodities;
+        let h_total = hand.total();
+        let idx = self.rng.below(h_total + comm.total());
+        if idx < h_total {
+            let r = hand.nth_card(idx).expect("victim has resource");
+            self.players[q as usize].hand[r] -= 1;
+            self.players[p].hand[r] += 1;
+            sink.emit(Event::Stolen {
+                thief: player,
+                victim: q,
+                resource: Some(r),
+            });
+        } else {
+            let c = comm.nth_card(idx - h_total).expect("victim has commodity");
+            self.players[q as usize].commodities[c] -= 1;
+            self.players[p].commodities[c] += 1;
+            sink.emit(Event::CommodityStolen {
+                thief: player,
+                victim: q,
+                commodity: Some(c),
+            });
         }
     }
 
@@ -1624,6 +1802,58 @@ impl GameState {
         self.pending_gold = gold;
         sink.emit(Event::GoldOwed { owed: gold });
         true
+    }
+
+    /// Fishermen: awards fish tokens from coastal fishing grounds matching
+    /// `roll` and from the inland trout lake (`board.desert`) on `2` or `12`
+    /// when not blocked by the robber, in turn order starting from `current`.
+    fn produce_fish<S: EventSink + ?Sized>(&mut self, roll: u8, sink: &mut S) {
+        let n = self.num_players();
+        let topo = self.topo();
+        let fg_count = self.board.fishing_ground_count as usize;
+        let lake = if (roll == 2 || roll == 12)
+            && self.board.desert != NONE
+            && self.robber != self.board.desert
+        {
+            topo.tile_vertex_mask[self.board.desert as usize]
+        } else {
+            BitSet::EMPTY
+        };
+        for offset in 0..n {
+            let q = ((self.current as usize + offset) % n) as u8;
+            let qi = q as usize;
+            let mut gained = 0u8;
+            for fg in &self.board.fishing_grounds[..fg_count] {
+                if fg.number == roll {
+                    for v in topo.edge_vertices[fg.edge as usize] {
+                        if self.settlements[qi].contains(v) {
+                            gained = gained.saturating_add(1);
+                        } else if self.cities[qi].contains(v) {
+                            gained = gained.saturating_add(2);
+                        }
+                    }
+                }
+            }
+            if !lake.is_empty() {
+                let s_cnt = (self.settlements[qi] & lake).count_ones() as u8;
+                let c_cnt = (self.cities[qi] & lake).count_ones() as u8;
+                gained = gained.saturating_add(s_cnt + 2 * c_cnt);
+            }
+            let before = self.players[qi].fish;
+            let after = before.saturating_add(gained).min(MAX_FISH_HAND);
+            let actual_added = after - before;
+            self.players[qi].fish = after;
+            if actual_added > 0 {
+                sink.emit(Event::FishCaught {
+                    player: q,
+                    count: actual_added,
+                });
+                if self.old_boot_owner.is_none() && self.rng.below(12) == 0 {
+                    self.old_boot_owner = Some(q);
+                    sink.emit(Event::OldBootDrawn { player: q });
+                }
+            }
+        }
     }
 
     fn update_largest_army<S: EventSink + ?Sized>(&mut self, player: u8, sink: &mut S) {

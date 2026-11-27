@@ -1,4 +1,5 @@
 import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
+import type { BoardRenderer } from '../board/BoardRenderer';
 import { layoutFor } from '../diy/custom-map';
 import { EMBEDDED } from '../embed';
 import type { BotKind } from '../engine';
@@ -6,8 +7,9 @@ import type { BotLevel, HouseRules, PublicRoomSummary, Scenario } from '../gener
 import type { LocalOptions } from '../game/source';
 import { account, accountsEnabled } from '../net/account';
 import { fetchPublicRooms, saveName, savedName } from '../net/connection';
+import { canInstallPwa, promptInstallPwa } from '../pwa';
 import { AccountPanel } from './Account';
-import { SoundToggle } from './Hud';
+import { SoundToggle, ThemeToggle } from './Hud';
 import { Rankings } from './Ranking';
 import { ReplayHistory } from './ReplayHistory';
 
@@ -28,20 +30,29 @@ const SCENARIO_SHORT: Record<Scenario, string> = {
   Archipelago: '群岛',
   FogIslands: '迷雾',
   Citadels: '城邦',
+  Fishermen: '渔场',
 };
 
 /** Seats each scenario can be played with. */
-const MAX_SEATS: Record<Scenario, number> = { Classic: 6, Archipelago: 6, FogIslands: 6, Citadels: 6 };
+const MAX_SEATS: Record<Scenario, number> = {
+  Classic: 6,
+  Archipelago: 6,
+  FogIslands: 6,
+  Citadels: 6,
+  Fishermen: 6,
+};
 
 const SCENARIO_DESC: Record<Scenario, string> = {
   Classic: '在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，支持传统特殊建造或双人搭档回合。',
   Archipelago: '航海 · 群岛：从西边的主岛出发，造船驶过海峡，首次在东边外岛建村庄奖励 2 分；金矿任选资源，海盗封锁航线。先到 12 分获胜，支持 2–6 人。',
   FogIslands: '航海 · 迷雾：从月牙主岛扬帆驶入迷雾，航线触及未知格即翻开地形并获发现奖励，首次登陆迷雾新大陆奖励 2 分。先到 12 分获胜，支持 2–6 人。',
   Citadels: '城邦与铁卫：第二轮直接起城，城市产出造纸/织布/铸币升级三系科技与 4 分大都会；招募并激活实体铁卫抵御黑帆舰队入侵。先到 13 分获胜，支持 2–6 人。',
+  Fishermen: '渔场与丰年：沿海渔场与荒漠内陆湖产出海鱼筹码，花 2–7 条鱼可驱匪、抽牌、换资源、修路或摸卡，小心捞到 +1 分难度的破旧皮靴！先到 10 分获胜，支持 2–6 人。',
 };
 
 export function Lobby(props: {
   ready: boolean;
+  renderer?: BoardRenderer;
   seed: number;
   players: number;
   onPlayers: (players: number) => void;
@@ -53,6 +64,7 @@ export function Lobby(props: {
   onOpenReplay: (json: string) => void;
   onOpenRules: () => void;
   onOpenWorkshop: () => void;
+  onOpenDaily: () => void;
   onStartLocal: (o: LocalOptions) => void;
   onCreateRoom: (o: CreateRoom) => void;
   onJoinRoom: (room: string) => void;
@@ -84,6 +96,7 @@ export function Lobby(props: {
   const [customVp, setCustomVp] = createSignal<number | null>(null);
   const [friendlyRobber, setFriendlyRobber] = createSignal(false);
   const [pairedTurns, setPairedTurns] = createSignal(false);
+  const [eventDeck, setEventDeck] = createSignal(false);
   const [turnTimerSecs, setTurnTimerSecs] = createSignal(0);
 
   const refreshRooms = async () => {
@@ -107,6 +120,7 @@ export function Lobby(props: {
     victoryPoints: customVp(),
     friendlyRobber: friendlyRobber(),
     pairedTurns: pairedTurns(),
+    eventDeck: eventDeck(),
     turnTimerSecs: turnTimerSecs(),
     customMap: props.customMap,
   });
@@ -143,13 +157,22 @@ export function Lobby(props: {
         <div class="lobby-head">
           <h1>Isle Settlers</h1>
           <div class="row lobby-tools">
-            <button class="ghost small" onClick={props.onOpenWorkshop} title="自定义地形、港口、数字圆片并导出 1:1 激光切割/打印 SVG 图纸">
+            <button class="ghost small" onClick={props.onOpenDaily} title="全球同种子每日固定剧本挑战">
+              每日挑战
+            </button>
+            <button class="ghost small" onClick={props.onOpenWorkshop} title="自定义地形、港口、数字圆片并导出 1:1 激光切割 SVG 与 3D 打印 STL">
               地图工坊
             </button>
             <button class="ghost small" onClick={props.onOpenRules}>
               规则
             </button>
+            <ThemeToggle renderer={props.renderer} class="ghost small" />
             <SoundToggle class="ghost small" />
+            <Show when={canInstallPwa()}>
+              <button class="primary small" onClick={() => void promptInstallPwa()} title="安装为桌面/手机离线应用">
+                安装应用
+              </button>
+            </Show>
           </div>
         </div>
         <p class="muted">{SCENARIO_DESC[scenario()]}</p>
@@ -201,6 +224,13 @@ export function Lobby(props: {
                 title="商品产出、三系城邦升级与大都会、实体铁卫抵御黑帆舰队，2–6 人"
               >
                 城邦与铁卫
+              </button>
+              <button
+                classList={{ on: scenario() === 'Fishermen' }}
+                onClick={() => setScenario('Fishermen')}
+                title="沿海渔场与内陆湖产出海鱼筹码，兑换 5 种奇策并转交破旧皮靴，2–6 人"
+              >
+                渔场与丰年
               </button>
             </div>
           </div>
@@ -266,6 +296,21 @@ export function Lobby(props: {
                     title="只要有其他选择，强盗与海盗不能移入公开分 ≤ 2 分玩家的地块"
                   >
                     开启（保护 ≤2 分）
+                  </button>
+                </div>
+              </div>
+              <div class="field">
+                <span>点数产生</span>
+                <div class="seg small">
+                  <button classList={{ on: !eventDeck() }} onClick={() => setEventDeck(false)}>
+                    标准双骰
+                  </button>
+                  <button
+                    classList={{ on: eventDeck() }}
+                    onClick={() => setEventDeck(true)}
+                    title="使用洗匀的 36 张理论概率点数牌发点（剩 5 张重洗），消除极端脸黑"
+                  >
+                    36张均衡牌组
                   </button>
                 </div>
               </div>

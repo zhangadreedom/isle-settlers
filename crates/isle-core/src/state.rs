@@ -23,10 +23,33 @@ pub const MAX_CITIES: u8 = 4;
 pub const MAX_KNIGHTS_PER_LEVEL: u8 = 2;
 /// Steps before the barbarian fleet lands in Citadels mode.
 pub const BARBARIAN_STEPS: u8 = 7;
+/// Maximum fish tokens held by a player in Fishermen mode.
+pub const MAX_FISH_HAND: u8 = 7;
+/// Size of the balanced 36-card dice deck.
+pub const DICE_DECK_SIZE: usize = 36;
+/// Cards remaining in the dice deck that trigger the New Year reshuffle.
+pub const DICE_DECK_RESHUFFLE_AT: u8 = 5;
 /// Players holding more cards than this discard half when a 7 is rolled.
 pub const DISCARD_LIMIT: u32 = 7;
 pub const LONGEST_ROAD_MIN: u8 = 5;
 pub const LARGEST_ARMY_MIN: u8 = 3;
+
+/// Canonical 36 ordered `(d1, d2)` pairs (`1..=6` x `1..=6`).
+pub const CANONICAL_DICE_DECK: [(u8, u8); DICE_DECK_SIZE] = {
+    let mut deck = [(1u8, 1u8); DICE_DECK_SIZE];
+    let mut i = 0;
+    let mut d1 = 1u8;
+    while d1 <= 6 {
+        let mut d2 = 1u8;
+        while d2 <= 6 {
+            deck[i] = (d1, d2);
+            i += 1;
+            d2 += 1;
+        }
+        d1 += 1;
+    }
+    deck
+};
 
 /// Development card types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -104,7 +127,7 @@ impl BoardLayout {
     }
 }
 
-/// What is played: the classic island, a seafaring map, or Citadels.
+/// What is played: the classic island, a seafaring map, Citadels, or Fishermen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -117,12 +140,14 @@ pub enum Scenario {
     FogIslands,
     /// Citadels (Cities & Knights): commodities, city tracks, knights and barbarian raids, 2–6 players.
     Citadels,
+    /// Fishermen of Catan: coastal fishing grounds, trout lake, fish tokens and the Old Boot, 2–6 players.
+    Fishermen,
 }
 
 impl Scenario {
     pub const fn victory_points(self) -> u8 {
         match self {
-            Scenario::Classic => 10,
+            Scenario::Classic | Scenario::Fishermen => 10,
             Scenario::Archipelago | Scenario::FogIslands => 12,
             Scenario::Citadels => 13,
         }
@@ -136,6 +161,11 @@ impl Scenario {
     #[inline]
     pub const fn is_citadels(self) -> bool {
         matches!(self, Scenario::Citadels)
+    }
+
+    #[inline]
+    pub const fn is_fishermen(self) -> bool {
+        matches!(self, Scenario::Fishermen)
     }
 }
 
@@ -157,6 +187,9 @@ pub struct GameConfig {
     /// 5–6 players: use Paired Players turn instead of all-seat Special Build.
     #[cfg_attr(feature = "serde", serde(default))]
     pub paired_turns: bool,
+    /// Balanced 36-card dice deck (reshuffled with 5 cards left) instead of independent 2d6 rolls.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub event_deck: bool,
     /// Optional custom map (`IM1:...`), overriding procedural board generation.
     #[cfg_attr(
         feature = "serde",
@@ -191,7 +224,9 @@ impl GameConfig {
     pub fn layout(&self) -> BoardLayout {
         let ext = self.num_players > 4;
         match self.scenario {
-            Scenario::Classic | Scenario::Citadels => BoardLayout::for_players(self.num_players),
+            Scenario::Classic | Scenario::Citadels | Scenario::Fishermen => {
+                BoardLayout::for_players(self.num_players)
+            }
             Scenario::Archipelago if ext => BoardLayout::ArchipelagoExtended,
             Scenario::Archipelago => BoardLayout::Archipelago,
             Scenario::FogIslands if ext => BoardLayout::FogIslandsExtended,
@@ -209,6 +244,7 @@ impl Default for GameConfig {
             scenario: Scenario::Classic,
             friendly_robber: false,
             paired_turns: false,
+            event_deck: false,
             custom_map: None,
         }
     }
@@ -316,6 +352,8 @@ pub struct PlayerState {
     pub longest_road: u8,
     /// Harbor access bits (`HarborKind::bit`).
     pub harbors: u8,
+    /// Fishermen: fish tokens held (`0..=MAX_FISH_HAND`).
+    pub fish: u8,
 }
 
 impl PlayerState {
@@ -337,6 +375,7 @@ impl PlayerState {
             islands: 0,
             longest_road: 0,
             harbors: 0,
+            fish: 0,
         }
     }
 
@@ -430,6 +469,11 @@ pub struct GameState {
     pub metropolis_owners: [Option<u8>; 3],
     /// Citadels: barbarian fleet progress (`0..BARBARIAN_STEPS`).
     pub barbarian_pos: u8,
+    /// Balanced 36-card dice deck (`dice_deck[..dice_deck_len]` when `config.event_deck`).
+    pub dice_deck: [(u8, u8); DICE_DECK_SIZE],
+    pub dice_deck_len: u8,
+    /// Fishermen: seat holding the Old Boot (`+1` VP required to win).
+    pub old_boot_owner: Option<u8>,
     pub winner: Option<u8>,
     pub rng: Rng,
 }
@@ -458,7 +502,7 @@ impl GameState {
     /// New game on a given board.
     pub fn with_board(
         config: GameConfig,
-        board: Board,
+        mut board: Board,
         seed: u64,
     ) -> Result<GameState, ConfigError> {
         if !(2..=config.scenario.max_players()).contains(&config.num_players) {
@@ -470,6 +514,9 @@ impl GameState {
         let layout = config.layout();
         if board.layout != layout {
             return Err(ConfigError::BoardLayout);
+        }
+        if config.scenario.is_fishermen() {
+            board.init_fishing_grounds();
         }
         let mut rng = Rng::new(seed);
         let mut dev_deck = [DevCard::Knight; MAX_DEV_DECK];
@@ -526,6 +573,13 @@ impl GameState {
         } else {
             CommoditySet::EMPTY
         };
+        let (dice_deck, dice_deck_len) = if config.event_deck {
+            let mut deck = CANONICAL_DICE_DECK;
+            rng.shuffle(&mut deck);
+            (deck, DICE_DECK_SIZE as u8)
+        } else {
+            ([(1, 1); DICE_DECK_SIZE], 0)
+        };
         Ok(GameState {
             config,
             board,
@@ -567,6 +621,9 @@ impl GameState {
             metropolises: [NONE; 3],
             metropolis_owners: [None; 3],
             barbarian_pos: 0,
+            dice_deck,
+            dice_deck_len,
+            old_boot_owner: None,
             winner: None,
             rng,
         })
@@ -739,6 +796,23 @@ impl GameState {
     pub fn victory_points(&self, p: u8) -> u8 {
         self.public_victory_points(p)
             + self.players[p as usize].dev_cards[DevCard::VictoryPoint.index()]
+    }
+
+    /// Effective victory point target for `p` (`+1` when holding the Old Boot in Fishermen mode).
+    #[inline]
+    pub fn target_victory_points(&self, p: u8) -> u8 {
+        self.config.victory_points
+            + u8::from(
+                self.config.scenario == Scenario::Fishermen && self.old_boot_owner == Some(p),
+            )
+    }
+
+    /// Whether Fishermen fish-spending and Old Boot actions are allowed now.
+    #[inline]
+    pub(crate) fn can_use_fish(&self) -> bool {
+        self.config.scenario.is_fishermen()
+            && ((self.phase == Phase::Main && self.trade.is_none())
+                || matches!(self.phase, Phase::PairedTurn { .. }))
     }
 
     /// Best maritime ratio for giving `r`: 2 (special harbor), 3 (generic) or 4.
@@ -1165,6 +1239,44 @@ impl GameState {
             if self.phase != Phase::Discard && self.pending_discard[p] != 0 {
                 return Err("pending discard outside discard phase".into());
             }
+            if ps.fish > MAX_FISH_HAND {
+                return Err(format!("player {p} fish {} exceeds max", ps.fish));
+            }
+            if !self.config.scenario.is_fishermen() && ps.fish != 0 {
+                return Err(format!("player {p} holds fish outside fishermen scenario"));
+            }
+        }
+        if let Some(owner) = self.old_boot_owner
+            && (!self.config.scenario.is_fishermen() || owner as usize >= n)
+        {
+            return Err("invalid old_boot_owner".into());
+        }
+        if self.config.scenario.is_fishermen() {
+            if self.board.fishing_ground_count as usize > crate::board::MAX_FISHING_GROUNDS {
+                return Err("fishing_ground_count exceeds max".into());
+            }
+            for fg in self.board.active_fishing_grounds() {
+                if fg.edge as usize >= topo.num_edges
+                    || !(2..=12).contains(&fg.number)
+                    || fg.number == 7
+                {
+                    return Err("invalid fishing ground".into());
+                }
+            }
+        } else if self.board.fishing_ground_count != 0 {
+            return Err("fishing grounds on non-fishermen board".into());
+        }
+        if self.config.event_deck {
+            if self.dice_deck_len as usize > DICE_DECK_SIZE {
+                return Err("dice_deck_len exceeds 36".into());
+            }
+            for &(d1, d2) in &self.dice_deck[..self.dice_deck_len as usize] {
+                if !(1..=6).contains(&d1) || !(1..=6).contains(&d2) {
+                    return Err("invalid die face in dice_deck".into());
+                }
+            }
+        } else if self.dice_deck_len != 0 {
+            return Err("dice_deck_len nonzero without event_deck".into());
         }
         for t in 0..3 {
             match (self.metropolis_owners[t], self.metropolises[t]) {

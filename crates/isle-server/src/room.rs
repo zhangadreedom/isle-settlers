@@ -45,6 +45,7 @@ fn build_game_config(scenario: Scenario, players: u8, rules: HouseRules) -> Game
     }
     config.friendly_robber = rules.friendly_robber;
     config.paired_turns = rules.paired_turns;
+    config.event_deck = rules.event_deck;
     config.custom_map = rules.custom_map;
     config
 }

@@ -36,11 +36,12 @@ pub mod topology;
 
 pub use action::{Action, Event, EventSink, RuleError, TradeGood};
 pub use bitset::BitSet;
-pub use board::{Board, BoardError, CustomMap};
+pub use board::{Board, BoardError, CustomMap, FishingGround, MAX_FISHING_GROUNDS};
 pub use resources::{CityTrack, Commodity, CommoditySet, HarborKind, Resource, ResourceSet, Terrain};
 pub use rng::Rng;
 pub use state::{
-    BARBARIAN_STEPS, ConfigError, DevCard, GameConfig, GameState, MAX_KNIGHTS_PER_LEVEL,
-    MAX_PLAYERS, MAX_SHIPS, Phase, PlayerState, Scenario, TradeOffer, TradeResponse,
+    BARBARIAN_STEPS, CANONICAL_DICE_DECK, ConfigError, DICE_DECK_RESHUFFLE_AT, DICE_DECK_SIZE,
+    DevCard, GameConfig, GameState, MAX_FISH_HAND, MAX_KNIGHTS_PER_LEVEL, MAX_PLAYERS, MAX_SHIPS,
+    Phase, PlayerState, Scenario, TradeOffer, TradeResponse,
 };
 pub use topology::{BoardLayout, Topology};

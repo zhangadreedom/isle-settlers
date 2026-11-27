@@ -30,6 +30,11 @@ import {
   generateDiySvg,
   type SvgExportOptions,
 } from '../diy/svg-export';
+import {
+  downloadStl,
+  generateFullBoardStl,
+  generateTerrainTileStl,
+} from '../diy/stl-export';
 import { Modal, ResIcon } from './bits';
 
 export interface MapWorkshopModalProps {
@@ -49,6 +54,7 @@ const SCENARIO_ITEMS: { id: Scenario; label: string }[] = [
   { id: 'Archipelago', label: '群岛开拓' },
   { id: 'FogIslands', label: '迷雾群岛' },
   { id: 'Citadels', label: '城邦与铁卫' },
+  { id: 'Fishermen', label: '渔场与丰年' },
 ];
 
 const TERRAIN_BRUSHES: { id: Terrain; label: string; color: string; hint: string }[] = [
@@ -1257,6 +1263,80 @@ export function MapWorkshopModal(props: MapWorkshopModalProps) {
             </Show>
           </div>
         </details>
+
+        {/* Physical 1:1 3D Printable Magnetic STL Export Panel */}
+        <Show when={!props.embedded}>
+          {(() => {
+            const [stlMagnet, setStlMagnet] = createSignal(true);
+            const [stlRecess, setStlRecess] = createSignal(true);
+            const [stlTerrain, setStlTerrain] = createSignal<Terrain>('Forest');
+            return (
+              <details class="diy-box">
+                <summary style={{ cursor: 'pointer', 'font-weight': 600 }}>
+                  1:1 3D 打印浮雕模型生成（流形闭合 `.stl` · 含侧面 5×2mm 磁铁槽）
+                </summary>
+                <div style={{ display: 'flex', 'flex-direction': 'column', gap: '10px', 'margin-top': '8px' }}>
+                  <div class="row small" style={{ gap: '14px', 'flex-wrap': 'wrap' }}>
+                    <label class="row" style={{ gap: '5px', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={stlMagnet()} onChange={(e) => setStlMagnet(e.currentTarget.checked)} />
+                      <span>预留六边 5×2mm 圆柱磁铁槽</span>
+                    </label>
+                    <label class="row" style={{ gap: '5px', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={stlRecess()} onChange={(e) => setStlRecess(e.currentTarget.checked)} />
+                      <span>预留 Ø26mm 中央数字圆片凹槽</span>
+                    </label>
+                    <span class="muted">尺寸跟随上方六角边长（当前 {hexSideMm()}mm）</span>
+                  </div>
+                  <div class="row" style={{ 'justify-content': 'space-between', gap: '8px', 'flex-wrap': 'wrap' }}>
+                    <div class="row small" style={{ gap: '6px' }}>
+                      <span>单格地形块：</span>
+                      <select
+                        class="diy-select small"
+                        value={stlTerrain()}
+                        onChange={(e) => setStlTerrain(e.currentTarget.value as Terrain)}
+                        aria-label="选择单格 STL 地形"
+                      >
+                        <For each={TERRAIN_BRUSHES}>
+                          {(t) => <option value={t.id}>{t.label}（{t.id}）</option>}
+                        </For>
+                      </select>
+                      <button
+                        class="small"
+                        onClick={() => {
+                          const buf = generateTerrainTileStl(stlTerrain(), {
+                            hexSideMm: hexSideMm(),
+                            magnetSlots: stlMagnet(),
+                            tokenRecess: stlRecess(),
+                          });
+                          downloadStl(buf, `isle-hex-${stlTerrain().toLowerCase()}-${hexSideMm()}mm.stl`);
+                        }}
+                      >
+                        导出单块 .stl
+                      </button>
+                    </div>
+                    <button
+                      class="primary small"
+                      disabled={!draft() || !currentTopo()}
+                      onClick={() => {
+                        const d = draft();
+                        const tp = currentTopo();
+                        if (!d || !tp) return;
+                        const buf = generateFullBoardStl(d, tp, {
+                          hexSideMm: hexSideMm(),
+                          magnetSlots: stlMagnet(),
+                          tokenRecess: stlRecess(),
+                        });
+                        downloadStl(buf, `isle-board-${d.layout.toLowerCase()}-${hexSideMm()}mm.stl`);
+                      }}
+                    >
+                      导出整盘 .stl 模型
+                    </button>
+                  </div>
+                </div>
+              </details>
+            );
+          })()}
+        </Show>
 
         {/* Modal Footer Actions */}
         <footer>

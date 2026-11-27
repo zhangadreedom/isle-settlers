@@ -71,9 +71,11 @@ impl WeightedRandomBot {
     fn weight(action: &Action) -> u32 {
         match action {
             Action::BuildCity(_) => 10_000,
+            Action::PassOldBoot(_) => 5_000,
             Action::BuildSettlement(_) => 1_000,
-            Action::BuyDevCard => 100,
-            Action::BuildRoad(_) | Action::BuildShip(_) => 10,
+            Action::BuyDevCard | Action::FishBuyDevCard => 100,
+            Action::FishBuildRoad(_) => 15,
+            Action::BuildRoad(_) | Action::BuildShip(_) | Action::FishTakeResource(_) => 10,
             _ => 1,
         }
     }
@@ -450,5 +452,79 @@ mod tests {
         g.apply(0, activate).unwrap();
         assert_eq!(g.active_knight_strength(0), 1);
         g.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn greedy_and_mcts_play_fishermen_and_pass_old_boot() {
+        use isle_core::resources::cost;
+        use isle_core::topology::vertices_in;
+        use isle_core::{Phase, Resource, ResourceSet, Scenario};
+
+        // Tactical check: GreedyBot passes Old Boot immediately and uses 4 fish for a missing City card.
+        let mut g = GameState::new(
+            GameConfig {
+                event_deck: true,
+                ..GameConfig::scenario(Scenario::Fishermen, 3)
+            },
+            31,
+        )
+        .unwrap();
+        g.setup_step = 6;
+        g.phase = Phase::Main;
+        g.dice = Some((3, 5));
+        let spots: Vec<u8> = vertices_in(g.setup_spots()).collect();
+        g.settlements[0].insert(spots[0]);
+        g.players[0].settlements_left -= 1;
+        let p1_v = *spots
+            .iter()
+            .find(|&&v| v != spots[0] && !g.topo().vertex_adj_mask[spots[0] as usize].contains(v))
+            .unwrap();
+        g.cities[1].insert(p1_v);
+        g.players[1].cities_left -= 1;
+
+        g.old_boot_owner = Some(0);
+        g.players[0].fish = 4;
+        let almost_city = ResourceSet::new(0, 0, 0, 2, 2); // 1 Ore short of City
+        g.bank -= almost_city;
+        g.players[0].hand = almost_city;
+
+        let mut bot = GreedyBot::new(5);
+        let mut legal = Vec::new();
+        g.legal_actions(0, &mut legal);
+        assert_eq!(bot.choose(&g, 0, &legal), Action::PassOldBoot(1));
+        g.apply(0, Action::PassOldBoot(1)).unwrap();
+
+        g.legal_actions(0, &mut legal);
+        assert_eq!(
+            bot.choose(&g, 0, &legal),
+            Action::FishTakeResource(Resource::Ore)
+        );
+        g.apply(0, Action::FishTakeResource(Resource::Ore)).unwrap();
+        assert_eq!(g.players[0].hand, cost::CITY);
+
+        g.legal_actions(0, &mut legal);
+        assert_eq!(bot.choose(&g, 0, &legal), Action::BuildCity(spots[0]));
+        g.apply(0, Action::BuildCity(spots[0])).unwrap();
+        g.check_invariants().unwrap();
+
+        // Self-play check: 20 Fishermen + event_deck games finish cleanly with invariants checked.
+        let mut finished = 0;
+        for seed in 0..20 {
+            let players = if seed % 4 == 0 { 5 } else { 4 };
+            let config = GameConfig {
+                event_deck: seed % 2 == 0,
+                paired_turns: players > 4 && seed % 8 == 0,
+                ..GameConfig::scenario(Scenario::Fishermen, players)
+            };
+            let mut h = GameState::new(config, 500 + seed).unwrap();
+            let mut b: Vec<GreedyBot> = (0..players as u64)
+                .map(|k| GreedyBot::new(seed * 7 + k))
+                .collect();
+            let mut bots: Vec<&mut dyn Bot> = b.iter_mut().map(|b| b as &mut dyn Bot).collect();
+            if play_game(&mut h, &mut bots, 1000, true).winner.is_some() {
+                finished += 1;
+            }
+        }
+        assert!(finished >= 18, "only {finished}/20 fishermen greedy games finished");
     }
 }

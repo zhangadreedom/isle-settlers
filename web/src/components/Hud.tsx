@@ -1,5 +1,6 @@
 import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import { isMuted, onMuteChange, toggleMute } from '../audio/sound';
+import type { BoardRenderer, BoardTheme } from '../board/BoardRenderer';
 import { Verified } from './Account';
 import type { BuildMode, Game } from '../game/controller';
 import { EMBEDDED } from '../embed';
@@ -108,6 +109,9 @@ export function PlayerList(props: { game: Game }) {
                   <span title="已激活铁卫战力">卫 {activeStrength(p.seat)}</span>
                   <span title="商贸/军政/学术等级">科 {p.cityProgress.join('/')}</span>
                 </Show>
+                <Show when={g.fishermen}>
+                  <span title="海鱼筹码（上限 7 条，可在鱼市兑换奇策）">鱼 {p.fishCount}</span>
+                </Show>
                 <span title={g.seafaring ? '最长连续商路（道路和船）' : '最长连续道路'}>路 {p.longestRoad}</span>
                 <Show when={g.seafaring}>
                   <span title={`海上的船（还能造 ${p.shipsLeft} 艘）`}>船 {15 - p.shipsLeft}</span>
@@ -119,7 +123,8 @@ export function PlayerList(props: { game: Game }) {
                   g.view().largestArmyOwner === p.seat ||
                   islandCount(p.islands) > 0 ||
                   p.defenderPoints > 0 ||
-                  metrosOf(p.seat).length > 0
+                  metrosOf(p.seat).length > 0 ||
+                  g.view().oldBootOwner === p.seat
                 }
               >
                 <div class="badges">
@@ -141,6 +146,11 @@ export function PlayerList(props: { game: Game }) {
                   </For>
                   <Show when={p.defenderPoints > 0}>
                     <span class="badge" title="击退黑帆舰队独得首功">卫城 +{p.defenderPoints}</span>
+                  </Show>
+                  <Show when={g.view().oldBootOwner === p.seat}>
+                    <span class="badge boot-badge" title="破旧皮靴：获胜目标 +1 分，可在鱼市转送给分不低于你的玩家">
+                      皮靴（需+1分）
+                    </span>
                   </Show>
                 </div>
               </Show>
@@ -190,6 +200,11 @@ export function PlayerList(props: { game: Game }) {
           )}
         </Show>
         <span class="bank-item">发展卡 {g.view().devDeckLen}</span>
+        <Show when={g.view().diceDeckLeft !== null}>
+          <span class="bank-item" title="均衡点数牌组剩余张数（剩 5 张时重洗）">
+            点数牌 {g.view().diceDeckLeft}
+          </span>
+        </Show>
       </div>
     </aside>
   );
@@ -279,6 +294,7 @@ const MODE_PROMPT: Record<Exclude<BuildMode, null>, string> = {
   promote: '点选一名铁卫消耗 1 羊 1 矿晋升阶位（再点一次取消）',
   knightMove: '先点一名已激活铁卫，再点调遣目标或更低阶对手铁卫（再点一次取消）',
   chase: '先点强盗旁已激活的铁卫，再点强盗要去的地块（再点一次取消）',
+  fishRoad: '消耗 5 条海鱼：点选发光位置免费铺筑道路（再点一次取消）',
 };
 
 function modePrompt(g: Game): string {
@@ -364,6 +380,7 @@ export function HandBar(props: {
   game: Game;
   onTrade: () => void;
   onCitadel?: () => void;
+  onFishMarket?: () => void;
   onDevCard: (card: DevCard) => void;
 }) {
   const g = props.game;
@@ -530,6 +547,21 @@ export function HandBar(props: {
                     城邦科技
                   </button>
                 </Show>
+                <Show when={g.fishermen && canActMain()}>
+                  <button
+                    class="build"
+                    classList={{
+                      on: g.mode() === 'fishRoad',
+                      primary:
+                        (g.me !== null && (g.view().players[g.me]?.fishCount ?? 0) >= 2) ||
+                        g.has('PassOldBoot'),
+                    }}
+                    onClick={() => props.onFishMarket?.()}
+                    title="消耗海鱼兑换奇策，或转送破旧皮靴"
+                  >
+                    鱼市 ({g.me !== null ? g.view().players[g.me]?.fishCount ?? 0 : 0})
+                  </button>
+                </Show>
                 <button class="build" disabled={!g.has('BuyDevCard')} onClick={() => g.act((a) => a.type === 'BuyDevCard')}>
                   发展卡
                   <SetView set={COSTS[3].cost} />
@@ -675,6 +707,44 @@ export function downloadReplay(record: import('../generated/proto').ReplayRecord
   a.click();
   a.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const THEME_ORDER: BoardTheme[] = ['day', 'sunset', 'night'];
+const THEME_LABEL: Record<BoardTheme, string> = { day: '晴日', sunset: '黄昏', night: '星夜' };
+
+function initialTheme(): BoardTheme {
+  try {
+    const v = localStorage.getItem('isle.theme');
+    if (v === 'day' || v === 'sunset' || v === 'night') return v;
+  } catch {
+    // ignore blocked storage
+  }
+  return 'day';
+}
+
+/** Cycles 3D board lighting atmosphere between Day, Sunset, and Tabletop Night. */
+export function ThemeToggle(props: { renderer?: BoardRenderer; class?: string }) {
+  const [theme, setThemeState] = createSignal<BoardTheme>(initialTheme());
+  const cycle = () => {
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(theme()) + 1) % THEME_ORDER.length];
+    setThemeState(next);
+    try {
+      localStorage.setItem('isle.theme', next);
+    } catch {
+      // ignore blocked storage
+    }
+    props.renderer?.setTheme(next);
+  };
+  return (
+    <button
+      type="button"
+      class={props.class ?? 'ghost'}
+      title="切换 3D 棋盘光影氛围（晴日 / 黄昏暖阳 / 星夜桌灯）"
+      onClick={cycle}
+    >
+      {THEME_LABEL[theme()]}
+    </button>
+  );
 }
 
 /** Mute / unmute button synced with the procedural Web Audio synthesizer. */

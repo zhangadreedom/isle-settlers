@@ -37,7 +37,7 @@ fn random_good(rng: &mut Rng) -> TradeGood {
 
 /// Arbitrary (often illegal) action, excluding open-ended trade proposals.
 fn random_action(rng: &mut Rng) -> Action {
-    match rng.below(28) {
+    match rng.below(34) {
         17 => Action::BuildShip(rng.below(170) as u8),
         18 => Action::MoveShip {
             from: rng.below(170) as u8,
@@ -76,6 +76,12 @@ fn random_action(rng: &mut Rng) -> Action {
                 Some(rng.below(7) as u8)
             },
         },
+        28 => Action::PassOldBoot(rng.below(7) as u8),
+        29 => Action::FishDriveOffRobber,
+        30 => Action::FishSteal(rng.below(7) as u8),
+        31 => Action::FishTakeResource(random_resource(rng)),
+        32 => Action::FishBuildRoad(rng.below(170) as u8),
+        33 => Action::FishBuyDevCard,
         0 => Action::RollDice,
         1 => Action::BuildRoad(rng.below(170) as u8),
         2 => Action::BuildSettlement(rng.below(125) as u8),
@@ -111,11 +117,24 @@ fn random_action(rng: &mut Rng) -> Action {
 
 fn weight(a: &Action) -> u32 {
     match a {
-        Action::BuildCity(_) | Action::BuildSettlement(_) | Action::UpgradeCity { .. } => 1000,
-        Action::BuyDevCard | Action::RecruitKnight(_) | Action::PromoteKnight(_) => 100,
+        Action::BuildCity(_)
+        | Action::BuildSettlement(_)
+        | Action::UpgradeCity { .. }
+        | Action::PassOldBoot(_) => 1000,
+        Action::BuyDevCard
+        | Action::FishBuyDevCard
+        | Action::RecruitKnight(_)
+        | Action::PromoteKnight(_) => 100,
         Action::ActivateKnight(_) => 150,
-        Action::BuildRoad(_) | Action::BuildShip(_) => 20,
-        Action::MoveShip { .. } | Action::MoveKnight { .. } | Action::ChaseRobber { .. } => 3,
+        Action::BuildRoad(_)
+        | Action::BuildShip(_)
+        | Action::FishBuildRoad(_)
+        | Action::FishTakeResource(_) => 20,
+        Action::MoveShip { .. }
+        | Action::MoveKnight { .. }
+        | Action::ChaseRobber { .. }
+        | Action::FishSteal(_)
+        | Action::FishDriveOffRobber => 3,
         Action::EndTurn => 5,
         _ => 1,
     }
@@ -559,4 +578,26 @@ fn custom_maps_self_play_preserve_invariants_across_all_scenarios() {
             true,
         );
     }
+
+    // 5. Fishermen + balanced 36-card event_deck across 2–6 players (including Paired Turns & CustomMap).
+    let mut finished = 0;
+    for seed in 0..30 {
+        let players = 2 + (seed % 5) as u8;
+        let g = play_config(
+            GameConfig {
+                friendly_robber: seed % 2 == 0,
+                paired_turns: players > 4 && seed % 2 == 1,
+                event_deck: seed % 3 != 0,
+                custom_map: (players <= 4 && seed % 5 == 0).then_some(cm_cit),
+                ..GameConfig::scenario(Scenario::Fishermen, players)
+            },
+            9000 + seed,
+            true,
+        );
+        if let Some(w) = g.winner {
+            finished += 1;
+            assert!(g.victory_points(w) >= g.target_victory_points(w));
+        }
+    }
+    assert!(finished >= 20, "only {finished}/30 fishermen fuzz games finished");
 }

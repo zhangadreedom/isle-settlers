@@ -81,6 +81,9 @@ pub struct HouseRules {
     pub friendly_robber: bool,
     #[serde(default)]
     pub paired_turns: bool,
+    /// Balanced 36-card dice deck (reshuffled with 5 cards left).
+    #[serde(default)]
+    pub event_deck: bool,
     /// Per-action turn timer in seconds (`0` = disabled, else `1..=300`).
     #[serde(default)]
     pub turn_timer_secs: u16,
@@ -363,6 +366,7 @@ mod tests {
                     victory_points: Some(12),
                     friendly_robber: true,
                     paired_turns: false,
+                    event_deck: true,
                     turn_timer_secs: 45,
                     custom_map: None,
                 },
@@ -389,6 +393,7 @@ mod tests {
                     victory_points: Some(8),
                     friendly_robber: false,
                     paired_turns: true,
+                    event_deck: false,
                     turn_timer_secs: 60,
                     custom_map: None,
                 },

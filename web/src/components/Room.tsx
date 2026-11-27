@@ -1,11 +1,12 @@
 import { createSignal, For, onCleanup, Show } from 'solid-js';
+import type { BoardRenderer } from '../board/BoardRenderer';
 import { PLAYER_CSS } from '../board/palette';
 import type { BotLevel, ChatLine, SeatView } from '../generated/proto';
 import { errorText } from '../game/text';
 import { account, accountsEnabled } from '../net/account';
 import { inviteLink, savedName, saveName, type Connection } from '../net/connection';
 import { AccountPanel, Verified } from './Account';
-import { SoundToggle } from './Hud';
+import { SoundToggle, ThemeToggle } from './Hud';
 import { TierBadge } from './Ranking';
 
 /** Name prompt shown when opening an invite link for the first time. */
@@ -81,6 +82,7 @@ function seatLabel(s: SeatView): string {
 /** Waiting room before the game starts. */
 export function RoomLobby(props: {
   conn: Connection;
+  renderer?: BoardRenderer;
   onLeave: () => void;
   onOpenRules: () => void;
   onOpenWorkshop: () => void;
@@ -148,6 +150,7 @@ export function RoomLobby(props: {
                   <button class="ghost small" onClick={props.onOpenRules}>
                     规则
                   </button>
+                  <ThemeToggle renderer={props.renderer} class="ghost small" />
                   <SoundToggle class="ghost small" />
                 </div>
               </div>
@@ -214,11 +217,19 @@ export function RoomLobby(props: {
                     城邦与铁卫
                   </span>
                 </Show>
+                <Show when={room().scenario === 'Fishermen'}>
+                  <span class="mode-tag sea" title="沿海渔场与荒漠内陆湖产鱼，兑换奇策与转交破旧皮靴">
+                    渔场与丰年
+                  </span>
+                </Show>
                 <Show when={room().rules.victoryPoints !== null}>
                   <span class="mode-tag">{room().rules.victoryPoints} 分获胜</span>
                 </Show>
                 <Show when={room().rules.friendlyRobber}>
                   <span class="mode-tag" title="强盗不封锁 ≤2 分玩家">友好强盗</span>
+                </Show>
+                <Show when={room().rules.eventDeck}>
+                  <span class="mode-tag" title="使用 36 张理论概率点数牌发点">均衡牌组</span>
                 </Show>
                 <Show when={room().seats.length > 4 && room().rules.pairedTurns}>
                   <span class="mode-tag" title="隔 3 座位搭档执行副回合">双人搭档</span>
@@ -257,6 +268,23 @@ export function RoomLobby(props: {
                           onClick={() => c.send({ type: 'SetRules', value: { rules: { ...room().rules, friendlyRobber: true } } })}
                         >
                           开启
+                        </button>
+                      </div>
+                    </div>
+                    <div class="field">
+                      <span>点数产生</span>
+                      <div class="seg small">
+                        <button
+                          classList={{ on: !room().rules.eventDeck }}
+                          onClick={() => c.send({ type: 'SetRules', value: { rules: { ...room().rules, eventDeck: false } } })}
+                        >
+                          标准双骰
+                        </button>
+                        <button
+                          classList={{ on: room().rules.eventDeck }}
+                          onClick={() => c.send({ type: 'SetRules', value: { rules: { ...room().rules, eventDeck: true } } })}
+                        >
+                          36张均衡牌组
                         </button>
                       </div>
                     </div>

@@ -1,11 +1,13 @@
 import { batch, createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import type { BoardRenderer, Insets, PickKind } from './board/BoardRenderer';
-import { DiceView, Flights, GameLog, HandBar, PlayerList, SoundToggle, TileTooltip } from './components/Hud';
+import { DailyChallengeModal, SetupAdvisorOverlay } from './components/DailyChallenge';
+import { DiceView, Flights, GameLog, HandBar, PlayerList, SoundToggle, ThemeToggle, TileTooltip } from './components/Hud';
 import { Lobby, randomSeed, type CreateRoom } from './components/Lobby';
 import { MapWorkshopModal } from './components/MapWorkshop';
 import {
   CityUpgradeModal,
   DiscardModal,
+  FishMarketModal,
   GameOverModal,
   GoldModal,
   IncomingTrade,
@@ -19,6 +21,7 @@ import { JoinPrompt, RoomLobby } from './components/Room';
 import { RulesModal } from './components/RulesDrawer';
 import { EngineError, loadEngine, Match, previewCustomMap, Replay, topology } from './engine';
 import { boardData, createGame, type Game } from './game/controller';
+import { recordDailyResult, type DailyChallengeSpec } from './game/daily';
 import { createLocalSource, createOnlineSource, createReplaySource, replayUrl, type LocalOptions } from './game/source';
 import { EMBEDDED } from './embed';
 import { errorText } from './game/text';
@@ -26,6 +29,7 @@ import { saveLocalReplay } from './game/replay-history';
 import type { DevCard, HouseRules, ReplayRecord, Scenario } from './generated/proto';
 import { account, initAccounts } from './net/account';
 import { createConnection, savedName, savedToken, type Connection } from './net/connection';
+import { initPwa } from './pwa';
 
 declare global {
   interface Window {
@@ -82,16 +86,21 @@ export default function App() {
   const [customMap, setCustomMap] = createSignal<string | null>(null);
   const [rulesOpen, setRulesOpen] = createSignal(false);
   const [workshopOpen, setWorkshopOpen] = createSignal(false);
+  const [dailyOpen, setDailyOpen] = createSignal(false);
   const [tradeOpen, setTradeOpen] = createSignal(false);
   const [citadelOpen, setCitadelOpen] = createSignal(false);
+  const [fishOpen, setFishOpen] = createSignal(false);
   const [devModal, setDevModal] = createSignal<'YearOfPlenty' | 'Monopoly' | null>(null);
   // The log (with chat) starts open on wide screens and as a toggle on phones.
   const [logOpen, setLogOpen] = createSignal(window.innerWidth > 720);
   let lastLocal: LocalOptions | null = null;
+  let activeDailyKey: string | null = null;
 
   onMount(async () => {
-    // Accounts belong to the server; the embedded build has none.
-    if (!EMBEDDED) void initAccounts();
+    if (!EMBEDDED) {
+      initPwa();
+      void initAccounts();
+    }
     try {
       await loadEngine();
       setStatus('加载 3D 场景…');
@@ -136,14 +145,26 @@ export default function App() {
     connect({ type: 'Create', ...o });
   }
 
-  async function startLocal(o: LocalOptions) {
+  async function startLocal(o: LocalOptions, dailyDateKey: string | null = null) {
     const r = renderer();
     if (!r) return;
     lastLocal = o;
+    activeDailyKey = dailyDateKey;
     game()?.dispose();
     setGame(null);
     setTradeOpen(false);
-    const source = await createLocalSource(o, saveLocalReplay);
+    setCitadelOpen(false);
+    setFishOpen(false);
+    const source = await createLocalSource(o, (rec) => {
+      saveLocalReplay(rec);
+      if (activeDailyKey && o.humanSeat !== null) {
+        const won = rec.winner === o.humanSeat;
+        const g = game();
+        const turns = g?.view().turn ?? 0;
+        const pts = g?.view().finalPoints?.[o.humanSeat] ?? g?.view().me?.victoryPoints ?? 0;
+        recordDailyResult(activeDailyKey, won, turns, pts);
+      }
+    });
     setGame(createGame(source, r));
   }
 
@@ -310,6 +331,7 @@ export default function App() {
     ) {
       setTradeOpen(false);
       setCitadelOpen(false);
+      setFishOpen(false);
       setDevModal(null);
     }
   });
@@ -357,6 +379,7 @@ export default function App() {
         victoryPoints: g.config.victoryPoints,
         friendlyRobber: g.config.friendlyRobber,
         pairedTurns: g.config.pairedTurns,
+        eventDeck: g.config.eventDeck,
         turnTimerSecs: conn()?.room()?.rules.turnTimerSecs ?? 0,
         customMap: g.config.customMap ?? null,
       };
@@ -373,6 +396,7 @@ export default function App() {
           fallback={
             <Lobby
               ready={!!renderer()}
+              renderer={renderer()}
               seed={previewSeed()}
               players={previewPlayers()}
               onPlayers={setPreviewPlayers}
@@ -383,8 +407,9 @@ export default function App() {
               onOpenReplay={(json) => openReplay(json)}
               onOpenRules={() => setRulesOpen(true)}
               onOpenWorkshop={() => setWorkshopOpen(true)}
+              onOpenDaily={() => setDailyOpen(true)}
               onSeed={setPreviewSeed}
-              onStartLocal={startLocal}
+              onStartLocal={(o) => startLocal(o)}
               onCreateRoom={createRoom}
               onJoinRoom={(room) => (savedToken(room) ? connect({ type: 'Join', room, name: savedName() || '玩家' }) : setJoinRoom(room))}
             />
@@ -397,6 +422,7 @@ export default function App() {
       {(c) => (
         <RoomLobby
           conn={c()}
+          renderer={renderer()}
           onLeave={() => leave()}
           onOpenRules={() => setRulesOpen(true)}
           onOpenWorkshop={() => setWorkshopOpen(true)}
@@ -435,6 +461,7 @@ export default function App() {
               <button class="ghost" onClick={() => setRulesOpen(true)}>
                 规则
               </button>
+              <ThemeToggle renderer={renderer()} class="ghost" />
               <SoundToggle class="ghost" />
               <button
                 class="ghost log-toggle"
@@ -466,10 +493,14 @@ export default function App() {
               game={g()}
               onTrade={() => setTradeOpen(true)}
               onCitadel={() => setCitadelOpen(true)}
+              onFishMarket={() => setFishOpen(true)}
               onDevCard={(c) => playDevCard(g(), c)}
             />
             <Flights game={g()} />
             <TileTooltip game={g()} />
+            <Show when={renderer()}>
+              {(r) => <SetupAdvisorOverlay game={g()} project={(kind, id) => r().project(kind, id)} />}
+            </Show>
 
             <Show when={!g().replay && g().me !== null && g().view().phase.type === 'Discard' && g().view().pendingDiscard[g().me!] > 0}>
               <DiscardModal game={g()} />
@@ -487,6 +518,9 @@ export default function App() {
             </Show>
             <Show when={citadelOpen()}>
               <CityUpgradeModal game={g()} onClose={() => setCitadelOpen(false)} />
+            </Show>
+            <Show when={fishOpen()}>
+              <FishMarketModal game={g()} onClose={() => setFishOpen(false)} />
             </Show>
             <Show when={devModal() === 'YearOfPlenty'}>
               <YearOfPlentyModal game={g()} onClose={() => setDevModal(null)} />
@@ -522,6 +556,40 @@ export default function App() {
         />
       </Show>
 
+      <Show when={dailyOpen()}>
+        <DailyChallengeModal
+          embedded={EMBEDDED}
+          onClose={() => setDailyOpen(false)}
+          onStartDaily={(spec: DailyChallengeSpec) => {
+            setDailyOpen(false);
+            if (conn()) leave(false);
+            setPreviewScenario(spec.scenario);
+            setPreviewPlayers(spec.players);
+            setPreviewSeed(spec.seed);
+            setCustomMap(null);
+            void startLocal(
+              {
+                players: spec.players,
+                humanSeat: 0,
+                bot: spec.bot,
+                seed: spec.seed,
+                fast: false,
+                scenario: spec.scenario,
+                rules: {
+                  victoryPoints: spec.victoryPoints,
+                  friendlyRobber: spec.friendlyRobber,
+                  pairedTurns: false,
+                  eventDeck: true,
+                  turnTimerSecs: 0,
+                  customMap: null,
+                },
+              },
+              spec.dateKey,
+            );
+          }}
+        />
+      </Show>
+
       <Show when={workshopOpen()}>
         <MapWorkshopModal
           initialScenario={conn()?.room()?.scenario ?? previewScenario()}
@@ -546,6 +614,7 @@ export default function App() {
                 victoryPoints: null,
                 friendlyRobber: false,
                 pairedTurns: false,
+                eventDeck: false,
                 turnTimerSecs: 0,
                 customMap: code,
               },
@@ -575,6 +644,7 @@ export default function App() {
                         victoryPoints: null,
                         friendlyRobber: false,
                         pairedTurns: false,
+                        eventDeck: false,
                         turnTimerSecs: 0,
                         customMap: code,
                       },

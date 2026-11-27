@@ -199,6 +199,7 @@ export function layoutFor(scenario: Scenario, players: number): BoardLayout {
       return ext ? 'FogIslandsExtended' : 'FogIslands';
     case 'Classic':
     case 'Citadels':
+    case 'Fishermen':
       return ext ? 'Extended' : 'Base';
   }
 }

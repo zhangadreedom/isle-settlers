@@ -710,3 +710,149 @@ export function IncomingTrade(props: { game: Game }) {
     </Show>
   );
 }
+
+/** Fishermen of Catan: spend 2..7 fish tokens or pass the Old Boot. */
+export function FishMarketModal(props: { game: Game; onClose: () => void }) {
+  const g = props.game;
+  const fish = () => (g.me !== null ? g.view().players[g.me]?.fishCount ?? 0 : 0);
+  const bootTargets = () =>
+    g.legal().actions.flatMap((a) => (a.type === 'PassOldBoot' ? [a.value] : []));
+  const stealTargets = () =>
+    g.legal().actions.flatMap((a) => (a.type === 'FishSteal' ? [a.value] : []));
+  const takeResources = () =>
+    g.legal().actions.flatMap((a) => (a.type === 'FishTakeResource' ? [a.value] : []));
+
+  return (
+    <Modal title={`海滨鱼市（持有 ${fish()}/7 条海鱼）`} onClose={props.onClose} wide>
+      <p class="muted small">
+        沿海渔场（4–10点）与荒漠内陆湖（无强盗时 2/12点）会为相邻聚落与城市产出海鱼筹码。
+      </p>
+
+      <Show when={bootTargets().length > 0}>
+        <div class="rules-box">
+          <h4>转送【破旧皮靴】（当前令你获胜目标 +1 分）：</h4>
+          <div class="choices row">
+            <For each={bootTargets()}>
+              {(seat) => (
+                <button
+                  class="choice primary small"
+                  onClick={() => {
+                    g.act((a) => a.type === 'PassOldBoot' && a.value === seat);
+                    props.onClose();
+                  }}
+                >
+                  <SeatDot seat={seat} /> 送给 {g.name(seat)}（{g.view().players[seat]?.publicVictoryPoints ?? 0} 分）
+                </button>
+              )}
+            </For>
+          </div>
+        </div>
+      </Show>
+
+      <div class="choices">
+        <div class="rules-box">
+          <div class="row" style={{ 'justify-content': 'space-between' }}>
+            <span>
+              <b>2 鱼 · 驱逐强盗</b> — 将强盗直接赶回荒漠内陆湖
+            </span>
+            <button
+              class="primary small"
+              disabled={!g.has('FishDriveOffRobber')}
+              onClick={() => {
+                g.act((a) => a.type === 'FishDriveOffRobber');
+                props.onClose();
+              }}
+            >
+              消耗 2 鱼
+            </button>
+          </div>
+        </div>
+
+        <div class="rules-box">
+          <span>
+            <b>3 鱼 · 顺手牵羊</b> — 随机抽取一名对手 1 张手牌
+          </span>
+          <Show
+            when={stealTargets().length > 0}
+            fallback={<span class="muted small">需至少 3 鱼且有对手持有手牌</span>}
+          >
+            <div class="choices row">
+              <For each={stealTargets()}>
+                {(seat) => (
+                  <button
+                    class="choice small"
+                    onClick={() => {
+                      g.act((a) => a.type === 'FishSteal' && a.value === seat);
+                      props.onClose();
+                    }}
+                  >
+                    <SeatDot seat={seat} /> 抽 {g.name(seat)}（{g.view().players[seat]?.resourceCount ?? 0} 张）
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
+        </div>
+
+        <div class="rules-box">
+          <span>
+            <b>4 鱼 · 丰年取物</b> — 从银行任选 1 张基础资源
+          </span>
+          <div class="choices row">
+            <For each={RESOURCES}>
+              {(res, idx) => (
+                <button
+                  class="choice small"
+                  disabled={!takeResources().includes(res)}
+                  onClick={() => {
+                    g.act((a) => a.type === 'FishTakeResource' && a.value === res);
+                    props.onClose();
+                  }}
+                >
+                  <ResIcon r={idx()} /> 换{RESOURCE_NAME[res]}
+                </button>
+              )}
+            </For>
+          </div>
+        </div>
+
+        <div class="rules-box">
+          <div class="row" style={{ 'justify-content': 'space-between' }}>
+            <span>
+              <b>5 鱼 · 铺筑乡路</b> — 在棋盘上免费铺设 1 条道路
+            </span>
+            <button
+              class="primary small"
+              disabled={!g.has('FishBuildRoad')}
+              onClick={() => {
+                g.setMode('fishRoad');
+                props.onClose();
+              }}
+            >
+              选位置修路（5 鱼）
+            </button>
+          </div>
+        </div>
+
+        <div class="rules-box">
+          <div class="row" style={{ 'justify-content': 'space-between' }}>
+            <span>
+              <b>7 鱼 · 礼聘贤才</b> — 免费摸取 1 张发展卡
+            </span>
+            <button
+              class="primary small"
+              disabled={!g.has('FishBuyDevCard')}
+              onClick={() => {
+                g.act((a) => a.type === 'FishBuyDevCard');
+                props.onClose();
+              }}
+            >
+              消耗 7 鱼摸卡
+            </button>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+

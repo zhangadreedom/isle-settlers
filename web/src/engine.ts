@@ -60,7 +60,7 @@ export class Match {
     scenario: Scenario = 'Classic',
     rules?: Partial<HouseRules>,
   ) {
-    this.inner = wasm.LocalMatch.withRulesAndMap(
+    this.inner = wasm.LocalMatch.createMatch(
       players,
       seed >>> 0,
       humanSeat ?? -1,
@@ -69,6 +69,7 @@ export class Match {
       rules?.victoryPoints ?? 0,
       rules?.friendlyRobber ?? false,
       rules?.pairedTurns ?? false,
+      rules?.eventDeck ?? false,
       rules?.customMap ?? '',
     );
     this.board = call(() => this.inner.board());
@@ -217,6 +218,7 @@ export class Replay {
         scenario: c.scenario ?? 'Classic',
         friendlyRobber: c.friendlyRobber ?? false,
         pairedTurns: c.pairedTurns ?? false,
+        eventDeck: c.eventDeck ?? false,
       };
       this.inner = wasm.Replay.fromConfigJson(
         JSON.stringify(normalized),

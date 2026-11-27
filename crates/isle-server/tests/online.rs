@@ -666,6 +666,7 @@ async fn turn_timer_auto_acts_for_idle_connected_player() {
             victory_points: Some(6),
             friendly_robber: false,
             paired_turns: false,
+            event_deck: false,
             turn_timer_secs: 1,
             custom_map: None,
         },
@@ -750,6 +751,7 @@ async fn house_rules_and_citadels_and_six_player_seafaring_rooms() {
         victory_points: Some(7),
         friendly_robber: true,
         paired_turns: true,
+        event_deck: true,
         turn_timer_secs: 60,
         custom_map: None,
     };
@@ -797,6 +799,7 @@ async fn house_rules_and_citadels_and_six_player_seafaring_rooms() {
                 victory_points: Some(8),
                 friendly_robber: true,
                 paired_turns: false,
+                event_deck: false,
                 turn_timer_secs: 0,
                 custom_map: None,
             },
@@ -864,6 +867,47 @@ async fn house_rules_and_citadels_and_six_player_seafaring_rooms() {
         }
     }
 
+    // 4. Scenario::Fishermen + event_deck room playing to completion.
+    let mut fish_host = Client::connect(server.addr).await;
+    fish_host
+        .send(&ClientMsg::Create {
+            players: 4,
+            bots: BotLevel::Normal,
+            name: "Angler".into(),
+            ranked: false,
+            scenario: isle_core::Scenario::Fishermen,
+            rules: HouseRules {
+                victory_points: Some(8),
+                friendly_robber: false,
+                paired_turns: false,
+                event_deck: true,
+                turn_timer_secs: 0,
+                custom_map: None,
+            },
+            session: None,
+            is_public: false,
+        })
+        .await;
+    fish_host.until(|c| c.room.is_some()).await;
+    assert!(fish_host.room.as_ref().unwrap().rules.event_deck);
+    fish_host.send(&ClientMsg::Start).await;
+    fish_host.until(|c| c.view.is_some()).await;
+    assert_eq!(
+        fish_host.view.as_ref().unwrap().dice_deck_left,
+        Some(isle_core::DICE_DECK_SIZE as u8)
+    );
+    let fish_host = timeout(Duration::from_secs(120), play_to_end(fish_host))
+        .await
+        .expect("fishermen game timed out");
+    assert!(fish_host.game_over());
+    assert!(
+        fish_host
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::FishCaught { .. })),
+        "expected FishCaught events in Fishermen room"
+    );
+
     server.stop().await;
 }
 
@@ -929,6 +973,7 @@ async fn public_rooms_directory_kick_swap_rematch_and_custom_map() {
             victory_points: Some(6),
             friendly_robber: false,
             paired_turns: false,
+            event_deck: false,
             turn_timer_secs: 0,
             custom_map: Some(cm),
         },

@@ -127,6 +127,18 @@ pub enum Action {
         tile: u8,
         victim: Option<u8>,
     },
+    /// Fishermen: pass the Old Boot to another player with at least as many public VP.
+    PassOldBoot(u8),
+    /// Fishermen (2 fish): send the robber back to the desert / inland lake.
+    FishDriveOffRobber,
+    /// Fishermen (3 fish): steal one random card from `victim`.
+    FishSteal(u8),
+    /// Fishermen (4 fish): take one resource card of choice from the bank.
+    FishTakeResource(Resource),
+    /// Fishermen (5 fish): build a road on `edge`.
+    FishBuildRoad(u8),
+    /// Fishermen (7 fish): draw one development card.
+    FishBuyDevCard,
 }
 
 impl Action {
@@ -189,6 +201,12 @@ impl Action {
                 tile,
                 victim,
             } => out.extend([27, vertex, tile, victim.unwrap_or(u8::MAX)]),
+            Action::PassOldBoot(target) => out.extend([28, target]),
+            Action::FishDriveOffRobber => out.push(29),
+            Action::FishSteal(victim) => out.extend([30, victim]),
+            Action::FishTakeResource(r) => out.extend([31, resource(r)]),
+            Action::FishBuildRoad(e) => out.extend([32, e]),
+            Action::FishBuyDevCard => out.push(33),
         }
     }
 
@@ -302,6 +320,12 @@ impl Action {
                     3,
                 )
             }
+            28 => (Action::PassOldBoot(arg(0)?), 1),
+            29 => (Action::FishDriveOffRobber, 0),
+            30 => (Action::FishSteal(arg(0)?), 1),
+            31 => (Action::FishTakeResource(resource(0)?), 1),
+            32 => (Action::FishBuildRoad(arg(0)?), 1),
+            33 => (Action::FishBuyDevCard, 0),
             _ => return None,
         };
         Some((action, 1 + operands))
@@ -503,6 +527,25 @@ pub enum Event {
     CityPillaged {
         player: u8,
         vertex: u8,
+    },
+    FishCaught {
+        player: u8,
+        count: u8,
+    },
+    OldBootDrawn {
+        player: u8,
+    },
+    OldBootPassed {
+        from: u8,
+        to: u8,
+    },
+    FishSpent {
+        player: u8,
+        cost: u8,
+    },
+    FishResourceTaken {
+        player: u8,
+        resource: Resource,
     },
     GameWon {
         player: u8,

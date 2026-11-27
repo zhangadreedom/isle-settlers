@@ -13,7 +13,39 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CITY_FLAG, EMPTY, type Topology } from '../engine';
-import { BEACH, METROPOLIS_COLORS, PLAYER_COLORS, RESOURCE_COLORS, RESOURCE_LABELS, SEA, SKY, TERRAIN_COLORS } from './palette';
+import {
+  BEACH,
+  METROPOLIS_COLORS,
+  PLAYER_COLORS,
+  RESOURCE_COLORS,
+  RESOURCE_LABELS,
+  SEA,
+  SKY,
+  TERRAIN_COLORS,
+  THEME_CONFIGS,
+} from './palette';
+
+export type BoardTheme = 'day' | 'sunset' | 'night';
+
+const THEME_STORAGE_KEY = 'isle.theme';
+
+export function readSavedTheme(): BoardTheme {
+  try {
+    const raw = localStorage.getItem(THEME_STORAGE_KEY);
+    if (raw === 'day' || raw === 'sunset' || raw === 'night') return raw;
+  } catch {
+    // Ignore storage access errors (private browsing / non-browser host).
+  }
+  return 'day';
+}
+
+export function saveTheme(t: BoardTheme): void {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, t);
+  } catch {
+    // Ignore storage access errors.
+  }
+}
 
 /** Static layout as numeric codes (see palette for terrain/harbor codes). */
 export interface BoardData {
@@ -22,6 +54,8 @@ export interface BoardData {
   harbors: number[];
   /** Island per tile: 0 for the sea, 1.. for land. */
   islands: number[];
+  /** Fishermen mode: coastal fishing grounds with edge id and roll number. */
+  fishingGrounds?: { edge: number; number: number }[];
 }
 
 export interface KnightData {
@@ -294,6 +328,17 @@ const labelGeometry = new THREE.PlaneGeometry(0.5, 0.5).rotateX(-Math.PI / 2);
 const vertexMarkerGeometry = new THREE.CylinderGeometry(0.14, 0.14, 0.05, 20);
 const edgeMarkerGeometry = new THREE.BoxGeometry(0.5, 0.05, 0.14);
 const tileMarkerGeometry = new THREE.RingGeometry(0.72, 0.86, 6, 1, Math.PI / 6).rotateX(-Math.PI / 2);
+const shoalPoolGeometry = new THREE.CircleGeometry(0.35, 20).rotateX(-Math.PI / 2);
+const shoalRippleGeometry = mergeGeometries([
+  new THREE.RingGeometry(0.17, 0.215, 20).rotateX(-Math.PI / 2).toNonIndexed(),
+  new THREE.RingGeometry(0.3, 0.355, 24).rotateX(-Math.PI / 2).toNonIndexed(),
+])!;
+const leapingFishGeometry = mergeGeometries([
+  new THREE.ConeGeometry(0.038, 0.115, 6).rotateZ(-Math.PI / 2).translate(0.055, 0, 0).toNonIndexed(),
+  new THREE.ConeGeometry(0.038, 0.135, 6).rotateZ(Math.PI / 2).translate(-0.065, 0, 0).toNonIndexed(),
+  new THREE.ConeGeometry(0.05, 0.08, 4).scale(1, 1, 0.28).rotateZ(-Math.PI / 2).translate(-0.15, 0.006, 0).toNonIndexed(),
+  new THREE.ConeGeometry(0.024, 0.05, 4).scale(1.2, 1, 0.25).translate(-0.008, 0.045, 0).toNonIndexed(),
+])!;
 
 interface Decoration {
   geometry: THREE.BufferGeometry;
@@ -443,6 +488,45 @@ function harborTexture(code: number) {
   }, 256);
 }
 
+function fishingTexture(n: number) {
+  return canvasTexture((ctx, size) => {
+    const c = size / 2;
+    const red = n === 6 || n === 8;
+    const rimAccent = red ? '#e0483e' : '#35cfe0';
+    const ink = red ? '#c92a2a' : '#152938';
+
+    // Crisp pill badge with dark outer silhouette, turquoise/crimson accent rim, and ivory face.
+    roundedPill(ctx, 12, 46, size - 24, 164, 82);
+    ctx.fillStyle = '#13222e';
+    ctx.fill();
+
+    roundedPill(ctx, 21, 55, size - 42, 146, 73);
+    ctx.fillStyle = rimAccent;
+    ctx.fill();
+
+    roundedPill(ctx, 31, 65, size - 62, 126, 63);
+    ctx.fillStyle = '#fbf6e8';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#13222e';
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ink;
+    ctx.font = `900 ${red ? 62 : 58}px system-ui, -apple-system, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
+    ctx.fillText(`🐟 ${n}`, c, 118);
+
+    const pips = PIPS[n] ?? 0;
+    ctx.fillStyle = ink;
+    for (let i = 0; i < pips; i++) {
+      ctx.beginPath();
+      ctx.arc(c + (i - (pips - 1) / 2) * 14, 166, 4.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }, 256);
+}
+
 /** One placed piece; `born` drives the drop-in animation. */
 interface Piece {
   x: number;
@@ -461,8 +545,11 @@ export class BoardRenderer {
   onHoverTile?: (hover: TileHover | null) => void;
 
   private _backend: Backend = 'WebGL2';
+  private _theme: BoardTheme = 'day';
   private recovering = false;
   private readonly scene = new THREE.Scene();
+  private readonly bgColor = new THREE.Color(SKY);
+  private readonly fogObj = new THREE.Fog(SKY, 22, 60);
   private readonly camera = new THREE.PerspectiveCamera(38, 1, 0.1, 120);
   private readonly controls: OrbitControls;
   private readonly board = new THREE.Group();
@@ -483,8 +570,12 @@ export class BoardRenderer {
   private readonly robber = new THREE.Group();
   private readonly resizeObserver: ResizeObserver;
   private readonly beach: THREE.Mesh;
+  private readonly seaMaterial: THREE.MeshStandardMaterial;
+  private readonly hemiLight: THREE.HemisphereLight;
   private readonly sun: THREE.DirectionalLight;
+  private readonly rimLight: THREE.DirectionalLight;
   private topology: Topology | null = null;
+  private singleAllLand = false;
   private tileXZ: [number, number][] = [];
   private vertexXZ: [number, number][] = [];
   private edgeXZ: { x: number; z: number; angle: number }[] = [];
@@ -498,6 +589,7 @@ export class BoardRenderer {
   private extent = { x: 5.2, z: 4.42 };
   private readonly numberTextures = new Map<number, THREE.Texture>();
   private readonly harborTextures = new Map<number, THREE.Texture>();
+  private readonly fishingTextures = new Map<number, THREE.Texture>();
   private readonly raycaster = new THREE.Raycaster();
   private readonly plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -TOP);
   private readonly pointerNdc = new THREE.Vector2();
@@ -547,8 +639,8 @@ export class BoardRenderer {
   ) {
     this.attachRenderer(renderer);
 
-    this.scene.background = new THREE.Color(SKY);
-    this.scene.fog = new THREE.Fog(SKY, 22, 60);
+    this.scene.background = this.bgColor;
+    this.scene.fog = this.fogObj;
 
     // Bound to the container (not the canvas) so a renderer swap keeps input working.
     this.controls = new OrbitControls(this.camera, container);
@@ -558,7 +650,8 @@ export class BoardRenderer {
     this.controls.maxPolarAngle = 1.2;
     this.controls.addEventListener('change', () => this.requestRender());
 
-    this.scene.add(new THREE.HemisphereLight(0xdff3ff, 0x2d4a3a, 1.3));
+    this.hemiLight = new THREE.HemisphereLight(0xdff3ff, 0x2d4a3a, 1.3);
+    this.scene.add(this.hemiLight);
     const sun = new THREE.DirectionalLight(0xfff1d6, 2.4);
     sun.position.set(-6, 12, 5);
     sun.castShadow = true;
@@ -568,8 +661,15 @@ export class BoardRenderer {
     this.scene.add(sun);
     this.sun = sun;
 
+    const rim = new THREE.DirectionalLight(0x5b8cff, 0);
+    rim.position.set(7, 6, -6);
+    rim.castShadow = false;
+    this.scene.add(rim);
+    this.rimLight = rim;
+
     const seaGeometry = new THREE.PlaneGeometry(120, 120).rotateX(-Math.PI / 2);
     const seaMaterial = std(SEA, { roughness: 0.55, flatShading: false });
+    this.seaMaterial = seaMaterial;
     const sea = new THREE.Mesh(seaGeometry, seaMaterial);
     sea.position.y = -0.14;
     sea.receiveShadow = true;
@@ -578,6 +678,8 @@ export class BoardRenderer {
     this.beach.position.y = 0;
     this.beach.receiveShadow = true;
     this.scene.add(sea, this.beach, this.board);
+
+    this.applyTheme(readSavedTheme());
 
     const pieceMaterial = std(0xffffff, { roughness: 0.6 });
     const goldMaterial = std(0xffcf3a, { metalness: 0.5, roughness: 0.3, emissive: 0x5c3d00 });
@@ -681,6 +783,43 @@ export class BoardRenderer {
     return this._backend;
   }
 
+  get theme(): BoardTheme {
+    return this._theme;
+  }
+
+  /** Switches the 3D board lighting & atmosphere theme, persists preference, and queues one frame. */
+  setTheme(theme: BoardTheme): void {
+    this.applyTheme(theme);
+    saveTheme(theme);
+    this.requestRender();
+  }
+
+  private applyTheme(theme: BoardTheme): void {
+    this._theme = theme;
+    const cfg = THEME_CONFIGS[theme];
+    this.bgColor.setHex(cfg.sky);
+    this.scene.background = this.bgColor;
+    this.fogObj.color.setHex(cfg.fog);
+    this.seaMaterial.color.setHex(cfg.sea);
+    this.hemiLight.color.setHex(cfg.hemiSky);
+    this.hemiLight.groundColor.setHex(cfg.hemiGround);
+    this.hemiLight.intensity = cfg.hemiIntensity;
+    this.sun.color.setHex(cfg.sunColor);
+    this.sun.intensity = cfg.sunIntensity;
+    this.sun.position.set(cfg.sunPos[0], cfg.sunPos[1], cfg.sunPos[2]);
+    this.rimLight.color.setHex(cfg.rimColor);
+    this.rimLight.intensity = cfg.rimIntensity;
+    this.rimLight.position.set(cfg.rimPos[0], cfg.rimPos[1], cfg.rimPos[2]);
+    this.updateFogBounds();
+  }
+
+  private updateFogBounds(): void {
+    const cfg = THEME_CONFIGS[this._theme];
+    const dist = this.fitDistance || 14;
+    this.fogObj.near = Math.max(cfg.fogMinNear, dist * cfg.fogNearFactor);
+    this.fogObj.far = Math.max(cfg.fogMinFar, dist * cfg.fogFarFactor);
+  }
+
   /** Island geometry: spot positions, beach, framing and shadow bounds. */
   private setTopology(topology: Topology) {
     this.topology = topology;
@@ -720,6 +859,7 @@ export class BoardRenderer {
     const seafaring = terrain.some((t) => t === SEA_TERRAIN || t === FOG_TERRAIN);
     const islandIds = [...new Set(islands.filter((i) => i > 0))];
     const singleAllLand = !seafaring && islandIds.length === 1 && islands.length >= 3 && islands.every((id) => id === islandIds[0]);
+    this.singleAllLand = singleAllLand;
     const banks: THREE.BufferGeometry[] = [];
     if (!singleAllLand) {
       const hexRing = (cx: number, cz: number, r: number): [number, number][] =>
@@ -787,7 +927,7 @@ export class BoardRenderer {
   }
 
   /** Refreshes board tiles, fog, beaches and tokens in place without resetting the camera or pieces. */
-  updateBoard({ terrain, numbers, harbors, islands }: BoardData) {
+  updateBoard({ terrain, numbers, harbors, islands, fishingGrounds }: BoardData) {
     this.setLand(terrain, islands);
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
@@ -834,6 +974,7 @@ export class BoardRenderer {
     this.addDecorations(terrain);
     this.addTokens(numbers);
     this.addHarbors(harbors);
+    if (fishingGrounds?.length) this.addFishingGrounds(fishingGrounds);
     this.requestRender();
   }
 
@@ -1002,6 +1143,7 @@ export class BoardRenderer {
     for (const d of this.sceneDisposables) d.dispose();
     for (const t of this.numberTextures.values()) t.dispose();
     for (const t of this.harborTextures.values()) t.dispose();
+    for (const t of this.fishingTextures.values()) t.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
@@ -1453,6 +1595,107 @@ export class BoardRenderer {
     this.board.add(planks, docks);
   }
 
+  /** Renders 3D coastal fishing shoals (shimmering ripples, leaping silver fish & `🐟 N` badge). */
+  private addFishingGrounds(fishingGrounds: { edge: number; number: number }[]) {
+    const valid = fishingGrounds.filter((fg) => fg.edge >= 0 && fg.edge < this.edgeXZ.length);
+    if (!valid.length) return;
+
+    const poolMaterial = new THREE.MeshStandardMaterial({
+      color: 0x1fc4d6,
+      emissive: 0x0a4b58,
+      roughness: 0.25,
+      metalness: 0.2,
+      transparent: true,
+      opacity: 0.7,
+      depthWrite: false,
+    });
+    const rippleMaterial = new THREE.MeshStandardMaterial({
+      color: 0xc2f9ff,
+      emissive: 0x3baec2,
+      roughness: 0.2,
+      metalness: 0.55,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    });
+    const fishMaterial = std(0xdbe9f5, {
+      metalness: 0.65,
+      roughness: 0.22,
+      emissive: 0x1e384a,
+    });
+
+    const pools = this.instanced(shoalPoolGeometry, poolMaterial, valid.length);
+    const ripples = this.instanced(shoalRippleGeometry, rippleMaterial, valid.length);
+    const fishes = this.instanced(leapingFishGeometry, fishMaterial, valid.length * 2);
+    pools.castShadow = pools.receiveShadow = false;
+    ripples.castShadow = ripples.receiveShadow = false;
+
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+    const s = new THREE.Vector3();
+    const p = new THREE.Vector3();
+
+    // On convex all-land boards, the coastal sand shelf sits at y = 0 out to 1.55;
+    // on seafaring / per-hex bank boards, 0.62 seaward sits over open water at y = -0.14.
+    const surfaceY = this.singleAllLand ? 0.014 : -0.115;
+    let nShoals = 0;
+    let nFish = 0;
+
+    for (const fg of valid) {
+      const spot = this.edgeXZ[fg.edge];
+      if (!spot) continue;
+      let [ox, oz] = this.edgeSeaward[fg.edge] ?? [0, 0];
+      if (ox === 0 && oz === 0) {
+        const d = Math.hypot(spot.x, spot.z);
+        if (d > 1e-6) {
+          ox = spot.x / d;
+          oz = spot.z / d;
+        }
+      }
+
+      const sx = spot.x + ox * 0.62;
+      const sz = spot.z + oz * 0.62;
+
+      pools.setMatrixAt(nShoals, m.makeTranslation(sx, surfaceY, sz));
+      ripples.setMatrixAt(nShoals, m.makeTranslation(sx, surfaceY + 0.006, sz));
+      nShoals++;
+
+      // Tangent direction along the coastal edge so the two silver fish arc gracefully across the shoal.
+      const tx = Math.cos(spot.angle);
+      const tz = -Math.sin(spot.angle);
+
+      // Fish 1: cresting forward arc.
+      euler.set(0, spot.angle + 0.28, -0.34);
+      q.setFromEuler(euler);
+      s.set(1, 1, 1);
+      p.set(sx - tx * 0.1 + ox * 0.04, surfaceY + 0.11, sz - tz * 0.1 + oz * 0.04);
+      fishes.setMatrixAt(nFish++, m.compose(p, q, s));
+
+      // Fish 2: companion fish arcing counter-parallel slightly further out.
+      euler.set(0, spot.angle + Math.PI - 0.24, -0.42);
+      q.setFromEuler(euler);
+      s.set(0.86, 0.86, 0.86);
+      p.set(sx + tx * 0.11 - ox * 0.05, surfaceY + 0.085, sz + tz * 0.11 - oz * 0.05);
+      fishes.setMatrixAt(nFish++, m.compose(p, q, s));
+
+      let tex = this.fishingTextures.get(fg.number);
+      if (!tex) this.fishingTextures.set(fg.number, (tex = fishingTexture(fg.number)));
+      const badgeMat = new THREE.SpriteMaterial({ map: tex, depthTest: true });
+      const badge = new THREE.Sprite(badgeMat);
+      badge.scale.set(0.68, 0.68, 1);
+      badge.position.set(sx, surfaceY + 0.44, sz);
+      this.board.add(badge);
+      this.disposables.push(badgeMat);
+    }
+
+    this.commit(pools, nShoals);
+    this.commit(ripples, nShoals);
+    this.commit(fishes, nFish);
+    this.board.add(pools, ripples, fishes);
+    this.disposables.push(poolMaterial, rippleMaterial, fishMaterial, pools, ripples, fishes);
+  }
+
   private resize() {
     const w = Math.max(1, this.container.clientWidth);
     const h = Math.max(1, this.container.clientHeight);
@@ -1477,9 +1720,7 @@ export class BoardRenderer {
     this.camera.position.copy(dir).multiplyScalar(distance * zoom);
     this.controls.minDistance = distance * 0.45;
     this.controls.maxDistance = distance * 1.6;
-    const fog = this.scene.fog as THREE.Fog;
-    fog.near = Math.max(22, distance * 1.6);
-    fog.far = Math.max(60, distance * 4);
+    this.updateFogBounds();
     this.camera.updateProjectionMatrix();
     this.controls.update();
     this.requestRender();

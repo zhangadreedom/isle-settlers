@@ -280,6 +280,16 @@ export function describe(e: Event, name: (seat: number) => string): string | nul
         : `击退黑帆舰队（战力 ${e.value.defense}/${e.value.cities}），并列首功者各获 1 张发展卡`;
     case 'CityPillaged':
       return `黑帆舰队攻破防线，${name(e.value.player)} 的一座城市沦陷降为村庄！`;
+    case 'FishCaught':
+      return `${name(e.value.player)} 捕得 ${e.value.count} 条海鱼`;
+    case 'OldBootDrawn':
+      return `${name(e.value.player)} 捞到了【破旧皮靴】（获胜目标 +1 分）！`;
+    case 'OldBootPassed':
+      return `${name(e.value.from)} 将【破旧皮靴】转送给 ${name(e.value.to)}！`;
+    case 'FishSpent':
+      return `${name(e.value.player)} 消耗 ${e.value.cost} 条海鱼兑换奇策`;
+    case 'FishResourceTaken':
+      return `${name(e.value.player)} 用海鱼从银行选取 1 ${RESOURCE_SHORT[e.value.resource]}`;
     case 'TurnEnded':
     case 'SpecialBuildPassed':
     case 'PairedTurnEnded':

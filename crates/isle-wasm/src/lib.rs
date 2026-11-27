@@ -113,6 +113,38 @@ impl LocalMatch {
             victory_points,
             friendly_robber,
             paired_turns,
+            false,
+            custom_map,
+        )
+        .map_err(|m| JsError::new(&m))
+    }
+
+    /// Full match constructor supporting all house rules (including
+    /// `event_deck`) and an optional `IM1:...` custom map.
+    #[wasm_bindgen(js_name = createMatch)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_match(
+        num_players: u8,
+        seed: u32,
+        human_seat: i32,
+        bot: &str,
+        scenario: &str,
+        victory_points: u8,
+        friendly_robber: bool,
+        paired_turns: bool,
+        event_deck: bool,
+        custom_map: &str,
+    ) -> Result<LocalMatch, JsError> {
+        build_local_match(
+            num_players,
+            seed,
+            human_seat,
+            bot,
+            scenario,
+            victory_points,
+            friendly_robber,
+            paired_turns,
+            event_deck,
             custom_map,
         )
         .map_err(|m| JsError::new(&m))
@@ -222,6 +254,7 @@ fn build_local_match(
     victory_points: u8,
     friendly_robber: bool,
     paired_turns: bool,
+    event_deck: bool,
     custom_map: &str,
 ) -> Result<LocalMatch, String> {
     let human = u8::try_from(human_seat).ok();
@@ -232,6 +265,7 @@ fn build_local_match(
     }
     config.friendly_robber = friendly_robber;
     config.paired_turns = paired_turns;
+    config.event_deck = event_deck;
     if !custom_map.trim().is_empty() {
         let cm = CustomMap::decode(custom_map).map_err(|e| format!("CustomMap: {e:?}"))?;
         Board::from_custom(&cm).map_err(|e| format!("CustomMap: {e:?}"))?;
@@ -291,6 +325,7 @@ impl Replay {
             scenario,
             friendly_robber,
             paired_turns,
+            event_deck: false,
             custom_map: None,
         };
         build_replay(config, seed, actions).map_err(fail)
@@ -402,13 +437,14 @@ struct TopologyInfo {
     harbor_edges: Vec<u8>,
 }
 
-/// `Classic`, `Archipelago`, `FogIslands` or `Citadels` (the serialized `Scenario`).
+/// `Classic`, `Archipelago`, `FogIslands`, `Citadels` or `Fishermen` (the serialized `Scenario`).
 fn parse_scenario_str(name: &str) -> Result<Scenario, String> {
     match name {
         "Classic" | "" => Ok(Scenario::Classic),
         "Archipelago" => Ok(Scenario::Archipelago),
         "FogIslands" => Ok(Scenario::FogIslands),
         "Citadels" => Ok(Scenario::Citadels),
+        "Fishermen" => Ok(Scenario::Fishermen),
         _ => Err("UnknownScenario".into()),
     }
 }
@@ -577,5 +613,36 @@ mod tests {
             Replay::from_config_json(&cfg_json, &record.seed, &record.actions).unwrap();
         replay.seek(replay.length());
         assert_eq!(replay.state, m.host.state);
+
+        // createMatch with Scenario::Fishermen + event_deck + custom map round-trips through Replay.
+        let fish_preview = preview_custom_map(4, "Fishermen", &code).unwrap();
+        let fish_info: isle_proto::BoardInfo = serde_json::from_str(&fish_preview).unwrap();
+        assert_eq!(fish_info.fishing_grounds.len(), 6);
+
+        let mut fm = LocalMatch::create_match(
+            4,
+            77,
+            -1,
+            "greedy",
+            "Fishermen",
+            9,
+            true,
+            false,
+            true,
+            &code,
+        )
+        .unwrap();
+        let v0: isle_proto::PlayerView = serde_json::from_str(&fm.view().unwrap()).unwrap();
+        assert_eq!(v0.dice_deck_left, Some(36));
+        while fm.host.step_bot().is_some() {}
+        assert!(fm.host.state.winner.is_some());
+        let f_rec = fm.host.replay("Fisher");
+        assert!(f_rec.config.event_deck);
+        assert_eq!(f_rec.config.scenario, Scenario::Fishermen);
+        let f_cfg_json = serde_json::to_string(&f_rec.config).unwrap();
+        let mut f_rep =
+            Replay::from_config_json(&f_cfg_json, &f_rec.seed, &f_rec.actions).unwrap();
+        f_rep.seek(f_rep.length());
+        assert_eq!(f_rep.state, fm.host.state);
     }
 }

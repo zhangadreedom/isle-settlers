@@ -241,7 +241,35 @@ pub(crate) fn spot_value(s: &GameState, p: u8, v: u8) -> f32 {
             value += 0.35 * (own[r] + gained[r]);
         }
     }
-    value + island_bonus_value(s, p, v)
+    let mut val = value + island_bonus_value(s, p, v);
+    if s.config.scenario.is_fishermen() {
+        val += 0.42 * fish_pips_at_vertex(s, v);
+    }
+    val
+}
+
+/// Fish production weight (pips) at vertex `v` in Fishermen mode.
+pub(crate) fn fish_pips_at_vertex(s: &GameState, v: u8) -> f32 {
+    let topo = s.topo();
+    let mut pips = 0.0f32;
+    for fg in s.board.active_fishing_grounds() {
+        if topo.edge_vertices[fg.edge as usize].contains(&v) {
+            pips += PIPS[fg.number as usize] as f32;
+        }
+    }
+    if s.board.desert != NONE && topo.tile_vertex_mask[s.board.desert as usize].contains(v) {
+        pips += if s.robber == s.board.desert && !s.is_setup() {
+            1.1
+        } else {
+            2.0
+        };
+    }
+    pips
+}
+
+/// Value of upgrading `v` into a city in Fishermen mode (tile pips + fish pips).
+pub(crate) fn fishermen_city_value(s: &GameState, v: u8) -> f32 {
+    vertex_production(s, v) + 0.42 * fish_pips_at_vertex(s, v)
 }
 
 /// Setup spot value: in Citadels, the 2nd setup round places the player's
@@ -654,7 +682,7 @@ pub(crate) fn propose_trade_offer(s: &GameState, p: u8, need: ResourceSet) -> Op
     let has_partner = (0..s.num_players() as u8).any(|q| {
         q != p
             && s.players[q as usize].hand.total() > 0
-            && s.public_victory_points(q) + 2 < s.config.victory_points
+            && s.public_victory_points(q) + 2 < s.target_victory_points(q)
     });
     if !has_partner {
         return None;
@@ -824,7 +852,7 @@ fn respond_trade(s: &GameState, p: u8, legal: &[Action]) -> Action {
         return reject;
     }
     // Never help a player who is close to winning.
-    if s.public_victory_points(s.current) + 2 >= s.config.victory_points {
+    if s.public_victory_points(s.current) + 2 >= s.target_victory_points(s.current) {
         return reject;
     }
     let hand = s.players[p as usize].hand;
@@ -856,6 +884,20 @@ impl GreedyBot {
         let ps = &s.players[p as usize];
         let hand = ps.hand;
         let citadels = s.config.scenario.is_citadels();
+        let fishermen = s.config.scenario.is_fishermen();
+
+        // Fishermen: pass the Old Boot before building (while own public VP is lower).
+        if fishermen
+            && let Some(a) = best_by(legal, |a| match a {
+                Action::PassOldBoot(q) => Some(
+                    s.public_victory_points(*q) as f32 * 10.0
+                        + s.players[*q as usize].hand.total() as f32,
+                ),
+                _ => None,
+            })
+        {
+            return Some(a);
+        }
 
         // Citadels: chase the robber off our own tile with a ready knight so
         // any stolen card is available for this turn's builds.
@@ -878,6 +920,7 @@ impl GreedyBot {
         // 1. Cities, then settlements: always worth a point.
         if let Some(a) = best_by(legal, |a| match a {
             Action::BuildCity(v) if citadels => Some(citadel_city_value(s, p, *v)),
+            Action::BuildCity(v) if fishermen => Some(fishermen_city_value(s, *v)),
             Action::BuildCity(v) => Some(vertex_production(s, *v)),
             _ => None,
         }) {
@@ -888,6 +931,29 @@ impl GreedyBot {
             _ => None,
         }) {
             return Some(a);
+        }
+
+        if fishermen {
+            // Complete an immediate City or Settlement with 4 fish if 1 card short.
+            if ps.fish >= 4 {
+                let can_city = ps.cities_left > 0 && !s.settlements[p as usize].is_empty();
+                let can_settle =
+                    ps.settlements_left > 0 && !s.settlement_spots(p, true).is_empty();
+                for (ok, goal) in [(can_city, cost::CITY), (can_settle, cost::SETTLEMENT)] {
+                    if ok
+                        && missing(hand, goal) == 1
+                        && let Some(a) = legal.iter().copied().find(|a| match a {
+                            Action::FishTakeResource(r) => goal[*r] > hand[*r],
+                            _ => false,
+                        })
+                    {
+                        return Some(a);
+                    }
+                }
+            }
+            if robber_hurts_me(s, p) && legal.contains(&Action::FishDriveOffRobber) {
+                return Some(Action::FishDriveOffRobber);
+            }
         }
 
         // Citadels: immediately take urban improvements, and prioritize
@@ -996,6 +1062,30 @@ impl GreedyBot {
         }
 
         // 4. Trade surplus with the bank (or Citadels TradeGood) for a missing card.
+        if fishermen {
+            if matches!(target, Target::Road)
+                && let Some(a) = best_by(legal, |a| match a {
+                    Action::FishBuildRoad(e) => Some(road_value(s, p, *e)),
+                    _ => None,
+                })
+            {
+                return Some(a);
+            }
+            if legal.contains(&Action::FishBuyDevCard) {
+                return Some(Action::FishBuyDevCard);
+            }
+            if missing(hand, need) > 0
+                && (missing(hand, need) <= 2 || ps.fish >= 6)
+                && let Some(a) = best_by(legal, |a| match a {
+                    Action::FishTakeResource(r) if need[*r] > hand[*r] => {
+                        Some((need[*r] - hand[*r]) as f32)
+                    }
+                    _ => None,
+                })
+            {
+                return Some(a);
+            }
+        }
         if citadels && let Some(a) = citadel_maritime_trade(s, p, need, legal) {
             return Some(a);
         }
@@ -1139,6 +1229,33 @@ impl GreedyBot {
                 Action::MoveShip { from, to } => {
                     let gain = move_value(s, p, *from, *to);
                     (gain > 1.0).then_some(gain)
+                }
+                _ => None,
+            }) {
+                return Some(a);
+            }
+        }
+
+        if fishermen {
+            if let Some(a) = best_by(legal, |a| match a {
+                Action::FishBuildRoad(e) => {
+                    let v = road_value(s, p, *e);
+                    (v > 0.5).then_some(v)
+                }
+                _ => None,
+            }) {
+                return Some(a);
+            }
+            if let Some(a) = best_by(legal, |a| match a {
+                Action::FishSteal(q)
+                    if ps.fish >= 5
+                        || s.public_victory_points(*q) + 3 >= s.target_victory_points(*q)
+                        || s.players[*q as usize].hand.total() >= 4 =>
+                {
+                    Some(
+                        s.public_victory_points(*q) as f32 * 2.0
+                            + s.players[*q as usize].hand.total() as f32,
+                    )
                 }
                 _ => None,
             }) {

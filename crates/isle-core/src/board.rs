@@ -161,6 +161,24 @@ pub const PIPS: [u8; 13] = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
 /// Most tiles sharing one number token (custom maps allow up to twelve).
 pub const MAX_TILES_PER_NUMBER: usize = 12;
 
+/// Maximum number of coastal fishing grounds on a board (6 on Base, 8 on Extended).
+pub const MAX_FISHING_GROUNDS: usize = 8;
+
+/// Number tokens assigned to the 6 coastal fishing grounds on the base island.
+pub const BASE_FISHING_NUMBERS: [u8; 6] = [4, 5, 6, 8, 9, 10];
+
+/// Number tokens assigned to the 8 coastal fishing grounds on the extended island.
+pub const EXTENDED_FISHING_NUMBERS: [u8; 8] = [4, 5, 5, 6, 8, 9, 9, 10];
+
+/// A coastal shoal producing fish when `number` is rolled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct FishingGround {
+    pub edge: u8,
+    pub number: u8,
+}
+
 impl BoardLayout {
     /// Terrain tiles of a classic board, one per tile (empty for seafaring
     /// maps, whose terrain is placed island by island).
@@ -303,6 +321,9 @@ pub struct Board {
     pub setup_vertices: BitSet,
     /// Sea tile where the pirate starts, `NONE` without sea.
     pub pirate_start: u8,
+    /// Fishermen scenario: coastal fishing grounds (`fishing_grounds[..fishing_ground_count]`).
+    pub fishing_grounds: [FishingGround; MAX_FISHING_GROUNDS],
+    pub fishing_ground_count: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -824,6 +845,11 @@ impl Board {
             sea_edges,
             setup_vertices,
             pirate_start,
+            fishing_grounds: [FishingGround {
+                edge: NONE,
+                number: 0,
+            }; MAX_FISHING_GROUNDS],
+            fishing_ground_count: 0,
         };
         board.terrain[..nt].copy_from_slice(terrain);
         board.numbers[..nt].copy_from_slice(numbers);
@@ -1052,6 +1078,11 @@ impl Board {
             sea_edges,
             setup_vertices,
             pirate_start,
+            fishing_grounds: [FishingGround {
+                edge: NONE,
+                number: 0,
+            }; MAX_FISHING_GROUNDS],
+            fishing_ground_count: 0,
         };
         board.terrain[..nt].copy_from_slice(terrain);
         board.numbers[..nt].copy_from_slice(numbers);
@@ -1084,6 +1115,43 @@ impl Board {
     #[inline]
     pub fn harbor_kinds(&self) -> &[HarborKind] {
         &self.harbors[..self.topo().harbor_edges.len()]
+    }
+
+    /// Active coastal fishing grounds (`0` on non-Fishermen boards).
+    #[inline]
+    pub fn active_fishing_grounds(&self) -> &[FishingGround] {
+        &self.fishing_grounds[..self.fishing_ground_count as usize]
+    }
+
+    /// Deterministically populates evenly spaced non-harbor coastal fishing
+    /// grounds around the perimeter (`6` on `Base`, `8` on `Extended`).
+    pub fn init_fishing_grounds(&mut self) {
+        let topo = self.topo();
+        let nums: &[u8] = if self.layout.is_extended() {
+            &EXTENDED_FISHING_NUMBERS
+        } else {
+            &BASE_FISHING_NUMBERS
+        };
+        let mut avail = [NONE; MAX_EDGES];
+        let mut avail_len = 0usize;
+        for &e in topo.coast_edges {
+            if self.land_edges.contains(e) && !topo.harbor_edges.contains(&e) {
+                avail[avail_len] = e;
+                avail_len += 1;
+            }
+        }
+        let count = nums.len().min(avail_len).min(MAX_FISHING_GROUNDS);
+        self.fishing_grounds = [FishingGround {
+            edge: NONE,
+            number: 0,
+        }; MAX_FISHING_GROUNDS];
+        for (i, &num) in nums.iter().take(count).enumerate() {
+            self.fishing_grounds[i] = FishingGround {
+                edge: avail[i * avail_len / count],
+                number: num,
+            };
+        }
+        self.fishing_ground_count = count as u8;
     }
 
     /// Production weight (pips) of a vertex, summed over adjacent tiles.
