@@ -5,13 +5,13 @@
 #![cfg(feature = "ts")]
 
 use isle_core::{
-    BoardLayout, GameConfig, HarborKind, Phase, Resource, ResourceSet, Scenario, Terrain,
-    TradeOffer,
+    BoardLayout, CustomMap, GameConfig, HarborKind, Phase, Resource, ResourceSet, Scenario,
+    Terrain, TradeOffer,
 };
 use isle_proto::account::{AccountInfo, ApiError, Credentials, SessionGrant, SessionInfo};
 use isle_proto::net::{
-    BotLevel, ChatLine, ClientMsg, HouseRules, LegalActions, RoomInfo, SeatView, ServerMsg,
-    Snapshot, Update,
+    BotLevel, ChatLine, ClientMsg, HouseRules, LegalActions, PublicRoomSummary, RoomInfo, SeatView,
+    ServerMsg, Snapshot, Update,
 };
 use isle_proto::ranking::{
     Leaderboard, LeaderboardEntry, MatchSummary, PlayerProfile, RatingChange, SeatRating, Tier,
@@ -36,6 +36,7 @@ fn render() -> String {
         TradeGood::decl(&cfg),
         DevCard::decl(&cfg),
         BoardLayout::decl(&cfg),
+        CustomMap::decl(&cfg),
         Scenario::decl(&cfg),
         GameConfig::decl(&cfg),
         Phase::decl(&cfg),
@@ -57,6 +58,7 @@ fn render() -> String {
         RatingChange::decl(&cfg),
         SeatView::decl(&cfg),
         HouseRules::decl(&cfg),
+        PublicRoomSummary::decl(&cfg),
         RoomInfo::decl(&cfg),
         LegalActions::decl(&cfg),
         Snapshot::decl(&cfg),

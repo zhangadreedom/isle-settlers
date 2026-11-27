@@ -97,6 +97,7 @@ async fn serve(socket: WebSocket, state: AppState) {
             scenario,
             rules,
             session,
+            is_public,
         }))) => match seat_account(&state, session).await {
             Ok(account) => {
                 let options = RoomOptions {
@@ -105,6 +106,7 @@ async fn serve(socket: WebSocket, state: AppState) {
                     ranked,
                     scenario,
                     rules,
+                    is_public,
                 };
                 state
                     .registry

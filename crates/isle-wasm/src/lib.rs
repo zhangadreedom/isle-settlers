@@ -10,7 +10,8 @@ mod host;
 pub use host::{BotStep, HostError, MatchHost};
 use isle_ai::{Bot, WeightedRandomBot};
 use isle_core::{
-    Action, BoardLayout, Event, GameConfig, GameState, MAX_PLAYERS, ResourceSet, Scenario,
+    Action, Board, BoardLayout, CustomMap, Event, GameConfig, GameState, MAX_PLAYERS, ResourceSet,
+    Scenario,
 };
 use isle_proto::ReplayError;
 use isle_proto::replay::decode_actions;
@@ -85,6 +86,36 @@ impl LocalMatch {
         Ok(LocalMatch {
             host: MatchHost::with_config(config, seed as u64, human, bot).map_err(err)?,
         })
+    }
+
+    /// New match with custom house rules and an optional `IM1:...` custom map
+    /// (`victory_points == 0` uses the scenario default; empty `custom_map`
+    /// uses procedural generation).
+    #[wasm_bindgen(js_name = withRulesAndMap)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_rules_and_map(
+        num_players: u8,
+        seed: u32,
+        human_seat: i32,
+        bot: &str,
+        scenario: &str,
+        victory_points: u8,
+        friendly_robber: bool,
+        paired_turns: bool,
+        custom_map: &str,
+    ) -> Result<LocalMatch, JsError> {
+        build_local_match(
+            num_players,
+            seed,
+            human_seat,
+            bot,
+            scenario,
+            victory_points,
+            friendly_robber,
+            paired_turns,
+            custom_map,
+        )
+        .map_err(|m| JsError::new(&m))
     }
 
     /// Static board layout (`BoardInfo` JSON).
@@ -181,6 +212,59 @@ struct ReplayStep<'a> {
     events: &'a [Event],
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_local_match(
+    num_players: u8,
+    seed: u32,
+    human_seat: i32,
+    bot: &str,
+    scenario: &str,
+    victory_points: u8,
+    friendly_robber: bool,
+    paired_turns: bool,
+    custom_map: &str,
+) -> Result<LocalMatch, String> {
+    let human = u8::try_from(human_seat).ok();
+    let scenario = parse_scenario_str(scenario)?;
+    let mut config = GameConfig::scenario(scenario, num_players);
+    if victory_points != 0 {
+        config.victory_points = victory_points;
+    }
+    config.friendly_robber = friendly_robber;
+    config.paired_turns = paired_turns;
+    if !custom_map.trim().is_empty() {
+        let cm = CustomMap::decode(custom_map).map_err(|e| format!("CustomMap: {e:?}"))?;
+        Board::from_custom(&cm).map_err(|e| format!("CustomMap: {e:?}"))?;
+        config.custom_map = Some(cm);
+    }
+    Ok(LocalMatch {
+        host: MatchHost::with_config(config, seed as u64, human, bot).map_err(|e| e.code())?,
+    })
+}
+
+fn build_replay(config: GameConfig, seed: &str, actions: &[u8]) -> Result<Replay, ReplayError> {
+    let seed: u64 = seed.parse().map_err(|_| ReplayError::Seed)?;
+    let start = GameState::new(config, seed).map_err(|_| ReplayError::Config)?;
+    let actions = decode_actions(actions)?;
+    let mut checkpoints = vec![start];
+    let mut state = start;
+    for (i, &(seat, action)) in actions.iter().enumerate() {
+        state
+            .apply(seat, action)
+            .map_err(|_| ReplayError::Action(i))?;
+        if (i + 1) % CHECKPOINT_EVERY == 0 {
+            checkpoints.push(state);
+        }
+    }
+    Ok(Replay {
+        actions,
+        checkpoints,
+        state: start,
+        position: 0,
+        events: Vec::new(),
+    })
+}
+
 #[wasm_bindgen]
 impl Replay {
     /// Loads a game from its config, seed (decimal) and encoded action log
@@ -199,8 +283,7 @@ impl Replay {
         actions: &[u8],
     ) -> Result<Replay, JsError> {
         let fail = |e: ReplayError| JsError::new(&e.to_string());
-        let seed: u64 = seed.parse().map_err(|_| fail(ReplayError::Seed))?;
-        let scenario = parse_scenario(scenario).map_err(|_| fail(ReplayError::Config))?;
+        let scenario = parse_scenario_str(scenario).map_err(|_| fail(ReplayError::Config))?;
         let config = GameConfig {
             num_players,
             victory_points,
@@ -208,26 +291,23 @@ impl Replay {
             scenario,
             friendly_robber,
             paired_turns,
+            custom_map: None,
         };
-        let start = GameState::new(config, seed).map_err(|_| fail(ReplayError::Config))?;
-        let actions = decode_actions(actions).map_err(fail)?;
-        let mut checkpoints = vec![start];
-        let mut state = start;
-        for (i, &(seat, action)) in actions.iter().enumerate() {
-            state
-                .apply(seat, action)
-                .map_err(|_| fail(ReplayError::Action(i)))?;
-            if (i + 1) % CHECKPOINT_EVERY == 0 {
-                checkpoints.push(state);
-            }
-        }
-        Ok(Replay {
-            actions,
-            checkpoints,
-            state: start,
-            position: 0,
-            events: Vec::new(),
-        })
+        build_replay(config, seed, actions).map_err(fail)
+    }
+
+    /// Loads a game from a serialized `GameConfig` JSON object (including
+    /// optional `customMap`), seed (decimal) and encoded action log.
+    #[wasm_bindgen(js_name = fromConfigJson)]
+    pub fn from_config_json(
+        config_json: &str,
+        seed: &str,
+        actions: &[u8],
+    ) -> Result<Replay, JsError> {
+        let fail = |e: ReplayError| JsError::new(&e.to_string());
+        let config: GameConfig =
+            serde_json::from_str(config_json).map_err(|_| fail(ReplayError::Config))?;
+        build_replay(config, seed, actions).map_err(fail)
     }
 
     /// Number of actions in the game.
@@ -323,14 +403,48 @@ struct TopologyInfo {
 }
 
 /// `Classic`, `Archipelago`, `FogIslands` or `Citadels` (the serialized `Scenario`).
-fn parse_scenario(name: &str) -> Result<Scenario, JsError> {
+fn parse_scenario_str(name: &str) -> Result<Scenario, String> {
     match name {
         "Classic" | "" => Ok(Scenario::Classic),
         "Archipelago" => Ok(Scenario::Archipelago),
         "FogIslands" => Ok(Scenario::FogIslands),
         "Citadels" => Ok(Scenario::Citadels),
-        _ => Err(JsError::new("UnknownScenario")),
+        _ => Err("UnknownScenario".into()),
     }
+}
+
+fn parse_scenario(name: &str) -> Result<Scenario, JsError> {
+    parse_scenario_str(name).map_err(|m| JsError::new(&m))
+}
+
+fn preview_custom_map_inner(
+    num_players: u8,
+    scenario: &str,
+    custom_map: &str,
+) -> Result<isle_proto::BoardInfo, String> {
+    let scenario = parse_scenario_str(scenario)?;
+    let mut config = GameConfig::scenario(scenario, num_players);
+    let cm = CustomMap::decode(custom_map).map_err(|e| format!("{e:?}"))?;
+    if cm.layout != config.layout() {
+        return Err("LayoutMismatch".into());
+    }
+    Board::from_custom(&cm).map_err(|e| format!("{e:?}"))?;
+    config.custom_map = Some(cm);
+    let state = GameState::new(config, 1).map_err(|e| format!("{e:?}"))?;
+    Ok(isle_proto::board_info(&state))
+}
+
+/// Validates `custom_map` (`IM1:...`) for `(num_players, scenario)` and
+/// returns its `BoardInfo` JSON for 3D board previewing.
+#[wasm_bindgen(js_name = previewCustomMap)]
+pub fn preview_custom_map(
+    num_players: u8,
+    scenario: &str,
+    custom_map: &str,
+) -> Result<String, JsError> {
+    let info =
+        preview_custom_map_inner(num_players, scenario, custom_map).map_err(|m| JsError::new(&m))?;
+    to_js(&info)
 }
 
 /// Topology tables of `layout` (`"Base"`, `"Extended"`, `"Archipelago"`,
@@ -427,5 +541,41 @@ mod tests {
         ] {
             assert!(topology(layout).is_ok(), "{layout}");
         }
+    }
+
+    #[test]
+    fn custom_map_preview_and_config_json_replay() {
+        let b = Board::generate(&mut isle_core::Rng::new(55), BoardLayout::Base, true);
+        let mut cm = CustomMap::from_board(&b);
+        cm.terrain[0] = isle_core::Terrain::Desert;
+        cm.numbers[0] = 0;
+        cm.terrain[1] = isle_core::Terrain::Gold;
+        cm.numbers[1] = 8;
+        let code = cm.encode();
+
+        let preview = preview_custom_map(4, "Classic", &code).unwrap();
+        let info: isle_proto::BoardInfo = serde_json::from_str(&preview).unwrap();
+        assert_eq!(info.config.custom_map, Some(cm));
+        assert_eq!(info.terrain[1], isle_core::Terrain::Gold);
+        assert_eq!(
+            preview_custom_map_inner(5, "Classic", &code).unwrap_err(),
+            "LayoutMismatch"
+        );
+        assert_eq!(
+            preview_custom_map_inner(4, "Classic", "bad").unwrap_err(),
+            "BadCustomCode"
+        );
+
+        let mut m =
+            LocalMatch::with_rules_and_map(4, 99, -1, "greedy", "Classic", 8, true, false, &code)
+                .unwrap();
+        while m.host.step_bot().is_some() {}
+        assert!(m.host.state.winner.is_some());
+        let record = m.host.replay("Tester");
+        let cfg_json = serde_json::to_string(&record.config).unwrap();
+        let mut replay =
+            Replay::from_config_json(&cfg_json, &record.seed, &record.actions).unwrap();
+        replay.seek(replay.length());
+        assert_eq!(replay.state, m.host.state);
     }
 }

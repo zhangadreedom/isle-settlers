@@ -158,8 +158,8 @@ pub const GOLD_NUMBERS: [u8; 6] = [3, 4, 5, 9, 10, 11];
 /// Number of dice combinations producing each roll (out of 36).
 pub const PIPS: [u8; 13] = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
 
-/// Most tiles sharing one number token (on extended fog maps).
-pub const MAX_TILES_PER_NUMBER: usize = 4;
+/// Most tiles sharing one number token (custom maps allow up to twelve).
+pub const MAX_TILES_PER_NUMBER: usize = 12;
 
 impl BoardLayout {
     /// Terrain tiles of a classic board, one per tile (empty for seafaring
@@ -314,6 +314,202 @@ pub enum BoardError {
     NumberOnDesert,
     MissingNumber,
     InvalidNumber,
+    BadCustomCode,
+    MissingDesert,
+    MissingSea,
+    UnexpectedSea,
+    UnexpectedFog,
+    TooMuchFog,
+    FogTouchesLand,
+    TooLittleLand,
+}
+
+/// Compact DIY board specification (`IM1:<layout>:<tiles>:<harbors>`).
+///
+/// `Copy` and heap-free so it can live directly inside [`crate::GameConfig`]
+/// and network rule structs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(type = "string"))]
+pub struct CustomMap {
+    pub layout: BoardLayout,
+    pub terrain: [Terrain; MAX_TILES],
+    pub numbers: [u8; MAX_TILES],
+    pub harbors: [HarborKind; MAX_HARBORS],
+}
+
+impl CustomMap {
+    /// Extracts a normalized [`CustomMap`] from an existing [`Board`].
+    pub fn from_board(board: &Board) -> CustomMap {
+        let topo = board.topo();
+        let nt = topo.num_tiles;
+        let nh = topo.harbor_edges.len();
+        let mut terrain = [Terrain::Desert; MAX_TILES];
+        let mut numbers = [0u8; MAX_TILES];
+        let mut harbors = [HarborKind::Generic; MAX_HARBORS];
+        terrain[..nt].copy_from_slice(&board.terrain[..nt]);
+        numbers[..nt].copy_from_slice(&board.numbers[..nt]);
+        harbors[..nh].copy_from_slice(&board.harbors[..nh]);
+        CustomMap {
+            layout: board.layout,
+            terrain,
+            numbers,
+            harbors,
+        }
+    }
+
+    /// Encodes as `IM1:<layoutChar>:<tiles>:<harbors>`.
+    pub fn encode(&self) -> String {
+        let topo = self.layout.topology();
+        let nt = topo.num_tiles;
+        let nh = topo.harbor_edges.len();
+        let mut out = String::with_capacity(6 + 2 * nt + nh);
+        out.push_str("IM1:");
+        out.push(match self.layout {
+            BoardLayout::Base => 'B',
+            BoardLayout::Extended => 'E',
+            BoardLayout::Archipelago => 'A',
+            BoardLayout::FogIslands => 'F',
+            BoardLayout::ArchipelagoExtended => 'X',
+            BoardLayout::FogIslandsExtended => 'Z',
+        });
+        out.push(':');
+        for t in 0..nt {
+            out.push(match self.terrain[t] {
+                Terrain::Forest => 'L',
+                Terrain::Hills => 'B',
+                Terrain::Pasture => 'W',
+                Terrain::Fields => 'G',
+                Terrain::Mountains => 'O',
+                Terrain::Desert => 'D',
+                Terrain::Sea => 'S',
+                Terrain::Gold => 'U',
+                Terrain::Fog => 'Q',
+            });
+            out.push(match self.numbers[t] {
+                0 => '0',
+                n @ (2..=6 | 8..=9) => (b'0' + n) as char,
+                10 => 'A',
+                11 => 'B',
+                12 => 'C',
+                _ => '0',
+            });
+        }
+        out.push(':');
+        for h in 0..nh {
+            out.push(match self.harbors[h] {
+                HarborKind::Generic => '3',
+                HarborKind::Special(Resource::Lumber) => 'L',
+                HarborKind::Special(Resource::Brick) => 'B',
+                HarborKind::Special(Resource::Wool) => 'W',
+                HarborKind::Special(Resource::Grain) => 'G',
+                HarborKind::Special(Resource::Ore) => 'O',
+            });
+        }
+        out
+    }
+
+    /// Decodes an `IM1:<layoutChar>:<tiles>:<harbors>` string (case-insensitive,
+    /// ignoring leading/trailing whitespace).
+    pub fn decode(raw: &str) -> Result<CustomMap, BoardError> {
+        let s = raw.trim().to_ascii_uppercase();
+        let mut parts = s.split(':');
+        let Some("IM1") = parts.next() else {
+            return Err(BoardError::BadCustomCode);
+        };
+        let (Some(layout_s), Some(tiles_s), Some(harbors_s), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(BoardError::BadCustomCode);
+        };
+        let layout = match layout_s {
+            "B" => BoardLayout::Base,
+            "E" => BoardLayout::Extended,
+            "A" => BoardLayout::Archipelago,
+            "F" => BoardLayout::FogIslands,
+            "X" => BoardLayout::ArchipelagoExtended,
+            "Z" => BoardLayout::FogIslandsExtended,
+            _ => return Err(BoardError::BadCustomCode),
+        };
+        let topo = layout.topology();
+        let nt = topo.num_tiles;
+        let nh = topo.harbor_edges.len();
+        let tb = tiles_s.as_bytes();
+        let hb = harbors_s.as_bytes();
+        if tb.len() != 2 * nt || hb.len() != nh {
+            return Err(BoardError::BadCustomCode);
+        }
+        let mut terrain = [Terrain::Desert; MAX_TILES];
+        let mut numbers = [0u8; MAX_TILES];
+        for t in 0..nt {
+            terrain[t] = match tb[2 * t] {
+                b'L' => Terrain::Forest,
+                b'B' => Terrain::Hills,
+                b'W' => Terrain::Pasture,
+                b'G' => Terrain::Fields,
+                b'O' => Terrain::Mountains,
+                b'D' => Terrain::Desert,
+                b'S' => Terrain::Sea,
+                b'U' => Terrain::Gold,
+                b'Q' => Terrain::Fog,
+                _ => return Err(BoardError::BadCustomCode),
+            };
+            numbers[t] = match tb[2 * t + 1] {
+                b'0' => 0,
+                b @ (b'2'..=b'6' | b'8'..=b'9') => b - b'0',
+                b'A' => 10,
+                b'B' => 11,
+                b'C' => 12,
+                _ => return Err(BoardError::BadCustomCode),
+            };
+        }
+        let mut harbors = [HarborKind::Generic; MAX_HARBORS];
+        for h in 0..nh {
+            harbors[h] = match hb[h] {
+                b'3' => HarborKind::Generic,
+                b'L' => HarborKind::Special(Resource::Lumber),
+                b'B' => HarborKind::Special(Resource::Brick),
+                b'W' => HarborKind::Special(Resource::Wool),
+                b'G' => HarborKind::Special(Resource::Grain),
+                b'O' => HarborKind::Special(Resource::Ore),
+                _ => return Err(BoardError::BadCustomCode),
+            };
+        }
+        Ok(CustomMap {
+            layout,
+            terrain,
+            numbers,
+            harbors,
+        })
+    }
+}
+
+impl std::fmt::Display for CustomMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.encode())
+    }
+}
+
+impl std::str::FromStr for CustomMap {
+    type Err = BoardError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::decode(s)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for CustomMap {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.encode())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for CustomMap {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        CustomMap::decode(&s).map_err(|e| serde::de::Error::custom(format!("{e:?}")))
+    }
 }
 
 impl Board {
@@ -635,6 +831,234 @@ impl Board {
         Ok(board)
     }
 
+    /// Builds and validates a DIY board from a [`CustomMap`], computing
+    /// connected islands, setup spots, pirate start and buildable masks.
+    pub fn from_custom(custom: &CustomMap) -> Result<Board, BoardError> {
+        let layout = custom.layout;
+        let topo = layout.topology();
+        let nt = topo.num_tiles;
+        let nh = topo.harbor_edges.len();
+        let terrain = &custom.terrain[..nt];
+        let numbers = &custom.numbers[..nt];
+        let harbors = &custom.harbors[..nh];
+
+        let mut land_count = 0usize;
+        let mut sea_count = 0usize;
+        let mut fog_count = 0usize;
+        let mut desert = NONE;
+        for (t, &ter) in terrain.iter().enumerate() {
+            match ter {
+                Terrain::Sea => {
+                    if !layout.has_ships() {
+                        return Err(BoardError::UnexpectedSea);
+                    }
+                    sea_count += 1;
+                }
+                Terrain::Fog => {
+                    if !layout.has_fog() {
+                        return Err(BoardError::UnexpectedFog);
+                    }
+                    fog_count += 1;
+                }
+                other => {
+                    debug_assert!(other.is_land());
+                    land_count += 1;
+                    if other == Terrain::Desert && desert == NONE {
+                        desert = t as u8;
+                    }
+                }
+            }
+        }
+        if fog_count > crate::state::MAX_FOG_TILES {
+            return Err(BoardError::TooMuchFog);
+        }
+        if layout.has_ships() && sea_count == 0 {
+            return Err(BoardError::MissingSea);
+        }
+        if desert == NONE {
+            return Err(BoardError::MissingDesert);
+        }
+        if land_count + sea_count < 2 || (!layout.has_ships() && land_count < 2) {
+            return Err(BoardError::TooLittleLand);
+        }
+
+        let mut tiles_by_number = [[NONE; MAX_TILES_PER_NUMBER]; 13];
+        for t in 0..nt {
+            let n = numbers[t];
+            if !terrain[t].produces() {
+                if n != 0 {
+                    return Err(BoardError::NumberOnDesert);
+                }
+                continue;
+            }
+            if n == 0 {
+                return Err(BoardError::MissingNumber);
+            }
+            if !(2..=12).contains(&n) || n == 7 {
+                return Err(BoardError::InvalidNumber);
+            }
+            let slot = tiles_by_number[n as usize]
+                .iter_mut()
+                .find(|s| **s == NONE)
+                .ok_or(BoardError::InvalidNumber)?;
+            *slot = t as u8;
+        }
+
+        if layout.has_fog() {
+            let mut land_verts = BitSet::EMPTY;
+            for t in 0..nt {
+                if terrain[t].is_land() {
+                    land_verts |= topo.tile_vertex_mask[t];
+                }
+            }
+            for t in 0..nt {
+                if terrain[t] == Terrain::Fog
+                    && !(topo.tile_vertex_mask[t] & land_verts).is_empty()
+                {
+                    return Err(BoardError::FogTouchesLand);
+                }
+            }
+        }
+
+        let mut vertex_harbor = [0u8; MAX_VERTICES];
+        for (slot, &e) in topo.harbor_edges.iter().enumerate() {
+            for v in topo.edge_vertices[e as usize] {
+                vertex_harbor[v as usize] = harbors[slot].bit();
+            }
+        }
+
+        // Group land tiles into connected components (vertex-sharing), largest first.
+        let mut visited = [false; MAX_TILES];
+        let mut comps = [(0usize, 0usize, 0u64); MAX_TILES];
+        let mut num_comps = 0usize;
+        for start in 0..nt {
+            if !terrain[start].is_land() || visited[start] {
+                continue;
+            }
+            visited[start] = true;
+            let mut queue = [0usize; MAX_TILES];
+            let (mut head, mut tail) = (0usize, 1usize);
+            queue[0] = start;
+            let mut mask = 1u64 << start;
+            while head < tail {
+                let a = queue[head];
+                head += 1;
+                let va = topo.tile_vertex_mask[a];
+                for b in 0..nt {
+                    if !visited[b]
+                        && terrain[b].is_land()
+                        && !(va & topo.tile_vertex_mask[b]).is_empty()
+                    {
+                        visited[b] = true;
+                        mask |= 1u64 << b;
+                        queue[tail] = b;
+                        tail += 1;
+                    }
+                }
+            }
+            comps[num_comps] = (tail, start, mask);
+            num_comps += 1;
+        }
+        comps[..num_comps].sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut tile_island = [0u8; MAX_TILES];
+        for (idx, &(_, _, mut mask)) in comps[..num_comps].iter().enumerate() {
+            let island = (idx + 1).min(7) as u8;
+            while mask != 0 {
+                let t = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                tile_island[t] = island;
+            }
+        }
+
+        let mut vertex_island = [0u8; MAX_VERTICES];
+        let mut land_vertices = BitSet::EMPTY;
+        let mut island1_verts = BitSet::EMPTY;
+        for v in 0..topo.num_vertices {
+            for &t in &topo.vertex_tiles[v] {
+                if t != NONE && tile_island[t as usize] != 0 {
+                    vertex_island[v] = tile_island[t as usize];
+                    land_vertices.insert(v as u8);
+                    if tile_island[t as usize] == 1 {
+                        island1_verts.insert(v as u8);
+                    }
+                }
+            }
+        }
+
+        let min_setup =
+            (4 * (2 * layout.max_players() as u32 - 1) + 1).min(topo.num_vertices as u32);
+        let setup_vertices = if layout.has_ships() && island1_verts.count_ones() >= min_setup {
+            island1_verts
+        } else {
+            land_vertices
+        };
+        if setup_vertices.count_ones() < min_setup {
+            return Err(BoardError::TooLittleLand);
+        }
+
+        let mut edge_land = [false; MAX_EDGES];
+        let mut edge_tiles = [0u8; MAX_EDGES];
+        let mut edge_sea = [false; MAX_EDGES];
+        let mut edge_fog = [false; MAX_EDGES];
+        for t in 0..nt {
+            for &e in &topo.tile_edges[t] {
+                edge_tiles[e as usize] += 1;
+                if terrain[t] == Terrain::Sea {
+                    edge_sea[e as usize] = true;
+                } else if terrain[t].is_land() {
+                    edge_land[e as usize] = true;
+                } else {
+                    edge_fog[e as usize] = true;
+                }
+            }
+        }
+        let (mut land_edges, mut sea_edges) = (BitSet::EMPTY, BitSet::EMPTY);
+        for e in 0..topo.num_edges {
+            if edge_land[e] {
+                land_edges.insert(e as u8);
+            }
+            if edge_sea[e] || (edge_tiles[e] == 1 && !edge_fog[e]) {
+                sea_edges.insert(e as u8);
+            }
+        }
+
+        let pirate_start = if layout.has_ships() {
+            layout
+                .map()
+                .and_then(|m| {
+                    m[..nt]
+                        .iter()
+                        .position(|&c| c == b'~')
+                        .filter(|&p| terrain[p] == Terrain::Sea)
+                })
+                .or_else(|| terrain.iter().position(|&t| t == Terrain::Sea))
+                .expect("checked sea_count >= 1") as u8
+        } else {
+            NONE
+        };
+
+        let mut board = Board {
+            layout,
+            terrain: [Terrain::Desert; MAX_TILES],
+            numbers: [0; MAX_TILES],
+            harbors: [HarborKind::Generic; MAX_HARBORS],
+            vertex_harbor,
+            tiles_by_number,
+            desert,
+            tile_island,
+            vertex_island,
+            land_vertices,
+            land_edges,
+            sea_edges,
+            setup_vertices,
+            pirate_start,
+        };
+        board.terrain[..nt].copy_from_slice(terrain);
+        board.numbers[..nt].copy_from_slice(numbers);
+        board.harbors[..nh].copy_from_slice(harbors);
+        Ok(board)
+    }
+
     #[inline]
     pub fn topo(&self) -> &'static Topology {
         self.layout.topology()
@@ -681,11 +1105,11 @@ impl Board {
         debug_assert_eq!(terrain.produces(), number != 0);
         self.terrain[t] = terrain;
         self.numbers[t] = number;
-        if number != 0 {
-            let slot = self.tiles_by_number[number as usize]
+        if number != 0
+            && let Some(slot) = self.tiles_by_number[number as usize]
                 .iter_mut()
                 .find(|s| **s == NONE)
-                .expect("number pool fits MAX_TILES_PER_NUMBER");
+        {
             *slot = tile;
         }
         if terrain == Terrain::Sea {
@@ -786,5 +1210,191 @@ mod tests {
             Board::from_layout(b.layout, b.tiles(), &b.numbers[..19], b.harbor_kinds()),
             Ok(b)
         );
+    }
+
+    #[test]
+    fn custom_map_round_trips_and_matches_generated_boards() {
+        let mut rng = Rng::new(2026);
+        for layout in [
+            BoardLayout::Base,
+            BoardLayout::Extended,
+            BoardLayout::Archipelago,
+            BoardLayout::FogIslands,
+            BoardLayout::ArchipelagoExtended,
+            BoardLayout::FogIslandsExtended,
+        ] {
+            for _ in 0..8 {
+                let b = Board::generate(&mut rng, layout, true);
+                let cm = CustomMap::from_board(&b);
+                let code = cm.encode();
+                let decoded = CustomMap::decode(&format!("  {} \n", code.to_ascii_lowercase()))
+                    .expect("valid code");
+                assert_eq!(decoded, cm);
+                assert_eq!(decoded.encode(), code);
+                let rebuilt = Board::from_custom(&decoded).expect("valid custom board");
+                assert_eq!(rebuilt, b, "layout {layout:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn custom_map_validation_errors_and_island_components() {
+        // Codec errors.
+        assert_eq!(CustomMap::decode(""), Err(BoardError::BadCustomCode));
+        assert_eq!(
+            CustomMap::decode("IM2:B:L2:3"),
+            Err(BoardError::BadCustomCode)
+        );
+        assert_eq!(
+            CustomMap::decode("IM1:Q:L2:3"),
+            Err(BoardError::BadCustomCode)
+        );
+        assert_eq!(
+            CustomMap::decode("IM1:B:D0:333333333"),
+            Err(BoardError::BadCustomCode)
+        );
+
+        let base = CustomMap::from_board(&Board::generate(
+            &mut Rng::new(7),
+            BoardLayout::Base,
+            false,
+        ));
+        let base_code = base.encode();
+        assert_eq!(
+            CustomMap::decode(&format!("{base_code}:extra")),
+            Err(BoardError::BadCustomCode)
+        );
+
+        // MissingDesert.
+        let mut no_desert = base;
+        for t in 0..19 {
+            if no_desert.terrain[t] == Terrain::Desert {
+                no_desert.terrain[t] = Terrain::Forest;
+                no_desert.numbers[t] = 6;
+            }
+        }
+        assert_eq!(
+            Board::from_custom(&no_desert),
+            Err(BoardError::MissingDesert)
+        );
+
+        // UnexpectedSea / UnexpectedFog on Base.
+        let mut sea_on_base = base;
+        sea_on_base.terrain[0] = Terrain::Sea;
+        sea_on_base.numbers[0] = 0;
+        assert_eq!(
+            Board::from_custom(&sea_on_base),
+            Err(BoardError::UnexpectedSea)
+        );
+        let mut fog_on_base = base;
+        fog_on_base.terrain[0] = Terrain::Fog;
+        fog_on_base.numbers[0] = 0;
+        assert_eq!(
+            Board::from_custom(&fog_on_base),
+            Err(BoardError::UnexpectedFog)
+        );
+
+        // 12 tiles sharing one number is allowed; 13 is rejected.
+        let mut twelve_sixes = base;
+        for t in 0..19 {
+            if t == 0 {
+                twelve_sixes.terrain[t] = Terrain::Desert;
+                twelve_sixes.numbers[t] = 0;
+            } else {
+                twelve_sixes.terrain[t] = Terrain::Gold;
+                twelve_sixes.numbers[t] = if t <= 12 { 6 } else { 8 };
+            }
+        }
+        assert!(Board::from_custom(&twelve_sixes).is_ok());
+        let mut thirteen_sixes = twelve_sixes;
+        thirteen_sixes.numbers[13] = 6;
+        assert_eq!(
+            Board::from_custom(&thirteen_sixes),
+            Err(BoardError::InvalidNumber)
+        );
+
+        // MissingSea on Archipelago.
+        let arch = CustomMap::from_board(&Board::generate(
+            &mut Rng::new(9),
+            BoardLayout::Archipelago,
+            false,
+        ));
+        let mut no_sea = arch;
+        for t in 0..33 {
+            if no_sea.terrain[t] == Terrain::Sea {
+                no_sea.terrain[t] = Terrain::Desert;
+                no_sea.numbers[t] = 0;
+            }
+        }
+        assert_eq!(Board::from_custom(&no_sea), Err(BoardError::MissingSea));
+
+        // FogTouchesLand and TooMuchFog on FogIslands / FogIslandsExtended.
+        let fog = CustomMap::from_board(&Board::generate(
+            &mut Rng::new(11),
+            BoardLayout::FogIslands,
+            false,
+        ));
+        let mut touches = fog;
+        // Tile 3 on FOG_ISLANDS is the sea channel separating home land from fog.
+        touches.terrain[3] = Terrain::Fog;
+        touches.numbers[3] = 0;
+        assert_eq!(
+            Board::from_custom(&touches),
+            Err(BoardError::FogTouchesLand)
+        );
+
+        let fog_ext = CustomMap::from_board(&Board::generate(
+            &mut Rng::new(12),
+            BoardLayout::FogIslandsExtended,
+            false,
+        ));
+        let mut too_much_fog = fog_ext;
+        let mut made_fog = 0;
+        for t in 0..46 {
+            if t == 0 {
+                too_much_fog.terrain[t] = Terrain::Desert;
+                too_much_fog.numbers[t] = 0;
+            } else if t == 1 {
+                too_much_fog.terrain[t] = Terrain::Sea;
+                too_much_fog.numbers[t] = 0;
+            } else if made_fog < 25 {
+                too_much_fog.terrain[t] = Terrain::Fog;
+                too_much_fog.numbers[t] = 0;
+                made_fog += 1;
+            }
+        }
+        assert_eq!(
+            Board::from_custom(&too_much_fog),
+            Err(BoardError::TooMuchFog)
+        );
+
+        // TooLittleLand: Archipelago with only 2 land tiles (< 29 setup vertices).
+        let mut tiny = arch;
+        for t in 0..33 {
+            tiny.terrain[t] = if t == 0 {
+                Terrain::Desert
+            } else if t == 1 {
+                Terrain::Forest
+            } else {
+                Terrain::Sea
+            };
+            tiny.numbers[t] = if t == 1 { 8 } else { 0 };
+        }
+        assert_eq!(Board::from_custom(&tiny), Err(BoardError::TooLittleLand));
+
+        // Small scattered islands on Archipelago: island 1 < 29 vertices, but
+        // total land_vertices >= 29 -> setup_vertices falls back to land_vertices.
+        let mut scattered = arch;
+        // Split home island by turning middle row into Sea while keeping east islands.
+        for t in [13, 14, 15] {
+            scattered.terrain[t] = Terrain::Sea;
+            scattered.numbers[t] = 0;
+        }
+        // Ensure at least one desert remains on top half.
+        scattered.terrain[0] = Terrain::Desert;
+        scattered.numbers[0] = 0;
+        let sb = Board::from_custom(&scattered).expect("scattered archipelago valid");
+        assert!(sb.island_count() >= 4);
+        assert_eq!(sb.setup_vertices, sb.land_vertices);
     }
 }

@@ -422,3 +422,141 @@ fn citadels_and_extended_seafaring_and_variants_cross_check() {
         );
     }
 }
+
+#[test]
+fn custom_maps_self_play_preserve_invariants_across_all_scenarios() {
+    fn assert_copy<T: Copy>() {}
+    assert_copy::<GameState>();
+    assert_copy::<isle_core::Board>();
+    assert_copy::<GameConfig>();
+    assert_copy::<isle_core::CustomMap>();
+
+    // 1. Custom Classic (Gold-rich board with 10 tiles sharing token 8).
+    let mut cm_classic = isle_core::CustomMap::from_board(&isle_core::Board::generate(
+        &mut Rng::new(101),
+        isle_core::BoardLayout::Base,
+        true,
+    ));
+    cm_classic.terrain[0] = isle_core::Terrain::Desert;
+    cm_classic.numbers[0] = 0;
+    for t in 1..11 {
+        cm_classic.terrain[t] = if t % 2 == 0 {
+            isle_core::Terrain::Gold
+        } else {
+            isle_core::Terrain::Forest
+        };
+        cm_classic.numbers[t] = 8;
+    }
+    for seed in 0..6 {
+        play_config(
+            GameConfig {
+                custom_map: Some(cm_classic),
+                ..GameConfig::scenario(Scenario::Classic, 4)
+            },
+            5000 + seed,
+            true,
+        );
+    }
+
+    // 2. Custom Archipelago with split home island (setup_vertices = land_vertices).
+    let mut cm_arch = isle_core::CustomMap::from_board(&isle_core::Board::generate(
+        &mut Rng::new(202),
+        isle_core::BoardLayout::Archipelago,
+        true,
+    ));
+    for t in [13, 14, 15] {
+        cm_arch.terrain[t] = isle_core::Terrain::Sea;
+        cm_arch.numbers[t] = 0;
+    }
+    cm_arch.terrain[0] = isle_core::Terrain::Desert;
+    cm_arch.numbers[0] = 0;
+    for seed in 0..6 {
+        play_config(
+            GameConfig {
+                custom_map: Some(cm_arch),
+                friendly_robber: seed % 2 == 0,
+                ..GameConfig::scenario(Scenario::Archipelago, 4)
+            },
+            6000 + seed,
+            true,
+        );
+    }
+
+    // 3. Custom Extended FogIslands with >18 fog tiles (cycling fog pools up to 20).
+    let mut cm_fog = isle_core::CustomMap::from_board(&isle_core::Board::generate(
+        &mut Rng::new(303),
+        isle_core::BoardLayout::FogIslandsExtended,
+        true,
+    ));
+    // Widen the channel on the top two rows so sea tile 3 + pirate start 23 can become fog.
+    for t in [2, 9] {
+        if cm_fog.terrain[t] != isle_core::Terrain::Desert {
+            cm_fog.terrain[t] = isle_core::Terrain::Sea;
+            cm_fog.numbers[t] = 0;
+        }
+    }
+    let topo = isle_core::BoardLayout::FogIslandsExtended.topology();
+    let mut land_verts = isle_core::BitSet::EMPTY;
+    for t in 0..topo.num_tiles {
+        if cm_fog.terrain[t].is_land() {
+            land_verts |= topo.tile_vertex_mask[t];
+        }
+    }
+    let mut extra = 0;
+    for t in 0..topo.num_tiles {
+        if cm_fog.terrain[t] == isle_core::Terrain::Sea
+            && (topo.tile_vertex_mask[t] & land_verts).is_empty()
+            && extra < 3
+        {
+            cm_fog.terrain[t] = isle_core::Terrain::Fog;
+            cm_fog.numbers[t] = 0;
+            extra += 1;
+        }
+    }
+    let fog_total = cm_fog.terrain[..topo.num_tiles]
+        .iter()
+        .filter(|&&t| t == isle_core::Terrain::Fog)
+        .count();
+    assert!(fog_total >= 20, "expected >=20 fog tiles, got {fog_total}");
+    for seed in 0..6 {
+        play_config(
+            GameConfig {
+                custom_map: Some(cm_fog),
+                paired_turns: seed % 2 == 0,
+                ..GameConfig::scenario(Scenario::FogIslands, 5)
+            },
+            7000 + seed,
+            true,
+        );
+    }
+
+    // 4. Custom Citadels (commodity-heavy board).
+    let mut cm_cit = isle_core::CustomMap::from_board(&isle_core::Board::generate(
+        &mut Rng::new(404),
+        isle_core::BoardLayout::Base,
+        true,
+    ));
+    cm_cit.terrain[0] = isle_core::Terrain::Desert;
+    cm_cit.numbers[0] = 0;
+    let cycle = [
+        isle_core::Terrain::Forest,
+        isle_core::Terrain::Pasture,
+        isle_core::Terrain::Mountains,
+        isle_core::Terrain::Fields,
+        isle_core::Terrain::Hills,
+    ];
+    for t in 1..19 {
+        cm_cit.terrain[t] = cycle[t % cycle.len()];
+        cm_cit.numbers[t] = [4, 5, 6, 8, 9, 10][t % 6];
+    }
+    for seed in 0..6 {
+        play_config(
+            GameConfig {
+                custom_map: Some(cm_cit),
+                ..GameConfig::scenario(Scenario::Citadels, 4)
+            },
+            8000 + seed,
+            true,
+        );
+    }
+}

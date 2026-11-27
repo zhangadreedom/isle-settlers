@@ -2,13 +2,33 @@
 // (rejoining with the seat token kept in localStorage) and message fan-out.
 
 import { createSignal } from 'solid-js';
-import type { BotLevel, ChatLine, ClientMsg, HouseRules, RoomInfo, Scenario, ServerMsg, Snapshot, Update } from '../generated/proto';
+import type {
+  BotLevel,
+  ChatLine,
+  ClientMsg,
+  HouseRules,
+  PublicRoomSummary,
+  RoomInfo,
+  Scenario,
+  ServerMsg,
+  Snapshot,
+  Update,
+} from '../generated/proto';
 import { forgetSession, sessionToken } from './account';
 
 export type ConnStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
 
 export type Hello =
-  | { type: 'Create'; players: number; bots: BotLevel; name: string; ranked: boolean; scenario: Scenario; rules: HouseRules }
+  | {
+      type: 'Create';
+      players: number;
+      bots: BotLevel;
+      name: string;
+      ranked: boolean;
+      scenario: Scenario;
+      rules: HouseRules;
+      isPublic?: boolean;
+    }
   | { type: 'Join'; room: string; name: string };
 
 export const NAME_KEY = 'isle:name';
@@ -34,8 +54,19 @@ export function savedToken(room: string): string | null {
 function saveToken(room: string, token: string | null) {
   try {
     if (token) storage()?.setItem(seatKey(room), token);
+    else storage()?.removeItem(seatKey(room));
   } catch {
     // Private mode or blocked storage: reconnects still work within this tab.
+  }
+}
+
+/** Fetches currently open / active public rooms from `/api/rooms`. */
+export async function fetchPublicRooms(): Promise<PublicRoomSummary[]> {
+  try {
+    const res = await fetch('/api/rooms');
+    return res.ok ? ((await res.json()) as PublicRoomSummary[]) : [];
+  } catch {
+    return [];
   }
 }
 
@@ -108,6 +139,7 @@ export function createConnection(hello: Hello) {
                 scenario: hello.scenario,
                 rules: hello.rules,
                 session,
+                is_public: hello.isPublic ?? false,
               },
             }
           : null;
@@ -139,6 +171,7 @@ export function createConnection(hello: Hello) {
         setStatus('open');
         break;
       case 'Room':
+        if (!msg.value.started) setSnapshot(null);
         setRoom(msg.value);
         break;
       case 'Snapshot':

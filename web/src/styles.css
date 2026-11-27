@@ -1645,3 +1645,178 @@ details.house-rules[open] summary {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- v0.3: lobby header, public rooms, room chat, tile tooltip ---------- */
+
+.lobby-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lobby-head h1 {
+  margin: 0;
+}
+
+.lobby-tools {
+  gap: 4px;
+}
+
+.public-rooms {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.public-rooms-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.empty-rooms {
+  margin: 2px 0;
+}
+
+.room-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.room-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.room-item-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.seat-ops {
+  gap: 4px;
+  margin-left: auto;
+}
+
+.danger-text {
+  color: var(--danger);
+}
+
+.room-notice {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(240, 180, 41, 0.16);
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.room-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.room-chat-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 8px;
+  max-height: 110px;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.room-chat-form {
+  padding: 0;
+}
+
+.unread-badge {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  min-width: 16px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #10212b;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.tile-tooltip {
+  position: fixed;
+  z-index: 18;
+  pointer-events: none;
+  padding: 6px 10px;
+  border-radius: 9px;
+  background: rgba(12, 26, 36, 0.92);
+  border: 1px solid var(--panel-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 130px;
+}
+
+.tile-tooltip-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tile-num {
+  margin-left: auto;
+  font-weight: 700;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.tile-num.hot {
+  background: rgba(217, 72, 65, 0.3);
+  color: #ffb3ae;
+}
+
+.tile-tooltip-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile-tooltip-warn {
+  color: #ff9c96;
+  font-size: 11px;
+  font-weight: 600;
+}
+

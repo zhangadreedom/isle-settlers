@@ -10,12 +10,12 @@ use std::time::Duration;
 use isle_ai::{Bot, bot_by_name};
 use isle_core::{Action, Event, GameConfig, GameState, Phase, Scenario, TradeResponse};
 use isle_proto::net::{
-    BotLevel, ChatLine, ClientMsg, HouseRules, LegalActions, RoomInfo, SeatView, ServerMsg,
-    Snapshot, Update, clean_chat, clean_name,
+    BotLevel, ChatLine, ClientMsg, HouseRules, LegalActions, PublicRoomSummary, RoomInfo, SeatView,
+    ServerMsg, Snapshot, Update, clean_chat, clean_name,
 };
 use isle_proto::ranking::RatingChange;
 use isle_proto::{ReplayPlayer, ReplayRecord, board_info, player_view};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep_until};
 
 use crate::auth::Accounts;
@@ -35,6 +35,7 @@ pub struct RoomOptions {
     pub ranked: bool,
     pub scenario: Scenario,
     pub rules: HouseRules,
+    pub is_public: bool,
 }
 
 fn build_game_config(scenario: Scenario, players: u8, rules: HouseRules) -> GameConfig {
@@ -44,6 +45,7 @@ fn build_game_config(scenario: Scenario, players: u8, rules: HouseRules) -> Game
     }
     config.friendly_robber = rules.friendly_robber;
     config.paired_turns = rules.paired_turns;
+    config.custom_map = rules.custom_map;
     config
 }
 
@@ -186,8 +188,10 @@ pub struct Room {
     accounts: Option<Arc<Accounts>>,
     /// The game counts for ratings (with two or more signed-in players).
     ranked: bool,
+    is_public: bool,
     scenario: Scenario,
     rules: HouseRules,
+    summary_tx: watch::Sender<Option<PublicRoomSummary>>,
     /// Rating changes of the finished ranked game.
     rating: Vec<RatingChange>,
     /// When to (re)read or compute the ratings of a finished ranked game.
@@ -222,6 +226,7 @@ impl Room {
             ranked,
             scenario,
             mut rules,
+            is_public,
         } = options;
         if rules.turn_timer_secs == 0 && registry.config().default_turn_timer_secs > 0 {
             rules.turn_timer_secs = registry.config().default_turn_timer_secs;
@@ -241,6 +246,7 @@ impl Room {
             token: token.clone(),
             account,
         };
+        let (summary_tx, _) = watch::channel(None);
         let room = Room {
             id,
             config: registry.config().clone(),
@@ -249,8 +255,10 @@ impl Room {
             replay_id: None,
             accounts: registry.accounts().cloned(),
             ranked,
+            is_public,
             scenario,
             rules,
+            summary_tx,
             rating: Vec::new(),
             rate_due: None,
             seed: ids::seed(),
@@ -266,6 +274,7 @@ impl Room {
             save_due: Some(now),
             idle_since: Some(now),
         };
+        room.refresh_summary();
         (room, token)
     }
 
@@ -318,6 +327,7 @@ impl Room {
         } else {
             None
         };
+        let (summary_tx, _) = watch::channel(None);
         let mut room = Room {
             id: record.id,
             config: registry.config().clone(),
@@ -326,8 +336,10 @@ impl Room {
             replay_id: record.replay,
             accounts: registry.accounts().cloned(),
             ranked: record.ranked,
+            is_public: record.is_public,
             scenario: record.scenario,
             rules: record.rules,
+            summary_tx,
             rating: Vec::new(),
             rate_due: None,
             seed: record.seed,
@@ -344,6 +356,7 @@ impl Room {
             idle_since: Some(now),
         };
         room.archive_if_finished();
+        room.refresh_summary();
         // A finished ranked game: read back (or, after a crash, compute)
         // its rating changes.
         if room.ranked && room.replay_id.is_some() {
@@ -804,12 +817,164 @@ impl Room {
                 if self.game.is_some() {
                     return Err("AlreadyStarted".into());
                 }
-                if !rules.is_valid() {
+                if !rules.is_valid_for(self.scenario, self.seats.len() as u8) {
                     return Err("BadMessage".into());
                 }
                 self.rules = rules;
                 self.mark_dirty(now);
                 self.broadcast_room(now);
+                Ok(())
+            }
+
+            ClientMsg::SetPublic { is_public } => {
+                if seat != Some(self.host) {
+                    return Err("NotHost".into());
+                }
+                self.is_public = is_public;
+                self.mark_dirty(now);
+                self.broadcast_room(now);
+                Ok(())
+            }
+
+            ClientMsg::KickSeat { seat: target } => {
+                if seat != Some(self.host) {
+                    return Err("NotHost".into());
+                }
+                if self.game.is_some() {
+                    return Err("AlreadyStarted".into());
+                }
+                let t = target as usize;
+                if t >= self.seats.len()
+                    || target == self.host
+                    || !matches!(self.seats[t].kind, SeatKind::Human { .. })
+                {
+                    return Err("InvalidSeat".into());
+                }
+                self.seats[t].kind = SeatKind::Open;
+                self.seats[t].connections = 0;
+                self.seats[t].disconnected_at = None;
+                let mut kicked_conns = Vec::new();
+                for (&cid, c) in &mut self.conns {
+                    if c.seat == Some(target) {
+                        c.seat = None;
+                        kicked_conns.push(cid);
+                    }
+                }
+                let joined_msg = ServerMsg::Joined {
+                    room: self.id.clone(),
+                    seat: None,
+                    token: None,
+                };
+                let err_msg = ServerMsg::Error {
+                    code: "Kicked".into(),
+                };
+                for cid in kicked_conns {
+                    self.send(cid, &joined_msg);
+                    self.send(cid, &err_msg);
+                }
+                self.mark_dirty(now);
+                self.broadcast_room(now);
+                Ok(())
+            }
+
+            ClientMsg::SwapSeats { a, b } => {
+                if seat != Some(self.host) {
+                    return Err("NotHost".into());
+                }
+                if self.game.is_some() {
+                    return Err("AlreadyStarted".into());
+                }
+                let (ia, ib) = (a as usize, b as usize);
+                if ia >= self.seats.len() || ib >= self.seats.len() || a == b {
+                    return Err("InvalidSeat".into());
+                }
+                self.seats.swap(ia, ib);
+                self.autopilot_shown.swap(ia, ib);
+                if self.host == a {
+                    self.host = b;
+                } else if self.host == b {
+                    self.host = a;
+                }
+                let mut swapped = Vec::new();
+                for (&cid, c) in &mut self.conns {
+                    if c.seat == Some(a) {
+                        c.seat = Some(b);
+                        swapped.push((cid, b));
+                    } else if c.seat == Some(b) {
+                        c.seat = Some(a);
+                        swapped.push((cid, a));
+                    }
+                }
+                for (cid, new_seat) in swapped {
+                    if let SeatKind::Human { token, .. } = &self.seats[new_seat as usize].kind {
+                        let msg = ServerMsg::Joined {
+                            room: self.id.clone(),
+                            seat: Some(new_seat),
+                            token: Some(token.clone()),
+                        };
+                        self.send(cid, &msg);
+                    }
+                }
+                self.mark_dirty(now);
+                self.broadcast_room(now);
+                Ok(())
+            }
+
+            ClientMsg::Rematch { immediate } => {
+                if seat != Some(self.host) {
+                    return Err("NotHost".into());
+                }
+                let Some(game) = &self.game else {
+                    return Err("NotStarted".into());
+                };
+                if game.state.phase != Phase::GameOver {
+                    return Err("NotFinished".into());
+                }
+                self.seed = ids::seed();
+                self.replay_id = None;
+                self.rating.clear();
+                self.rate_due = None;
+                self.bot_due = None;
+                self.turn_deadline = None;
+                self.autopilot_shown = vec![false; self.seats.len()];
+                for s in &mut self.seats {
+                    match &s.kind {
+                        SeatKind::Human { .. } if s.connections == 0 => {
+                            s.kind = SeatKind::Open;
+                            s.disconnected_at = None;
+                        }
+                        SeatKind::Bot(_) if !immediate => {
+                            s.kind = SeatKind::Open;
+                        }
+                        _ => {}
+                    }
+                }
+                if immediate {
+                    for s in &mut self.seats {
+                        if matches!(s.kind, SeatKind::Open) {
+                            s.kind = SeatKind::Bot(self.bot_level);
+                        }
+                    }
+                    let config =
+                        build_game_config(self.scenario, self.seats.len() as u8, self.rules);
+                    let state = GameState::new(config, self.seed).map_err(|e| format!("{e:?}"))?;
+                    self.game = Some(Game::new(state, &self.seats, self.seed, &self.config));
+                    self.refresh_turn_deadline(now);
+                    tracing::info!(room = %self.id, "rematch started immediately");
+                    self.mark_dirty(now);
+                    self.broadcast_room(now);
+                    let ids: Vec<ConnId> = self.conns.keys().copied().collect();
+                    for c in ids {
+                        let snapshot = self.snapshot(self.conns[&c].seat, now);
+                        self.send(c, &snapshot);
+                    }
+                    self.reschedule(now);
+                } else {
+                    self.game = None;
+                    tracing::info!(room = %self.id, "rematch returned to lobby");
+                    self.mark_dirty(now);
+                    self.broadcast_room(now);
+                }
                 Ok(())
             }
 
@@ -1063,7 +1228,49 @@ impl Room {
             rating: self.rating.clone(),
             scenario: self.scenario,
             rules: self.rules,
+            is_public: self.is_public,
         }
+    }
+
+    pub(crate) fn subscribe_summary(&self) -> watch::Receiver<Option<PublicRoomSummary>> {
+        self.summary_tx.subscribe()
+    }
+
+    fn public_summary(&self) -> Option<PublicRoomSummary> {
+        if !self.is_public
+            || self.replay_id.is_some()
+            || self
+                .game
+                .as_ref()
+                .is_some_and(|g| g.state.phase == Phase::GameOver)
+        {
+            return None;
+        }
+        let host_name = match self.seats.get(self.host as usize).map(|s| &s.kind) {
+            Some(SeatKind::Human { name, .. }) => name.clone(),
+            _ => String::new(),
+        };
+        let humans = self
+            .seats
+            .iter()
+            .filter(|s| matches!(s.kind, SeatKind::Human { .. }))
+            .count() as u8;
+        let spectators = self.conns.values().filter(|c| c.seat.is_none()).count() as u32;
+        Some(PublicRoomSummary {
+            id: self.id.clone(),
+            host_name,
+            scenario: self.scenario,
+            humans,
+            max_players: self.seats.len() as u8,
+            spectators,
+            ranked: self.ranked,
+            started: self.game.is_some(),
+            has_custom_map: self.rules.custom_map.is_some(),
+        })
+    }
+
+    fn refresh_summary(&self) {
+        let _ = self.summary_tx.send(self.public_summary());
     }
 
     fn legal_for(&self, viewer: Option<u8>) -> LegalActions {
@@ -1114,6 +1321,7 @@ impl Room {
     }
 
     fn broadcast_room(&mut self, now: Instant) {
+        self.refresh_summary();
         let targets: Vec<(ConnId, Option<u8>)> =
             self.conns.iter().map(|(id, c)| (*id, c.seat)).collect();
         for (conn, seat) in targets {
@@ -1182,6 +1390,7 @@ impl Room {
             ranked: self.ranked,
             scenario: self.scenario,
             rules: self.rules,
+            is_public: self.is_public,
         }
     }
 

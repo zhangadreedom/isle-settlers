@@ -1,10 +1,11 @@
-import { createSignal, For, Show } from 'solid-js';
+import { createSignal, For, onCleanup, Show } from 'solid-js';
 import { PLAYER_CSS } from '../board/palette';
-import type { BotLevel, SeatView } from '../generated/proto';
+import type { BotLevel, ChatLine, SeatView } from '../generated/proto';
 import { errorText } from '../game/text';
 import { account, accountsEnabled } from '../net/account';
 import { inviteLink, savedName, saveName, type Connection } from '../net/connection';
 import { AccountPanel, Verified } from './Account';
+import { SoundToggle } from './Hud';
 import { TierBadge } from './Ranking';
 
 /** Name prompt shown when opening an invite link for the first time. */
@@ -78,10 +79,31 @@ function seatLabel(s: SeatView): string {
 }
 
 /** Waiting room before the game starts. */
-export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
+export function RoomLobby(props: {
+  conn: Connection;
+  onLeave: () => void;
+  onOpenRules: () => void;
+  onOpenWorkshop: () => void;
+}) {
   const c = props.conn;
   const [copied, setCopied] = createSignal(false);
+  const [swapFrom, setSwapFrom] = createSignal<number | null>(null);
+  const [chatLines, setChatLines] = createSignal<ChatLine[]>([]);
+  const [chatText, setChatText] = createSignal('');
+  const [roomToast, setRoomToast] = createSignal<string | null>(null);
   const isHost = () => c.room() !== null && c.seat() === c.room()!.host;
+
+  onCleanup(
+    c.onChat((line) => {
+      setChatLines((old) => [...old, line].slice(-40));
+    }),
+  );
+  onCleanup(
+    c.onError((code) => {
+      setRoomToast(errorText(code));
+      window.setTimeout(() => setRoomToast(null), 2400);
+    }),
+  );
 
   const copy = async () => {
     const link = inviteLink(c.roomId() ?? '');
@@ -113,9 +135,25 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
         >
           {(room) => (
             <>
-              <h1>
-                房间 <code class="seed big">{room().id}</code>
-              </h1>
+              <div class="lobby-head">
+                <h1>
+                  房间 <code class="seed big">{room().id}</code>
+                </h1>
+                <div class="row lobby-tools">
+                  <Show when={isHost()}>
+                    <button class="ghost small" onClick={props.onOpenWorkshop}>
+                      地图工坊
+                    </button>
+                  </Show>
+                  <button class="ghost small" onClick={props.onOpenRules}>
+                    规则
+                  </button>
+                  <SoundToggle class="ghost small" />
+                </div>
+              </div>
+              <Show when={roomToast()}>
+                {(msg) => <p class="room-notice">{msg()}</p>}
+              </Show>
               <div class="invite">
                 <input readOnly value={inviteLink(room().id)} aria-label="邀请链接" onFocus={(e) => e.currentTarget.select()} />
                 <button class="primary" onClick={copy}>
@@ -140,6 +178,25 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                       休闲
                     </button>
                   </div>
+                  <div class="seg small">
+                    <button
+                      classList={{ on: room().isPublic }}
+                      onClick={() => c.send({ type: 'SetPublic', value: { is_public: true } })}
+                      title="显示在大厅公开房间列表"
+                    >
+                      公开
+                    </button>
+                    <button
+                      classList={{ on: !room().isPublic }}
+                      onClick={() => c.send({ type: 'SetPublic', value: { is_public: false } })}
+                      title="仅凭房间码或邀请链接加入"
+                    >
+                      私密
+                    </button>
+                  </div>
+                </Show>
+                <Show when={!isHost()}>
+                  <span class="mode-tag">{room().isPublic ? '公开房' : '私密房'}</span>
                 </Show>
                 <span class="muted small">{room().ranked ? '至少两名登录玩家时计入排位分' : '不计排位分'}</span>
                 <Show when={room().scenario === 'Archipelago'}>
@@ -168,6 +225,17 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                 </Show>
                 <Show when={room().rules.turnTimerSecs > 0}>
                   <span class="mode-tag" title="超时自动代出一步">限时 {room().rules.turnTimerSecs}s</span>
+                </Show>
+                <Show when={room().rules.customMap}>
+                  <span class="mode-tag" title="本局使用 DIY 自定义地图">DIY 地图</span>
+                  <Show when={isHost()}>
+                    <button
+                      class="ghost small"
+                      onClick={() => c.send({ type: 'SetRules', value: { rules: { ...room().rules, customMap: null } } })}
+                    >
+                      恢复随机图
+                    </button>
+                  </Show>
                 </Show>
               </div>
 
@@ -274,6 +342,47 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                           </button>
                         </div>
                       </Show>
+                      <Show when={isHost()}>
+                        <div class="row seat-ops">
+                          <Show
+                            when={swapFrom() !== null}
+                            fallback={
+                              <button class="ghost small" onClick={() => setSwapFrom(i())} title="调整座位先后手顺序">
+                                换座
+                              </button>
+                            }
+                          >
+                            <Show
+                              when={swapFrom() === i()}
+                              fallback={
+                                <button
+                                  class="primary small"
+                                  onClick={() => {
+                                    const a = swapFrom()!;
+                                    setSwapFrom(null);
+                                    c.send({ type: 'SwapSeats', value: { a, b: i() } });
+                                  }}
+                                >
+                                  换到此座
+                                </button>
+                              }
+                            >
+                              <button class="ghost small" onClick={() => setSwapFrom(null)}>
+                                取消
+                              </button>
+                            </Show>
+                          </Show>
+                          <Show when={s.type === 'Human' && i() !== room().host}>
+                            <button
+                              class="ghost small danger-text"
+                              onClick={() => c.send({ type: 'KickSeat', value: { seat: i() } })}
+                              title="将该玩家移为观众并腾出座位"
+                            >
+                              踢出
+                            </button>
+                          </Show>
+                        </div>
+                      </Show>
                     </li>
                   )}
                 </For>
@@ -282,8 +391,43 @@ export function RoomLobby(props: { conn: Connection; onLeave: () => void }) {
                 <p class="muted small">{room().spectators} 名观众</p>
               </Show>
               <Show when={c.seat() === null}>
-                <p class="muted">座位已满，你将以观众身份观看。</p>
+                <p class="muted">你当前为观众身份。</p>
               </Show>
+
+              <div class="room-chat">
+                <Show when={chatLines().length > 0}>
+                  <ul class="room-chat-list">
+                    <For each={chatLines()}>
+                      {(line) => (
+                        <li>
+                          <b>{line.name}：</b>
+                          <span>{line.text}</span>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+                <form
+                  class="chat-form room-chat-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (chatText().trim()) {
+                      c.send({ type: 'Chat', value: { text: chatText() } });
+                      setChatText('');
+                    }
+                  }}
+                >
+                  <input
+                    class="grow"
+                    value={chatText()}
+                    maxLength={200}
+                    placeholder="房间准备聊天…"
+                    onInput={(e) => setChatText(e.currentTarget.value)}
+                    aria-label="房间聊天"
+                  />
+                  <button type="submit">发送</button>
+                </form>
+              </div>
 
               <div class="row lobby-actions">
                 <Show

@@ -31,6 +31,8 @@ pub struct RoomRecord {
     pub scenario: isle_core::Scenario,
     #[serde(default)]
     pub rules: HouseRules,
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 impl RoomRecord {

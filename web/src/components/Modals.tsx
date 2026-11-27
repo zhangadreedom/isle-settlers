@@ -16,7 +16,9 @@ import {
 } from '../game/text';
 import { CommIcon, Modal, ResIcon, SeatDot, SetView, Stepper } from './bits';
 import { EMBEDDED } from '../embed';
+import type { Connection } from '../net/connection';
 import { downloadReplay } from './Hud';
+import { PostGameStats } from './PostGameStats';
 
 const empty = (): ResourceSet => [0, 0, 0, 0, 0];
 const emptyComm = (): CommoditySet => [0, 0, 0];
@@ -451,21 +453,38 @@ export function GameOverModal(props: {
   onAgain?: () => void;
   onLobby: () => void;
   onWatchReplay?: (record: ReplayRecord, link: string | null) => void;
-  /** Online: the room, for the rating changes of a ranked game. */
+  /** Online: the room, for rating changes and same-room rematch. */
   room?: RoomInfo | null;
+  conn?: Connection | null;
 }) {
   const g = props.game;
+  const [statsRecord, setStatsRecord] = createSignal<ReplayRecord | null>(null);
+  const [showStats, setShowStats] = createSignal(true);
+  const isOnlineHost = () => !!props.conn && !!props.room && props.conn.seat() === props.room.host;
+
   // Your rating changed: show it in the lobby too.
   createEffect(() => {
     if (props.room?.rating.length) void refreshMyProfile();
   });
+
+  // Load the replay record once finished (or once the server finishes saving it) for post-game charts.
+  createEffect(() => {
+    const _replayId = props.room?.replay;
+    const load = g.exportReplay;
+    if (!load || statsRecord()) return;
+    void load().then((r) => {
+      if (r) setStatsRecord(r);
+    });
+    void _replayId;
+  });
+
   const ranking = () =>
     g
       .view()
       .players.map((p) => ({ seat: p.seat, points: g.view().finalPoints?.[p.seat] ?? p.publicVictoryPoints }))
       .sort((a, b) => b.points - a.points);
   return (
-    <Modal title={g.view().winner === g.me ? '你赢了！' : `${g.name(g.view().winner!)}获胜`}>
+    <Modal title={g.view().winner === g.me ? '你赢了！' : `${g.name(g.view().winner!)}获胜`} wide>
       <ol class="ranking">
         <For each={ranking()}>
           {(r) => (
@@ -482,36 +501,68 @@ export function GameOverModal(props: {
         {(load) => {
           const [busy, setBusy] = createSignal(false);
           const withRecord = async (use: (r: ReplayRecord) => void) => {
+            if (statsRecord()) {
+              use(statsRecord()!);
+              return;
+            }
             if (busy()) return;
             setBusy(true);
             try {
               const record = await load()();
-              if (record) use(record);
-              else g.showToast('回放还没准备好，请稍后再试');
+              if (record) {
+                setStatsRecord(record);
+                use(record);
+              } else g.showToast('回放还没准备好，请稍后再试');
             } finally {
               setBusy(false);
             }
           };
           return (
-            <div class="row replay-actions">
-              <Show when={props.onWatchReplay}>
-                {(watch) => (
-                  <button disabled={busy()} onClick={() => void withRecord((r) => watch()(r, g.replayLink?.() ?? null))}>
-                    观看回放
-                  </button>
-                )}
-              </Show>
-              <Show when={!EMBEDDED}>
-                <button disabled={busy()} onClick={() => void withRecord(downloadReplay)}>
-                  下载回放
+            <>
+              <div class="row replay-actions">
+                <button
+                  classList={{ on: showStats() }}
+                  disabled={busy()}
+                  onClick={() => {
+                    if (!statsRecord()) void withRecord(() => setShowStats(true));
+                    else setShowStats(!showStats());
+                  }}
+                >
+                  {showStats() ? '收起复盘' : '数据复盘'}
                 </button>
+                <Show when={props.onWatchReplay}>
+                  {(watch) => (
+                    <button disabled={busy()} onClick={() => void withRecord((r) => watch()(r, g.replayLink?.() ?? null))}>
+                      观看回放
+                    </button>
+                  )}
+                </Show>
+                <Show when={!EMBEDDED}>
+                  <button disabled={busy()} onClick={() => void withRecord(downloadReplay)}>
+                    下载回放
+                  </button>
+                </Show>
+              </div>
+              <Show when={showStats() && statsRecord()}>
+                {(rec) => <PostGameStats record={rec()} name={(s) => g.name(s)} />}
               </Show>
-            </div>
+            </>
           );
         }}
       </Show>
       <footer>
+        <Show when={props.conn && props.room && !isOnlineHost()}>
+          <span class="muted small">等待房主开启下一局…</span>
+        </Show>
         <button onClick={props.onLobby}>返回大厅</button>
+        <Show when={isOnlineHost()}>
+          <button onClick={() => props.conn!.send({ type: 'Rematch', value: { immediate: false } })}>
+            回房间调设置
+          </button>
+          <button class="primary" onClick={() => props.conn!.send({ type: 'Rematch', value: { immediate: true } })}>
+            再来一局
+          </button>
+        </Show>
         <Show when={props.onAgain}>
           {(again) => (
             <button class="primary" onClick={() => again()()}>

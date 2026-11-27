@@ -1,4 +1,5 @@
-import { createMemo, createSignal, For, Show } from 'solid-js';
+import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
+import { isMuted, onMuteChange, toggleMute } from '../audio/sound';
 import { Verified } from './Account';
 import type { BuildMode, Game } from '../game/controller';
 import { EMBEDDED } from '../embed';
@@ -15,7 +16,9 @@ import {
   DEV_NAME,
   RESOURCES,
   RESOURCE_CSS,
+  RESOURCE_NAME,
   RESOURCE_SHORT,
+  TERRAIN_NAME,
   TRACK_NAME,
 } from '../game/text';
 import type { DevCard } from '../generated/proto';
@@ -673,3 +676,80 @@ export function downloadReplay(record: import('../generated/proto').ReplayRecord
   a.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+/** Mute / unmute button synced with the procedural Web Audio synthesizer. */
+export function SoundToggle(props: { class?: string }) {
+  const [muted, setMutedState] = createSignal(isMuted());
+  onCleanup(onMuteChange(setMutedState));
+  return (
+    <button
+      type="button"
+      class={props.class ?? 'ghost'}
+      aria-pressed={!muted()}
+      aria-label={muted() ? '已静音，点击开启音效' : '音效开启，点击静音'}
+      title={muted() ? '点击开启桌游音效' : '点击静音'}
+      onClick={() => setMutedState(toggleMute())}
+    >
+      {muted() ? '静音' : '音效'}
+    </button>
+  );
+}
+
+const TERRAIN_RESOURCE: Partial<Record<import('../generated/proto').Terrain, import('../generated/proto').Resource>> = {
+  Hills: 'Brick',
+  Forest: 'Lumber',
+  Pasture: 'Wool',
+  Fields: 'Grain',
+  Mountains: 'Ore',
+};
+
+/** Floating 3D hex inspection tooltip showing terrain, roll pips and probability. */
+export function TileTooltip(props: { game: Game }) {
+  const hover = () => props.game.tileHover();
+  return (
+    <Show when={hover()}>
+      {(h) => {
+        const res = () => TERRAIN_RESOURCE[h().terrain];
+        const pct = () => ((h().pips / 36) * 100).toFixed(1);
+        const hot = () => h().number === 6 || h().number === 8;
+        return (
+          <div
+            class="tile-tooltip"
+            style={{
+              left: `${Math.min(innerWidth - 190, Math.max(12, h().clientX + 14))}px`,
+              top: `${Math.max(12, h().clientY - 46)}px`,
+            }}
+          >
+            <div class="tile-tooltip-head">
+              <b>{TERRAIN_NAME[h().terrain]}</b>
+              <Show when={res()}>{(r) => <span class="muted">产{RESOURCE_NAME[r()]}</span>}</Show>
+              <Show when={h().terrain === 'Gold'}>
+                <span class="muted">产任意资源</span>
+              </Show>
+              <Show when={h().number > 0}>
+                <span class="tile-num" classList={{ hot: hot() }}>
+                  {h().number} 点
+                </span>
+              </Show>
+            </div>
+            <Show when={h().pips > 0}>
+              <div class="tile-tooltip-sub muted">
+                <span>{'•'.repeat(h().pips)}</span>
+                <span>
+                  {h().pips}/36 · {pct()}%
+                </span>
+              </div>
+            </Show>
+            <Show when={h().hasRobber}>
+              <div class="tile-tooltip-warn">强盗封锁中（暂停产出）</div>
+            </Show>
+            <Show when={h().hasPirate}>
+              <div class="tile-tooltip-warn">海盗封锁海域（禁航）</div>
+            </Show>
+          </div>
+        );
+      }}
+    </Show>
+  );
+}
+

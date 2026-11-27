@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use tokio::sync::{mpsc, oneshot};
+use isle_proto::net::PublicRoomSummary;
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::ServerConfig;
 use crate::auth::Accounts;
@@ -13,12 +14,17 @@ use crate::store::{ReplayArchive, SeatAccount, Store};
 
 pub type RoomSender = mpsc::Sender<RoomCmd>;
 
+struct RoomEntry {
+    tx: RoomSender,
+    summary: watch::Receiver<Option<PublicRoomSummary>>,
+}
+
 pub struct Registry {
     config: ServerConfig,
     accounts: Option<Arc<Accounts>>,
     store: Option<Store>,
     replays: Arc<ReplayArchive>,
-    rooms: Mutex<HashMap<String, RoomSender>>,
+    rooms: Mutex<HashMap<String, RoomEntry>>,
     me: Weak<Registry>,
 }
 
@@ -74,6 +80,20 @@ impl Registry {
         self.rooms.lock().expect("registry lock").len()
     }
 
+    /// Active public rooms not yet finished, sorted with lobby (`!started`)
+    /// rooms first and in-progress games after.
+    pub fn public_rooms(&self) -> Vec<PublicRoomSummary> {
+        let mut list: Vec<PublicRoomSummary> = self
+            .rooms
+            .lock()
+            .expect("registry lock")
+            .values()
+            .filter_map(|entry| entry.summary.borrow().clone())
+            .collect();
+        list.sort_by(|a, b| a.started.cmp(&b.started).then_with(|| a.id.cmp(&b.id)));
+        list
+    }
+
     /// Creates a room and attaches the creator to seat 0.
     pub(crate) async fn create(
         &self,
@@ -83,7 +103,9 @@ impl Registry {
         out: Outbox,
     ) -> Result<(RoomSender, Attached), String> {
         let players = options.players;
-        if !(2..=options.scenario.max_players()).contains(&players) || !options.rules.is_valid() {
+        if !(2..=options.scenario.max_players()).contains(&players)
+            || !options.rules.is_valid_for(options.scenario, players)
+        {
             return Err("BadMessage".into());
         }
         let id = {
@@ -120,7 +142,7 @@ impl Registry {
             .lock()
             .expect("registry lock")
             .get(&id)
-            .cloned()
+            .map(|e| e.tx.clone())
             .ok_or("RoomNotFound")?;
         self.attach(tx, name, token, account, out).await
     }
@@ -154,7 +176,7 @@ impl Registry {
             .lock()
             .expect("registry lock")
             .values()
-            .cloned()
+            .map(|e| e.tx.clone())
             .collect();
         let mut waits = Vec::new();
         for tx in rooms {
@@ -178,10 +200,14 @@ impl Registry {
 
     fn spawn(&self, id: String, room: Room) -> RoomSender {
         let (tx, rx) = mpsc::channel(256);
-        self.rooms
-            .lock()
-            .expect("registry lock")
-            .insert(id.clone(), tx.clone());
+        let summary = room.subscribe_summary();
+        self.rooms.lock().expect("registry lock").insert(
+            id.clone(),
+            RoomEntry {
+                tx: tx.clone(),
+                summary,
+            },
+        );
         let me = self.me.clone();
         tokio::spawn(async move {
             room.run(rx).await;

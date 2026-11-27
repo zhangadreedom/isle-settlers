@@ -36,7 +36,7 @@ pub mod topology;
 
 pub use action::{Action, Event, EventSink, RuleError, TradeGood};
 pub use bitset::BitSet;
-pub use board::Board;
+pub use board::{Board, BoardError, CustomMap};
 pub use resources::{CityTrack, Commodity, CommoditySet, HarborKind, Resource, ResourceSet, Terrain};
 pub use rng::Rng;
 pub use state::{

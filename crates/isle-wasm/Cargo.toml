@@ -10,7 +10,7 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-isle-core.workspace = true
+isle-core = { workspace = true, features = ["serde"] }
 isle-ai.workspace = true
 isle-proto.workspace = true
 serde.workspace = true

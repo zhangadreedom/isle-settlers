@@ -2,9 +2,10 @@
 // online server) into Solid signals, log lines, highlights and animations.
 
 import { batch, createSignal } from 'solid-js';
-import type { BoardRenderer, BoardData, Highlights, PickKind } from '../board/BoardRenderer';
+import { playForEvents, playTimerTick, playYourTurn } from '../audio/sound';
+import type { BoardRenderer, BoardData, Highlights, PickKind, TileHover } from '../board/BoardRenderer';
 import { topology as topologyOf } from '../engine';
-import type { Action, BoardInfo, ChatLine, CommoditySet, Event, LegalActions, PlayerView, ResourceSet } from '../generated/proto';
+import type { Action, BoardInfo, ChatLine, CommoditySet, Event, LegalActions, PlayerView, ResourceSet, Terrain } from '../generated/proto';
 import type { GameSource, SourceState } from './source';
 import { RESOURCES, describe, errorText } from './text';
 
@@ -38,8 +39,20 @@ export interface Flight {
   resource: number;
 }
 
-const TERRAINS = ['Hills', 'Forest', 'Pasture', 'Fields', 'Mountains', 'Desert', 'Sea', 'Gold', 'Fog'];
+export interface TileHoverInfo {
+  tile: number;
+  clientX: number;
+  clientY: number;
+  terrain: Terrain;
+  number: number;
+  pips: number;
+  hasRobber: boolean;
+  hasPirate: boolean;
+}
+
+const TERRAINS: Terrain[] = ['Hills', 'Forest', 'Pasture', 'Fields', 'Mountains', 'Desert', 'Sea', 'Gold', 'Fog'];
 const PRODUCES = [0, 1, 2, 3, 4, -1, -1, -1, -1]; // terrain code -> resource index
+const PIPS = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
 
 export function boardData(info: BoardInfo): BoardData {
   return {
@@ -72,6 +85,10 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
   const [knightFrom, setKnightFrom] = createSignal<number | null>(null);
   /** Seafaring: a coastal edge that could take a road or a ship. */
   const [routeChoice, setRouteChoice] = createSignal<number | null>(null);
+  /** Hovered 3D hex tile metadata for tooltip inspection. */
+  const [tileHover, setTileHover] = createSignal<TileHoverInfo | null>(null);
+  /** Unread chat messages since log drawer was last viewed. */
+  const [unreadChat, setUnreadChat] = createSignal(0);
   /** Online turn timer: seconds remaining until autopilot acts. */
   const [turnSecondsLeft, setTurnSecondsLeft] = createSignal<number | null>(null);
   let deadlineAt: number | null = null;
@@ -81,7 +98,13 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
       return;
     }
     const secs = Math.max(0, Math.ceil((deadlineAt - performance.now()) / 1000));
-    if (secs !== turnSecondsLeft()) setTurnSecondsLeft(secs);
+    if (secs !== turnSecondsLeft()) {
+      setTurnSecondsLeft(secs);
+      const v = view();
+      if (secs > 0 && secs <= 10 && me() !== null && v?.toMove === me() && v.winner === null) {
+        playTimerTick(secs <= 5);
+      }
+    }
   }, 250);
 
   const seafaring =
@@ -102,6 +125,26 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
 
   renderer.setBoard(board, topology);
   renderer.onPick = onPick;
+  renderer.onHoverTile = (h: TileHover | null) => {
+    if (!h) {
+      if (tileHover() !== null) setTileHover(null);
+      return;
+    }
+    const tCode = board.terrain[h.tile];
+    const terrain = TERRAINS[tCode] ?? 'Desert';
+    const num = board.numbers[h.tile] ?? 0;
+    const v = view();
+    setTileHover({
+      tile: h.tile,
+      clientX: h.clientX,
+      clientY: h.clientY,
+      terrain,
+      number: num,
+      pips: PIPS[num] ?? 0,
+      hasRobber: v?.robber === h.tile && terrain !== 'Fog' && terrain !== 'Sea',
+      hasPirate: v?.pirate === h.tile,
+    });
+  };
 
   // ---- state sync ----
 
@@ -122,6 +165,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
 
   function onState(s: SourceState) {
     if (disposed) return;
+    const prev = view();
     if (s.turnRemainingMs !== undefined) {
       deadlineAt = s.turnRemainingMs !== null && s.view.winner === null ? performance.now() + s.turnRemainingMs : null;
       setTurnSecondsLeft(deadlineAt !== null ? Math.max(0, Math.ceil((deadlineAt - performance.now()) / 1000)) : null);
@@ -134,7 +178,18 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
       setLog([]);
       if (s.log?.length) handleEvents(s.log, s.view, false);
     } else {
-      handleEvents(s.events, view() ?? s.view, true);
+      handleEvents(s.events, prev ?? s.view, true);
+      playForEvents(s.events, me());
+      if (
+        !source.replay &&
+        me() !== null &&
+        prev !== null &&
+        prev.toMove !== me() &&
+        s.view.toMove === me() &&
+        s.view.winner === null
+      ) {
+        playYourTurn();
+      }
     }
     batch(() => {
       setView(s.view);
@@ -154,6 +209,8 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
         pirate: s.view.pirate,
         knights: s.view.citadels?.knights,
         metropolises: s.view.citadels?.metropolises,
+        barbarianPos: s.view.citadels?.barbarianPos ?? null,
+        barbarianSteps: s.view.citadels?.barbarianSteps,
       },
       !s.resync,
     );
@@ -362,6 +419,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
   function onChat(line: ChatLine) {
     const who = line.seat === me() && me() !== null ? '你' : line.name;
     setLog((old) => [...old, { id: ++logId, text: line.text, seat: line.seat, chat: { name: who } }].slice(-100));
+    if (line.seat !== me()) setUnreadChat((n) => n + 1);
   }
 
   function tilesAround(vertex: number): number[] {
@@ -409,6 +467,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     window.clearTimeout(toastTimer);
     window.clearInterval(countdownTimer);
     renderer.onPick = undefined;
+    renderer.onHoverTile = undefined;
     renderer.setHighlights(null);
     source.dispose();
   }
@@ -420,6 +479,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
   });
 
   return {
+    config: source.board.config,
     board,
     topology,
     get me() {
@@ -452,6 +512,9 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     knightFrom,
     routeChoice,
     clearRouteChoice: () => setRouteChoice(null),
+    tileHover,
+    unreadChat,
+    clearUnreadChat: () => setUnreadChat(0),
     name,
     has,
     act,

@@ -21,6 +21,8 @@ export type DevCard = "Knight" | "VictoryPoint" | "RoadBuilding" | "YearOfPlenty
 
 export type BoardLayout = "Base" | "Extended" | "Archipelago" | "FogIslands" | "ArchipelagoExtended" | "FogIslandsExtended";
 
+export type CustomMap = string;
+
 export type Scenario = "Classic" | "Archipelago" | "FogIslands" | "Citadels";
 
 export type GameConfig = { numPlayers: number, victoryPoints: number, 
@@ -39,7 +41,11 @@ friendlyRobber: boolean,
 /**
  * 5–6 players: use Paired Players turn instead of all-seat Special Build.
  */
-pairedTurns: boolean, };
+pairedTurns: boolean, 
+/**
+ * Optional custom map (`IM1:...`), overriding procedural board generation.
+ */
+customMap?: CustomMap | null, };
 
 export type Phase = { "type": "SetupSettlement" } | { "type": "SetupRoad", "value": { vertex: number, } } | { "type": "PreRoll" } | { "type": "Discard" } | { "type": "MoveRobber" } | { "type": "Gold", "value": { vertex: number | null, } } | { "type": "Main" } | { "type": "RoadBuilding", "value": { remaining: number, } } | { "type": "SpecialBuild", "value": { builder: number, } } | { "type": "PairedTurn", "value": { partner: number, } } | { "type": "GameOver" };
 
@@ -214,7 +220,13 @@ victoryPoints: number | null, friendlyRobber: boolean, pairedTurns: boolean,
 /**
  * Per-action turn timer in seconds (`0` = disabled, else `1..=300`).
  */
-turnTimerSecs: number, };
+turnTimerSecs: number, 
+/**
+ * Optional custom map (`IM1:...`), overriding procedural board generation.
+ */
+customMap?: CustomMap | null, };
+
+export type PublicRoomSummary = { id: string, hostName: string, scenario: Scenario, humans: number, maxPlayers: number, spectators: number, ranked: boolean, started: boolean, hasCustomMap: boolean, };
 
 export type RoomInfo = { id: string, 
 /**
@@ -237,7 +249,7 @@ ranked: boolean,
 /**
  * Rating changes once a ranked game is over and rated.
  */
-rating: Array<RatingChange>, scenario: Scenario, rules: HouseRules, };
+rating: Array<RatingChange>, scenario: Scenario, rules: HouseRules, isPublic: boolean, };
 
 export type LegalActions = { version: number, actions: Array<Action>, };
 
@@ -267,7 +279,11 @@ ranked: boolean,
 /**
  * Classic, a seafaring map or Citadels (2–6 seats); absent means classic.
  */
-scenario: Scenario, rules: HouseRules, session?: string | null, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, session?: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "SetRanked", "value": { ranked: boolean, } } | { "type": "SetRules", "value": { rules: HouseRules, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
+scenario: Scenario, rules: HouseRules, session?: string | null, 
+/**
+ * Whether this room is listed in the public lobby directory (`/api/rooms`).
+ */
+is_public?: boolean, } } | { "type": "Join", "value": { room: string, name: string, token: string | null, session?: string | null, } } | { "type": "Act", "value": { version: number, action: Action, } } | { "type": "SetSeat", "value": { seat: number, bot: BotLevel | null, } } | { "type": "SetRanked", "value": { ranked: boolean, } } | { "type": "SetRules", "value": { rules: HouseRules, } } | { "type": "SetPublic", "value": { is_public: boolean, } } | { "type": "KickSeat", "value": { seat: number, } } | { "type": "SwapSeats", "value": { a: number, b: number, } } | { "type": "Rematch", "value": { immediate: boolean, } } | { "type": "Start" } | { "type": "Chat", "value": { text: string, } };
 
 export type ServerMsg = { "type": "Joined", "value": { room: string, seat: number | null, token: string | null, } } | { "type": "Room", "value": RoomInfo } | { "type": "Snapshot", "value": Snapshot } | { "type": "Update", "value": Update } | { "type": "Chat", "value": ChatLine } | { "type": "Error", "value": { code: string, } };
 

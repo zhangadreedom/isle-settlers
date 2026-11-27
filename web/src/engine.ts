@@ -60,7 +60,7 @@ export class Match {
     scenario: Scenario = 'Classic',
     rules?: Partial<HouseRules>,
   ) {
-    this.inner = wasm.LocalMatch.withRules(
+    this.inner = wasm.LocalMatch.withRulesAndMap(
       players,
       seed >>> 0,
       humanSeat ?? -1,
@@ -69,6 +69,7 @@ export class Match {
       rules?.victoryPoints ?? 0,
       rules?.friendlyRobber ?? false,
       rules?.pairedTurns ?? false,
+      rules?.customMap ?? '',
     );
     this.board = call(() => this.inner.board());
   }
@@ -211,14 +212,14 @@ export class Replay {
     if (record.players.length !== c.numPlayers) throw new EngineError('BadReplayConfig');
     try {
       // Replays from before seafaring/variants default missing flags.
-      const scenario = c.scenario ?? 'Classic';
-      this.inner = new wasm.Replay(
-        c.numPlayers,
-        c.victoryPoints,
-        c.balancedBoard,
-        scenario,
-        c.friendlyRobber ?? false,
-        c.pairedTurns ?? false,
+      const normalized = {
+        ...c,
+        scenario: c.scenario ?? 'Classic',
+        friendlyRobber: c.friendlyRobber ?? false,
+        pairedTurns: c.pairedTurns ?? false,
+      };
+      this.inner = wasm.Replay.fromConfigJson(
+        JSON.stringify(normalized),
         record.seed,
         Uint8Array.from(record.actions),
       );
@@ -253,3 +254,8 @@ export class Replay {
 }
 
 export const runBenchmark = (games: number, seed: number) => wasm.runBenchmark(games, seed);
+
+/** Validates and previews an `IM1:...` custom map for `(players, scenario)`. */
+export function previewCustomMap(players: number, scenario: Scenario, code: string): BoardInfo {
+  return call(() => wasm.previewCustomMap(players, scenario, code));
+}

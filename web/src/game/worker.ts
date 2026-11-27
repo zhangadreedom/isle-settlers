@@ -45,7 +45,7 @@ function handle(r: WorkerRequest): MatchState {
   switch (r.op) {
     case 'create': {
       match?.free();
-      match = LocalMatch.withRules(
+      match = LocalMatch.withRulesAndMap(
         r.players,
         r.seed >>> 0,
         r.humanSeat ?? -1,
@@ -54,6 +54,7 @@ function handle(r: WorkerRequest): MatchState {
         r.rules?.victoryPoints ?? 0,
         r.rules?.friendlyRobber ?? false,
         r.rules?.pairedTurns ?? false,
+        r.rules?.customMap ?? '',
       );
       return { ...snapshot([]), board: JSON.parse(match.board()) };
     }

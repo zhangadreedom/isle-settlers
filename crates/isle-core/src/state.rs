@@ -1,7 +1,7 @@
 //! Game state and read-only queries.
 
 use crate::bitset::BitSet;
-use crate::board::Board;
+use crate::board::{Board, CustomMap};
 use crate::resources::{CityTrack, CommoditySet, ResourceSet, Terrain};
 use crate::rng::Rng;
 use crate::topology::*;
@@ -10,10 +10,10 @@ use crate::topology::*;
 pub const MAX_PLAYERS: usize = 6;
 /// Size of the largest development deck.
 pub const MAX_DEV_DECK: usize = 34;
-/// Unexplored tiles on the largest fog map.
-pub const MAX_FOG_TILES: usize = 18;
-/// Number tokens in the largest hidden fog stack.
-pub const MAX_FOG_NUMBERS: usize = 13;
+/// Unexplored tiles on the largest fog map (including custom maps).
+pub const MAX_FOG_TILES: usize = 24;
+/// Number tokens in the largest hidden fog stack (including custom maps).
+pub const MAX_FOG_NUMBERS: usize = 24;
 pub const MAX_ROADS: u8 = 15;
 /// Ships per player on seafaring maps.
 pub const MAX_SHIPS: u8 = 15;
@@ -157,6 +157,13 @@ pub struct GameConfig {
     /// 5–6 players: use Paired Players turn instead of all-seat Special Build.
     #[cfg_attr(feature = "serde", serde(default))]
     pub paired_turns: bool,
+    /// Optional custom map (`IM1:...`), overriding procedural board generation.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub custom_map: Option<CustomMap>,
 }
 
 impl GameConfig {
@@ -202,6 +209,7 @@ impl Default for GameConfig {
             scenario: Scenario::Classic,
             friendly_robber: false,
             paired_turns: false,
+            custom_map: None,
         }
     }
 }
@@ -427,10 +435,23 @@ pub struct GameState {
 }
 
 impl GameState {
-    /// New game with a random board derived from `seed`.
+    /// New game with a random board derived from `seed` (or `config.custom_map`).
     pub fn new(config: GameConfig, seed: u64) -> Result<GameState, ConfigError> {
+        if !(2..=config.scenario.max_players()).contains(&config.num_players) {
+            return Err(ConfigError::PlayerCount);
+        }
+        if config.victory_points < 3 || config.victory_points > 20 {
+            return Err(ConfigError::VictoryPoints);
+        }
         let mut rng = Rng::new(seed);
-        let board = Board::generate(&mut rng, config.layout(), config.balanced_board);
+        let board = if let Some(cm) = config.custom_map {
+            if cm.layout != config.layout() {
+                return Err(ConfigError::BoardLayout);
+            }
+            Board::from_custom(&cm).map_err(|_| ConfigError::BoardLayout)?
+        } else {
+            Board::generate(&mut rng, config.layout(), config.balanced_board)
+        };
         Self::with_board(config, board, rng.next_u64())
     }
 
@@ -467,14 +488,38 @@ impl GameState {
         let mut fog_numbers = [0u8; MAX_FOG_NUMBERS];
         let mut fog_numbers_len = 0u8;
         if layout.has_fog() {
-            let ft = layout.fog_terrain_pool();
-            fog_terrain[..ft.len()].copy_from_slice(ft);
-            fog_terrain_len = ft.len() as u8;
-            rng.shuffle(&mut fog_terrain[..ft.len()]);
-            let fn_src = layout.fog_number_pool();
-            fog_numbers[..fn_src.len()].copy_from_slice(fn_src);
-            fog_numbers_len = fn_src.len() as u8;
-            rng.shuffle(&mut fog_numbers[..fn_src.len()]);
+            if config.custom_map.is_some() {
+                let fog_count = board
+                    .tiles()
+                    .iter()
+                    .filter(|&&t| t == Terrain::Fog)
+                    .count();
+                let pool = layout.fog_terrain_pool();
+                for i in 0..fog_count {
+                    fog_terrain[i] = pool[i % pool.len()];
+                }
+                fog_terrain_len = fog_count as u8;
+                rng.shuffle(&mut fog_terrain[..fog_count]);
+                let prod = fog_terrain[..fog_count]
+                    .iter()
+                    .filter(|t| t.produces())
+                    .count();
+                let npool = layout.fog_number_pool();
+                for i in 0..prod {
+                    fog_numbers[i] = npool[i % npool.len()];
+                }
+                fog_numbers_len = prod as u8;
+                rng.shuffle(&mut fog_numbers[..prod]);
+            } else {
+                let ft = layout.fog_terrain_pool();
+                fog_terrain[..ft.len()].copy_from_slice(ft);
+                fog_terrain_len = ft.len() as u8;
+                rng.shuffle(&mut fog_terrain[..ft.len()]);
+                let fn_src = layout.fog_number_pool();
+                fog_numbers[..fn_src.len()].copy_from_slice(fn_src);
+                fog_numbers_len = fn_src.len() as u8;
+                rng.shuffle(&mut fog_numbers[..fn_src.len()]);
+            }
         }
         let commodity_bank = if config.scenario.is_citadels() {
             CommoditySet([layout.bank_per_commodity(); 3])
@@ -1189,37 +1234,39 @@ impl GameState {
                     self.fog_numbers_len
                 ));
             }
-            let mut counts = [0u8; Terrain::COUNT];
-            for &t in self.board.tiles() {
-                if t != Terrain::Fog {
+            if self.config.custom_map.is_none() {
+                let mut counts = [0u8; Terrain::COUNT];
+                for &t in self.board.tiles() {
+                    if t != Terrain::Fog {
+                        counts[t as usize] += 1;
+                    }
+                }
+                for &t in &self.fog_terrain[..self.fog_terrain_len as usize] {
                     counts[t as usize] += 1;
                 }
-            }
-            for &t in &self.fog_terrain[..self.fog_terrain_len as usize] {
-                counts[t as usize] += 1;
-            }
-            if counts != layout.full_terrain_counts() {
-                return Err("fog terrain not conserved".into());
-            }
-            let mut num_counts = [0u8; 13];
-            for &num in &self.board.numbers[..topo.num_tiles] {
-                if num != 0 {
+                if counts != layout.full_terrain_counts() {
+                    return Err("fog terrain not conserved".into());
+                }
+                let mut num_counts = [0u8; 13];
+                for &num in &self.board.numbers[..topo.num_tiles] {
+                    if num != 0 {
+                        num_counts[num as usize] += 1;
+                    }
+                }
+                for &num in &self.fog_numbers[..self.fog_numbers_len as usize] {
                     num_counts[num as usize] += 1;
                 }
-            }
-            for &num in &self.fog_numbers[..self.fog_numbers_len as usize] {
-                num_counts[num as usize] += 1;
-            }
-            let mut expected_nums = [0u8; 13];
-            for &num in layout
-                .number_pool()
-                .iter()
-                .chain(layout.fog_number_pool().iter())
-            {
-                expected_nums[num as usize] += 1;
-            }
-            if num_counts != expected_nums {
-                return Err("fog number tokens not conserved".into());
+                let mut expected_nums = [0u8; 13];
+                for &num in layout
+                    .number_pool()
+                    .iter()
+                    .chain(layout.fog_number_pool().iter())
+                {
+                    expected_nums[num as usize] += 1;
+                }
+                if num_counts != expected_nums {
+                    return Err("fog number tokens not conserved".into());
+                }
             }
             let route_vertices = topo.endpoints_of(seen_e);
             for t in 0..topo.num_tiles {

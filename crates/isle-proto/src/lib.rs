@@ -16,7 +16,7 @@ use isle_core::{
 use serde::{Deserialize, Serialize};
 
 pub use isle_core::{
-    Action, CityTrack, Commodity, CommoditySet, DevCard, Event, RuleError, TradeGood,
+    Action, CityTrack, Commodity, CommoditySet, CustomMap, DevCard, Event, RuleError, TradeGood,
     TradeResponse,
 };
 

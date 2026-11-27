@@ -367,6 +367,7 @@ async fn hard_bots_play_on_the_blocking_pool() {
         scenario: Default::default(),
         rules: Default::default(),
         session: None,
+        is_public: false,
     })
     .await;
     host.until(|c| c.room.is_some()).await;
@@ -507,6 +508,7 @@ async fn archipelago_rooms_play_out_and_restore() {
             scenario: isle_core::Scenario::Archipelago,
             rules: Default::default(),
             session: None,
+            is_public: false,
         })
         .await;
     too_big.until(|c| !c.errors.is_empty()).await;
@@ -521,6 +523,7 @@ async fn archipelago_rooms_play_out_and_restore() {
         scenario: isle_core::Scenario::Archipelago,
         rules: Default::default(),
         session: None,
+        is_public: false,
     })
     .await;
     host.until(|c| c.room.is_some()).await;
@@ -578,6 +581,7 @@ async fn fog_islands_rooms_play_out_and_reveal_tiles() {
         scenario: isle_core::Scenario::FogIslands,
         rules: Default::default(),
         session: None,
+        is_public: false,
     })
     .await;
     host.until(|c| c.room.is_some()).await;
@@ -663,8 +667,10 @@ async fn turn_timer_auto_acts_for_idle_connected_player() {
             friendly_robber: false,
             paired_turns: false,
             turn_timer_secs: 1,
+            custom_map: None,
         },
         session: None,
+        is_public: false,
     })
     .await;
     host.until(|c| c.room.is_some()).await;
@@ -745,6 +751,7 @@ async fn house_rules_and_citadels_and_six_player_seafaring_rooms() {
         friendly_robber: true,
         paired_turns: true,
         turn_timer_secs: 60,
+        custom_map: None,
     };
     host.send(&ClientMsg::SetRules { rules: custom }).await;
     host.until(|c| c.room.as_ref().unwrap().rules == custom)
@@ -791,8 +798,10 @@ async fn house_rules_and_citadels_and_six_player_seafaring_rooms() {
                 friendly_robber: true,
                 paired_turns: false,
                 turn_timer_secs: 0,
+                custom_map: None,
             },
             session: None,
+            is_public: false,
         })
         .await;
     sea_host.until(|c| c.room.is_some()).await;
@@ -825,6 +834,7 @@ async fn house_rules_and_citadels_and_six_player_seafaring_rooms() {
             scenario: isle_core::Scenario::Citadels,
             rules: HouseRules::default(),
             session: None,
+            is_public: false,
         })
         .await;
     cit_host.until(|c| c.room.is_some()).await;
@@ -853,6 +863,205 @@ async fn house_rules_and_citadels_and_six_player_seafaring_rooms() {
             assert!(commodity.is_none());
         }
     }
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn public_rooms_directory_kick_swap_rematch_and_custom_map() {
+    use isle_core::{Board, BoardLayout, CustomMap, Rng, Scenario, Terrain};
+    use isle_proto::net::PublicRoomSummary;
+
+    fn assert_copy<T: Copy>() {}
+    assert_copy::<HouseRules>();
+
+    let server = Server::start(fast_config()).await;
+
+    // Empty initially.
+    let (status, body) = http_get(server.addr, "/api/rooms").await;
+    assert!(status.contains("200"), "{status}");
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert!(list.is_empty());
+
+    // Private room is hidden from `/api/rooms`.
+    let mut priv_host = Client::create(server.addr, 3, "Hidden").await;
+    assert!(!priv_host.room.as_ref().unwrap().is_public);
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    assert!(serde_json::from_str::<Vec<PublicRoomSummary>>(&body)
+        .unwrap()
+        .is_empty());
+
+    // Custom map room created with `is_public: true`.
+    let mut cm = CustomMap::from_board(&Board::generate(&mut Rng::new(77), BoardLayout::Base, true));
+    cm.terrain[0] = Terrain::Desert;
+    cm.numbers[0] = 0;
+    cm.terrain[1] = Terrain::Gold;
+    cm.numbers[1] = 6;
+
+    // Layout mismatch (5 players -> Extended, but `cm` is Base) is rejected on Create.
+    let mut bad_create = Client::connect(server.addr).await;
+    bad_create
+        .send(&ClientMsg::Create {
+            players: 5,
+            bots: BotLevel::Normal,
+            name: "Bad".into(),
+            ranked: false,
+            scenario: Scenario::Classic,
+            rules: HouseRules {
+                custom_map: Some(cm),
+                ..Default::default()
+            },
+            session: None,
+            is_public: true,
+        })
+        .await;
+    bad_create.until(|c| !c.errors.is_empty()).await;
+    assert_eq!(bad_create.errors, ["BadMessage"]);
+
+    let mut host = Client::connect(server.addr).await;
+    host.send(&ClientMsg::Create {
+        players: 4,
+        bots: BotLevel::Normal,
+        name: "Captain".into(),
+        ranked: false,
+        scenario: Scenario::Classic,
+        rules: HouseRules {
+            victory_points: Some(6),
+            friendly_robber: false,
+            paired_turns: false,
+            turn_timer_secs: 0,
+            custom_map: Some(cm),
+        },
+        session: None,
+        is_public: true,
+    })
+    .await;
+    host.until(|c| c.room.is_some()).await;
+    assert!(host.room.as_ref().unwrap().is_public);
+    assert_eq!(host.room.as_ref().unwrap().rules.custom_map, Some(cm));
+
+    let mut guest = Client::join(server.addr, &host.room_id, "Mate", None).await;
+    assert_eq!(guest.seat, Some(1));
+    host.until(|c| matches!(c.room.as_ref().unwrap().seats[1], SeatView::Human { .. }))
+        .await;
+
+    // Directory shows 1 public room with humans=2, started=false, hasCustomMap=true.
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, host.room_id);
+    assert_eq!(list[0].host_name, "Captain");
+    assert_eq!((list[0].humans, list[0].max_players), (2, 4));
+    assert!(!list[0].started);
+    assert!(list[0].has_custom_map);
+
+    // Non-host cannot SetPublic, SwapSeats, or KickSeat.
+    for msg in [
+        ClientMsg::SetPublic { is_public: false },
+        ClientMsg::SwapSeats { a: 0, b: 1 },
+        ClientMsg::KickSeat { seat: 0 },
+    ] {
+        let prev = guest.errors.len();
+        guest.send(&msg).await;
+        guest.until(|c| c.errors.len() > prev).await;
+        assert_eq!(guest.errors.last().unwrap(), "NotHost");
+    }
+
+    // SwapSeats: host swaps seat 0 (Captain) and seat 2 (Open) -> host moves to seat 2!
+    host.send(&ClientMsg::SwapSeats { a: 0, b: 2 }).await;
+    host.until(|c| c.seat == Some(2) && c.room.as_ref().unwrap().host == 2)
+        .await;
+    guest.until(|c| c.room.as_ref().unwrap().host == 2).await;
+    assert_eq!(host.room.as_ref().unwrap().you, Some(2));
+    assert_eq!(host.room.as_ref().unwrap().seats[0], SeatView::Open);
+
+    // SwapSeats between two humans: seat 2 (Captain) and seat 1 (Mate).
+    host.send(&ClientMsg::SwapSeats { a: 2, b: 1 }).await;
+    host.until(|c| c.seat == Some(1) && c.room.as_ref().unwrap().host == 1)
+        .await;
+    guest
+        .until(|c| c.seat == Some(2) && c.room.as_ref().unwrap().you == Some(2))
+        .await;
+
+    // KickSeat: host (at seat 1) kicks guest (at seat 2) -> guest becomes spectator with `Kicked`.
+    host.send(&ClientMsg::KickSeat { seat: 2 }).await;
+    guest
+        .until(|c| c.seat.is_none() && c.errors.contains(&"Kicked".into()))
+        .await;
+    host.until(|c| {
+        let r = c.room.as_ref().unwrap();
+        r.seats[2] == SeatView::Open && r.spectators == 1
+    })
+    .await;
+    assert!(guest.token.is_none());
+
+    // Toggle private room to public so we can test sorting (`!started` before `started`).
+    priv_host.send(&ClientMsg::SetPublic { is_public: true }).await;
+    priv_host.until(|c| c.room.as_ref().unwrap().is_public).await;
+
+    // Start the custom-map room -> now `priv_host` (!started) sorts before `host` (started).
+    host.send(&ClientMsg::Start).await;
+    host.until(|c| c.view.is_some()).await;
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].id, priv_host.room_id);
+    assert!(!list[0].started);
+    assert_eq!(list[1].id, host.room_id);
+    assert!(list[1].started);
+    assert_eq!(list[1].spectators, 1);
+
+    // SetPublic works in-game too.
+    host.send(&ClientMsg::SetPublic { is_public: false }).await;
+    host.until(|c| !c.room.as_ref().unwrap().is_public).await;
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert_eq!(list.len(), 1);
+    host.send(&ClientMsg::SetPublic { is_public: true }).await;
+    host.until(|c| c.room.as_ref().unwrap().is_public).await;
+
+    // Rematch before game over is rejected with `NotFinished`.
+    let prev = host.errors.len();
+    host.send(&ClientMsg::Rematch { immediate: false }).await;
+    host.until(|c| c.errors.len() > prev).await;
+    assert_eq!(host.errors.last().unwrap(), "NotFinished");
+
+    // Play game 1 to completion; finished room disappears from `/api/rooms`.
+    let mut host = timeout(Duration::from_secs(60), play_to_end(host))
+        .await
+        .expect("custom map game 1 timed out");
+    host.until(|c| c.room.as_ref().unwrap().replay.is_some())
+        .await;
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert!(list.iter().all(|r| r.id != host.room_id));
+
+    // Rematch (immediate: true) starts game 2 right away with fresh snapshot.
+    host.view = None;
+    host.send(&ClientMsg::Rematch { immediate: true }).await;
+    host.until(|c| c.view.as_ref().is_some_and(|v| v.winner.is_none()))
+        .await;
+    assert!(host.room.as_ref().unwrap().started);
+    assert!(host.room.as_ref().unwrap().replay.is_none());
+
+    // Play game 2 to completion, then Rematch (immediate: false) returns to lobby!
+    let mut host = timeout(Duration::from_secs(60), play_to_end(host))
+        .await
+        .expect("custom map game 2 timed out");
+    host.until(|c| c.room.as_ref().unwrap().replay.is_some())
+        .await;
+
+    host.send(&ClientMsg::Rematch { immediate: false }).await;
+    host.until(|c| !c.room.as_ref().unwrap().started).await;
+    let r = host.room.as_ref().unwrap();
+    assert!(r.replay.is_none());
+    assert_eq!(r.seats[0], SeatView::Open);
+    assert!(matches!(r.seats[1], SeatView::Human { .. }));
+
+    // Back in `/api/rooms` as `!started`!
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert!(list.iter().any(|s| s.id == host.room_id && !s.started));
 
     server.stop().await;
 }
