@@ -423,6 +423,12 @@ export function computeSetupAdvice(
       }
       if (adjTiles.some((t) => board.terrain[t] === TERRAIN_DESERT)) fishPips += 2;
       if (fishPips > 0) score += fishPips * 0.65 + 0.6;
+    } else if (scenario === 'Caravans') {
+      const river = new Set(board.riverEdges ?? []);
+      const nearRiver = [...river].some((e) => topo.edgeVertices[2 * e] === v || topo.edgeVertices[2 * e + 1] === v);
+      const nearOasis = adjTiles.some((t) => board.terrain[t] === TERRAIN_DESERT);
+      if (nearRiver) score += 1.25;
+      if (nearOasis) score += 1.1;
     } else if (scenario !== 'Classic' && scenario !== 'Citadels' && seaInfo.hasSeaEdge) {
       // Gentle coastal bonus for other maritime/coastal scenarios (e.g. Fishermen).
       score += 0.65;

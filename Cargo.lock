@@ -516,14 +516,14 @@ dependencies = [
 
 [[package]]
 name = "isle-ai"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "isle-core",
 ]
 
 [[package]]
 name = "isle-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "ts-rs",
@@ -531,7 +531,7 @@ dependencies = [
 
 [[package]]
 name = "isle-proto"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "isle-ai",
  "isle-core",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "isle-server"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "argon2",
  "axum",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "isle-sim"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "isle-ai",
  "isle-core",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "isle-wasm"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "isle-ai",
  "isle-core",

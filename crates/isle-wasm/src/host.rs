@@ -74,19 +74,29 @@ impl MatchHost {
         let state =
             GameState::new(config, seed).map_err(|e| HostError::Config(format!("{e:?}")))?;
         let human = human.filter(|&h| h < num_players);
+        let specs: Vec<&str> = bot_name
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         let bots = (0..num_players)
             .map(|p| {
                 if Some(p) == human {
                     Ok(None)
                 } else {
-                    bot_by_name(bot_name, (seed << 8) | p as u64)
+                    let chosen = if specs.len() > 1 {
+                        specs[p as usize % specs.len()]
+                    } else {
+                        bot_name
+                    };
+                    bot_by_name(chosen, (seed << 8) | p as u64)
                         .map(|mut b| {
                             if human.is_some() {
                                 b.set_propose_trades(true);
                             }
                             Some(b as Box<dyn Bot>)
                         })
-                        .ok_or_else(|| HostError::Config(format!("unknown bot {bot_name}")))
+                        .ok_or_else(|| HostError::Config(format!("unknown bot {chosen}")))
                 }
             })
             .collect::<Result<_, _>>()?;

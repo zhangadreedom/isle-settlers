@@ -324,6 +324,8 @@ pub struct Board {
     /// Fishermen scenario: coastal fishing grounds (`fishing_grounds[..fishing_ground_count]`).
     pub fishing_grounds: [FishingGround; MAX_FISHING_GROUNDS],
     pub fishing_ground_count: u8,
+    /// Caravans scenario: golden river edges flowing from the oasis (`desert`) to the coast.
+    pub river_edges: BitSet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -850,6 +852,7 @@ impl Board {
                 number: 0,
             }; MAX_FISHING_GROUNDS],
             fishing_ground_count: 0,
+            river_edges: BitSet::EMPTY,
         };
         board.terrain[..nt].copy_from_slice(terrain);
         board.numbers[..nt].copy_from_slice(numbers);
@@ -1083,6 +1086,7 @@ impl Board {
                 number: 0,
             }; MAX_FISHING_GROUNDS],
             fishing_ground_count: 0,
+            river_edges: BitSet::EMPTY,
         };
         board.terrain[..nt].copy_from_slice(terrain);
         board.numbers[..nt].copy_from_slice(numbers);
@@ -1152,6 +1156,121 @@ impl Board {
             };
         }
         self.fishing_ground_count = count as u8;
+    }
+
+    /// Deterministically traces the golden river (`5` land edges on `Base`,
+    /// `7` on `Extended`) from a vertex of `self.desert` (the Oasis) outward
+    /// to a coastal vertex, consuming zero RNG.
+    pub fn init_river_edges(&mut self) {
+        self.river_edges = BitSet::EMPTY;
+        if self.desert == NONE {
+            return;
+        }
+        let topo = self.topo();
+        let max_target = if self.layout.is_extended() { 7usize } else { 5usize };
+        let (dx, dy) = topo.tile_pos[self.desert as usize];
+
+        struct Search<'a> {
+            topo: &'a Topology,
+            land_edges: BitSet,
+            sea_edges: BitSet,
+            dx: i32,
+            dy: i32,
+            target: usize,
+            require_coast: bool,
+            best_score: Option<(usize, i32)>,
+            best_edges: BitSet,
+        }
+
+        impl Search<'_> {
+            #[inline]
+            fn dist_sq(&self, v: u8) -> i32 {
+                let (vx, vy) = self.topo.vertex_pos[v as usize];
+                let (ox, oy) = (vx as i32 - self.dx, vy as i32 - self.dy);
+                ox * ox + oy * oy
+            }
+
+            fn dfs(
+                &mut self,
+                v: u8,
+                cur_dist: i32,
+                depth: usize,
+                interior: usize,
+                visited_v: BitSet,
+                edges: BitSet,
+            ) {
+                if depth == self.target {
+                    if self.require_coast
+                        && (self.topo.vertex_edge_mask[v as usize] & self.sea_edges).is_empty()
+                    {
+                        return;
+                    }
+                    let score = (interior, cur_dist);
+                    if self.best_score.is_none_or(|b| score > b) {
+                        self.best_score = Some(score);
+                        self.best_edges = edges;
+                    }
+                    return;
+                }
+                for k in 0..3 {
+                    let e = self.topo.vertex_edges[v as usize][k];
+                    if e == NONE || !self.land_edges.contains(e) || edges.contains(e) {
+                        continue;
+                    }
+                    let u = self.topo.vertex_vertices[v as usize][k];
+                    if visited_v.contains(u) {
+                        continue;
+                    }
+                    let next_dist = self.dist_sq(u);
+                    if next_dist <= cur_dist {
+                        continue;
+                    }
+                    let next_edges = edges | BitSet::bit(e);
+                    if depth + 1 < self.target {
+                        let rem =
+                            self.topo.vertex_edge_mask[u as usize] & self.land_edges & !next_edges;
+                        if rem.count_ones() < 2 {
+                            continue;
+                        }
+                    }
+                    let is_interior = usize::from(!self.sea_edges.contains(e));
+                    self.dfs(
+                        u,
+                        next_dist,
+                        depth + 1,
+                        interior + is_interior,
+                        visited_v | BitSet::bit(u),
+                        next_edges,
+                    );
+                }
+            }
+        }
+
+        for require_coast in [true, false] {
+            for target in (1..=max_target).rev() {
+                let mut search = Search {
+                    topo,
+                    land_edges: self.land_edges,
+                    sea_edges: self.sea_edges,
+                    dx: dx as i32,
+                    dy: dy as i32,
+                    target,
+                    require_coast,
+                    best_score: None,
+                    best_edges: BitSet::EMPTY,
+                };
+                for &v0 in &topo.tile_vertices[self.desert as usize] {
+                    if self.land_vertices.contains(v0) {
+                        let d0 = search.dist_sq(v0);
+                        search.dfs(v0, d0, 0, 0, BitSet::bit(v0), BitSet::EMPTY);
+                    }
+                }
+                if search.best_score.is_some() {
+                    self.river_edges = search.best_edges;
+                    return;
+                }
+            }
+        }
     }
 
     /// Production weight (pips) of a vertex, summed over adjacent tiles.

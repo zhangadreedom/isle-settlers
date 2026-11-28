@@ -13,6 +13,7 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CITY_FLAG, EMPTY, type Topology } from '../engine';
+import { isColorblindMode, onColorblindChange, SEAT_SYMBOLS, setColorblindMode, TERRAIN_SHORT_BADGE } from './a11y';
 import {
   BEACH,
   METROPOLIS_COLORS,
@@ -56,6 +57,8 @@ export interface BoardData {
   islands: number[];
   /** Fishermen mode: coastal fishing grounds with edge id and roll number. */
   fishingGrounds?: { edge: number; number: number }[];
+  /** Caravans mode: edges forming the Golden River. */
+  riverEdges?: number[];
 }
 
 export interface KnightData {
@@ -80,6 +83,10 @@ export interface PieceData {
   /** Citadels: barbarian fleet progress (0..barbarianSteps), null/undefined when not in Citadels. */
   barbarianPos?: number | null;
   barbarianSteps?: number;
+  /** Caravans mode: edge indices holding a camel caravan segment. */
+  camels?: number[];
+  /** Caravans mode: bridge owner per edge (or EMPTY = 255). */
+  bridges?: number[];
 }
 
 export interface TileHover {
@@ -88,8 +95,12 @@ export interface TileHover {
   clientY: number;
 }
 
+/** Terrain code of desert (see palette). */
+const DESERT_TERRAIN = 5;
 /** Terrain code of the sea (see palette). */
 const SEA_TERRAIN = 6;
+/** Terrain code of gold field (see palette). */
+const GOLD_TERRAIN = 7;
 /** Terrain code of unexplored fog (see palette). */
 const FOG_TERRAIN = 8;
 /** Height of ships and the pirate above the water plane. */
@@ -275,6 +286,77 @@ const metropolisGeometry = mergeGeometries([
 ])!;
 
 const roadGeometry = new THREE.BoxGeometry(0.64, 0.09, 0.12);
+
+/** Caravans: arched stone bridge with raised span and twin side parapets. */
+const bridgeGeometry = mergeGeometries([
+  box(0.11, 0.1, 0.22, -0.28, 0.05, 0),
+  box(0.11, 0.1, 0.22, 0.28, 0.05, 0),
+  new THREE.BoxGeometry(0.2, 0.052, 0.19).rotateZ(0.28).translate(-0.165, 0.112, 0).toNonIndexed(),
+  new THREE.BoxGeometry(0.2, 0.052, 0.19).rotateZ(-0.28).translate(0.165, 0.112, 0).toNonIndexed(),
+  box(0.2, 0.054, 0.19, 0, 0.145, 0),
+  new THREE.BoxGeometry(0.2, 0.048, 0.032).rotateZ(0.28).translate(-0.165, 0.158, -0.086).toNonIndexed(),
+  new THREE.BoxGeometry(0.2, 0.048, 0.032).rotateZ(0.28).translate(-0.165, 0.158, 0.086).toNonIndexed(),
+  new THREE.BoxGeometry(0.2, 0.048, 0.032).rotateZ(-0.28).translate(0.165, 0.158, -0.086).toNonIndexed(),
+  new THREE.BoxGeometry(0.2, 0.048, 0.032).rotateZ(-0.28).translate(0.165, 0.158, 0.086).toNonIndexed(),
+  box(0.21, 0.05, 0.034, 0, 0.192, -0.086),
+  box(0.21, 0.05, 0.034, 0, 0.192, 0.086),
+  box(0.045, 0.075, 0.045, -0.285, 0.132, -0.088),
+  box(0.045, 0.075, 0.045, -0.285, 0.132, 0.088),
+  box(0.045, 0.075, 0.045, 0.285, 0.132, -0.088),
+  box(0.045, 0.075, 0.045, 0.285, 0.132, 0.088),
+  box(0.046, 0.072, 0.046, 0, 0.208, -0.088),
+  box(0.046, 0.072, 0.046, 0, 0.208, 0.088),
+])!;
+
+/** Caravans: low-poly twin-hump 3D camel facing +x. */
+const camelGeometry = mergeGeometries([
+  box(0.036, 0.15, 0.036, 0.088, 0.075, -0.038),
+  box(0.036, 0.15, 0.036, 0.088, 0.075, 0.038),
+  box(0.038, 0.15, 0.036, -0.088, 0.075, -0.038),
+  box(0.038, 0.15, 0.036, -0.088, 0.075, 0.038),
+  box(0.245, 0.11, 0.115, 0, 0.188, 0),
+  new THREE.ConeGeometry(0.056, 0.105, 6).translate(-0.058, 0.292, 0).toNonIndexed(),
+  new THREE.ConeGeometry(0.056, 0.11, 6).translate(0.052, 0.295, 0).toNonIndexed(),
+  new THREE.BoxGeometry(0.062, 0.145, 0.058).rotateZ(-0.26).translate(0.142, 0.248, 0).toNonIndexed(),
+  box(0.105, 0.056, 0.056, 0.196, 0.332, 0),
+  box(0.044, 0.042, 0.044, 0.252, 0.324, 0),
+  box(0.02, 0.032, 0.02, 0.16, 0.372, -0.02),
+  box(0.02, 0.032, 0.02, 0.16, 0.372, 0.02),
+  new THREE.BoxGeometry(0.024, 0.085, 0.024).rotateZ(-0.22).translate(-0.134, 0.175, 0).toNonIndexed(),
+])!;
+
+/** Caravans: winding S-curved river water ribbon & golden bank bed along one hex edge (-0.5..0.5). */
+const riverBankGeometry = mergeGeometries([
+  new THREE.BoxGeometry(0.36, 0.024, 0.27).rotateY(-0.105).translate(-0.33, 0, 0.018).toNonIndexed(),
+  new THREE.BoxGeometry(0.38, 0.024, 0.27).rotateY(0.2).translate(0, 0, 0).toNonIndexed(),
+  new THREE.BoxGeometry(0.36, 0.024, 0.27).rotateY(-0.105).translate(0.33, 0, -0.018).toNonIndexed(),
+])!;
+const riverRibbonGeometry = mergeGeometries([
+  new THREE.BoxGeometry(0.36, 0.02, 0.155).rotateY(-0.105).translate(-0.33, 0, 0.018).toNonIndexed(),
+  new THREE.BoxGeometry(0.38, 0.02, 0.155).rotateY(0.2).translate(0, 0, 0).toNonIndexed(),
+  new THREE.BoxGeometry(0.36, 0.02, 0.155).rotateY(-0.105).translate(0.33, 0, -0.018).toNonIndexed(),
+])!;
+const riverBendBankGeometry = new THREE.CylinderGeometry(0.135, 0.145, 0.024, 12);
+const riverBendWaterGeometry = new THREE.CylinderGeometry(0.082, 0.088, 0.02, 12);
+const oasisBankGeometry = new THREE.CylinderGeometry(0.33, 0.37, 0.02, 16);
+const oasisPoolGeometry = new THREE.CylinderGeometry(0.25, 0.26, 0.024, 16);
+const oasisTrunkGeometry = mergeGeometries([
+  new THREE.CylinderGeometry(0.026, 0.038, 0.15, 6).translate(0, 0.075, 0).toNonIndexed(),
+  new THREE.CylinderGeometry(0.022, 0.028, 0.14, 6).rotateZ(-0.16).translate(0.014, 0.21, 0).toNonIndexed(),
+  new THREE.CylinderGeometry(0.018, 0.022, 0.13, 6).rotateZ(-0.28).translate(0.042, 0.33, 0).toNonIndexed(),
+])!;
+const oasisCrownGeometry = mergeGeometries([
+  ...[0, 1, 2, 3, 4].map((i) =>
+    new THREE.ConeGeometry(0.055, 0.24, 4)
+      .scale(0.32, 1, 1)
+      .rotateZ(-1.22)
+      .translate(0.1, -0.01, 0)
+      .rotateY((i * Math.PI * 2) / 5)
+      .translate(0.058, 0.395, 0)
+      .toNonIndexed(),
+  ),
+  new THREE.SphereGeometry(0.036, 6, 5).translate(0.058, 0.375, 0).toNonIndexed(),
+])!;
 /** Flat triangle pointing +x (a bow), `length` long, `width` wide, `thickness` high. */
 function bow(width: number, length: number, thickness: number) {
   return prism(width, length, thickness).rotateX(Math.PI / 2).rotateY(Math.PI / 2);
@@ -393,21 +475,91 @@ function canvasTexture(draw: (ctx: CanvasRenderingContext2D, size: number) => vo
   return t;
 }
 
-function numberTexture(n: number) {
+function numberTexture(n: number, terrainCode?: number) {
+  if (terrainCode === undefined) {
+    return canvasTexture((ctx, size) => {
+      const red = n === 6 || n === 8;
+      ctx.fillStyle = red ? '#b8322a' : '#2b2b2b';
+      ctx.font = `bold ${red ? 64 : 58}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(n), size / 2, size / 2 - 8);
+      const pips = PIPS[n];
+      for (let i = 0; i < pips; i++) {
+        ctx.beginPath();
+        ctx.arc(size / 2 + (i - (pips - 1) / 2) * 11, size / 2 + 34, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+  }
+
+  const tag = TERRAIN_SHORT_BADGE[terrainCode] ?? '';
+  const accentNum =
+    terrainCode >= 0 && terrainCode < RESOURCE_COLORS.length
+      ? RESOURCE_COLORS[terrainCode]
+      : terrainCode === GOLD_TERRAIN
+        ? 0xf2b938
+        : 0x3d5163;
+  const accent = `#${accentNum.toString(16).padStart(6, '0')}`;
+
   return canvasTexture((ctx, size) => {
+    const c = size / 2;
     const red = n === 6 || n === 8;
-    ctx.fillStyle = red ? '#b8322a' : '#2b2b2b';
-    ctx.font = `bold ${red ? 64 : 58}px system-ui, sans-serif`;
+
+    if (tag) {
+      roundedPill(ctx, c - 46, 22, 92, 44, 22);
+      ctx.fillStyle = '#141c24';
+      ctx.fill();
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = accent;
+      ctx.stroke();
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '900 28px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+      ctx.fillText(tag, c, 45);
+    }
+
+    ctx.fillStyle = red ? '#b8322a' : '#1f2328';
+    ctx.font = `900 ${red ? 92 : 84}px system-ui, -apple-system, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(String(n), size / 2, size / 2 - 8);
-    const pips = PIPS[n];
+    ctx.fillText(String(n), c, 128);
+
+    const pips = PIPS[n] ?? 0;
     for (let i = 0; i < pips; i++) {
       ctx.beginPath();
-      ctx.arc(size / 2 + (i - (pips - 1) / 2) * 11, size / 2 + 34, 4, 0, Math.PI * 2);
+      ctx.arc(c + (i - (pips - 1) / 2) * 18, 194, 6.5, 0, Math.PI * 2);
       ctx.fill();
     }
-  });
+  }, 256);
+}
+
+function seatEmblemTexture(owner: number) {
+  const sym = SEAT_SYMBOLS[owner] ?? SEAT_SYMBOLS[owner % SEAT_SYMBOLS.length];
+  const borderHex = `#${(PLAYER_COLORS[owner] ?? 0xffffff).toString(16).padStart(6, '0')}`;
+  return canvasTexture((ctx, size) => {
+    const c = size / 2;
+    roundedPill(ctx, 10, 20, size - 20, size - 40, (size - 40) / 2);
+    ctx.fillStyle = '#090f14';
+    ctx.fill();
+
+    roundedPill(ctx, 16, 26, size - 32, size - 52, (size - 52) / 2);
+    ctx.fillStyle = '#121b24';
+    ctx.fill();
+    ctx.lineWidth = 9;
+    ctx.strokeStyle = borderHex;
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '900 48px "Segoe UI Symbol", "Apple Symbols", "Noto Sans Symbols 2", system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    const m = ctx.measureText(sym);
+    const y = m.actualBoundingBoxAscent > 0 ? c + (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2 : c + 17;
+    ctx.fillText(sym, c, y);
+  }, 128);
 }
 
 function roundedPill(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -546,6 +698,8 @@ export class BoardRenderer {
 
   private _backend: Backend = 'WebGL2';
   private _theme: BoardTheme = 'day';
+  private _colorblind = isColorblindMode();
+  private readonly unsubColorblind: () => void;
   private recovering = false;
   private readonly scene = new THREE.Scene();
   private readonly bgColor = new THREE.Color(SKY);
@@ -554,6 +708,8 @@ export class BoardRenderer {
   private readonly controls: OrbitControls;
   private readonly board = new THREE.Group();
   private readonly roads: THREE.InstancedMesh;
+  private readonly bridges: THREE.InstancedMesh;
+  private readonly camels: THREE.InstancedMesh;
   private readonly ships: THREE.InstancedMesh;
   private readonly pirate = new THREE.Group();
   private readonly barbarianShip = new THREE.Group();
@@ -566,6 +722,9 @@ export class BoardRenderer {
   private readonly knights: THREE.InstancedMesh;
   private readonly knightBanners: THREE.InstancedMesh;
   private readonly metropolises: THREE.InstancedMesh;
+  private readonly seatEmblems = new THREE.Group();
+  private readonly seatEmblemMaterials = new Map<number, THREE.SpriteMaterial>();
+  private readonly seatEmblemSprites: THREE.Sprite[] = [];
   private readonly markers: Record<PickKind, THREE.InstancedMesh>;
   private readonly robber = new THREE.Group();
   private readonly resizeObserver: ResizeObserver;
@@ -575,6 +734,7 @@ export class BoardRenderer {
   private readonly sun: THREE.DirectionalLight;
   private readonly rimLight: THREE.DirectionalLight;
   private topology: Topology | null = null;
+  private lastBoardData: BoardData | null = null;
   private singleAllLand = false;
   private tileXZ: [number, number][] = [];
   private vertexXZ: [number, number][] = [];
@@ -587,7 +747,7 @@ export class BoardRenderer {
   private edgeSeaward: [number, number][] = [];
   /** Half extents (world units) of the area that must stay in view. */
   private extent = { x: 5.2, z: 4.42 };
-  private readonly numberTextures = new Map<number, THREE.Texture>();
+  private readonly numberTextures = new Map<string, THREE.Texture>();
   private readonly harborTextures = new Map<number, THREE.Texture>();
   private readonly fishingTextures = new Map<number, THREE.Texture>();
   private readonly raycaster = new THREE.Raycaster();
@@ -600,6 +760,8 @@ export class BoardRenderer {
 
   // Pieces keyed by spot so new ones can be animated.
   private roadPieces = new Map<number, Piece>();
+  private bridgePieces = new Map<number, Piece>();
+  private camelPieces = new Map<number, Piece>();
   private shipPieces = new Map<number, Piece>();
   private pirateFrom: [number, number] | null = null;
   private pirateTo: [number, number] | null = null;
@@ -682,9 +844,12 @@ export class BoardRenderer {
     this.applyTheme(readSavedTheme());
 
     const pieceMaterial = std(0xffffff, { roughness: 0.6 });
+    const camelMaterial = std(0xdba23a, { roughness: 0.58, metalness: 0.12, emissive: 0x3b2504 });
     const goldMaterial = std(0xffcf3a, { metalness: 0.5, roughness: 0.3, emissive: 0x5c3d00 });
     const metroMaterial = std(0xffffff, { metalness: 0.45, roughness: 0.3, emissive: 0x2b2000 });
     this.roads = this.instanced(roadGeometry, pieceMaterial, MAX_SPOTS, true);
+    this.bridges = this.instanced(bridgeGeometry, pieceMaterial, MAX_SPOTS, true);
+    this.camels = this.instanced(camelGeometry, camelMaterial, MAX_SPOTS);
     this.ships = this.instanced(shipGeometry, pieceMaterial, MAX_SPOTS, true);
     this.scene.add(this.ships);
     this.settlements = this.instanced(settlementGeometry, pieceMaterial, MAX_SPOTS, true);
@@ -692,7 +857,19 @@ export class BoardRenderer {
     this.knights = this.instanced(knightGeometry, pieceMaterial, MAX_SPOTS, true);
     this.knightBanners = this.instanced(knightBannerGeometry, goldMaterial, MAX_SPOTS);
     this.metropolises = this.instanced(metropolisGeometry, metroMaterial, 6, true);
-    this.scene.add(this.roads, this.settlements, this.cities, this.knights, this.knightBanners, this.metropolises);
+    this.seatEmblems.visible = this._colorblind;
+    this.scene.add(
+      this.roads,
+      this.bridges,
+      this.camels,
+      this.settlements,
+      this.cities,
+      this.knights,
+      this.knightBanners,
+      this.metropolises,
+      this.seatEmblems,
+    );
+    this.unsubColorblind = onColorblindChange((on) => this.applyColorblind(on));
 
     const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false });
     this.markers = {
@@ -747,6 +924,7 @@ export class BoardRenderer {
       seaMaterial,
       beachMaterial,
       pieceMaterial,
+      camelMaterial,
       goldMaterial,
       metroMaterial,
       markerMaterial,
@@ -760,6 +938,8 @@ export class BoardRenderer {
       this.barbarianGlowMat,
       this.barbarianRingMat,
       this.roads,
+      this.bridges,
+      this.camels,
       this.ships,
       this.settlements,
       this.cities,
@@ -787,10 +967,32 @@ export class BoardRenderer {
     return this._theme;
   }
 
+  get colorblind(): boolean {
+    return this._colorblind;
+  }
+
   /** Switches the 3D board lighting & atmosphere theme, persists preference, and queues one frame. */
   setTheme(theme: BoardTheme): void {
     this.applyTheme(theme);
     saveTheme(theme);
+    this.requestRender();
+  }
+
+  /** Enables or disables colorblind-friendly terrain tags & seat-symbol emblems, queuing one frame. */
+  setColorblind(enabled: boolean): void {
+    const next = Boolean(enabled);
+    setColorblindMode(next);
+    this.applyColorblind(next);
+  }
+
+  private applyColorblind(enabled: boolean): void {
+    if (this._colorblind === enabled) return;
+    this._colorblind = enabled;
+    this.seatEmblems.visible = enabled;
+    if (this.lastBoardData && this.topology) {
+      this.updateBoard(this.lastBoardData);
+    }
+    this.updatePieces(performance.now());
     this.requestRender();
   }
 
@@ -909,10 +1111,13 @@ export class BoardRenderer {
     this.camera.position.copy(CAMERA_DIR).multiplyScalar(this.fitDistance || 14);
     this.controls.update();
     this.roadPieces.clear();
+    this.bridgePieces.clear();
+    this.camelPieces.clear();
     this.shipPieces.clear();
     this.buildingPieces.clear();
     this.knightPieces.clear();
     this.metropolisPieces = [];
+    for (const sp of this.seatEmblemSprites) sp.visible = false;
     this.robberFrom = null;
     this.pirateFrom = this.pirateTo = null;
     this.barbarianFrom = this.barbarianTo = null;
@@ -927,7 +1132,15 @@ export class BoardRenderer {
   }
 
   /** Refreshes board tiles, fog, beaches and tokens in place without resetting the camera or pieces. */
-  updateBoard({ terrain, numbers, harbors, islands, fishingGrounds }: BoardData) {
+  updateBoard({ terrain, numbers, harbors, islands, fishingGrounds, riverEdges }: BoardData) {
+    this.lastBoardData = {
+      terrain: [...terrain],
+      numbers: [...numbers],
+      harbors: [...harbors],
+      islands: [...islands],
+      fishingGrounds: fishingGrounds ? [...fishingGrounds] : undefined,
+      riverEdges: riverEdges ? [...riverEdges] : undefined,
+    };
     this.setLand(terrain, islands);
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
@@ -972,7 +1185,8 @@ export class BoardRenderer {
     }
 
     this.addDecorations(terrain);
-    this.addTokens(numbers);
+    if (riverEdges?.length) this.addGoldenRiver(riverEdges, terrain);
+    this.addTokens(numbers, terrain);
     this.addHarbors(harbors);
     if (fishingGrounds?.length) this.addFishingGrounds(fishingGrounds);
     this.requestRender();
@@ -983,7 +1197,10 @@ export class BoardRenderer {
    * before drop in; a moved robber walks over. Pass `animate: false` for the
    * first sync of a game.
    */
-  setPieces({ buildings, roads, ships, robber, pirate, knights, metropolises, barbarianPos, barbarianSteps }: PieceData, animate = true) {
+  setPieces(
+    { buildings, roads, ships, robber, pirate, knights, metropolises, barbarianPos, barbarianSteps, camels, bridges }: PieceData,
+    animate = true,
+  ) {
     const now = animate ? performance.now() : -1e9;
     const nextKnights = new Map<number, Piece & { level: number; active: boolean }>();
     (knights ?? []).forEach((k) => {
@@ -1011,6 +1228,45 @@ export class BoardRenderer {
       nextShips.set(e, { ...at, owner, born: prev?.owner === owner ? prev.born : now });
     });
     this.shipPieces = nextShips;
+
+    const nextBridges = new Map<number, Piece>();
+    (bridges ?? []).forEach((owner, e) => {
+      if (owner === EMPTY || e < 0 || e >= this.edgeXZ.length) return;
+      const prev = this.bridgePieces.get(e);
+      const { x, z, angle } = this.edgeXZ[e];
+      nextBridges.set(e, prev?.owner === owner ? prev : { x, z, angle, owner, born: now });
+    });
+    this.bridgePieces = nextBridges;
+
+    const nextCamels = new Map<number, Piece>();
+    const camelEdges = (camels ?? []).filter((e) => e >= 0 && e < this.edgeXZ.length);
+    const seenEdgeCounts = new Map<number, number>();
+    camelEdges.forEach((e, idx) => {
+      const dup = seenEdgeCounts.get(e) ?? 0;
+      seenEdgeCounts.set(e, dup + 1);
+      const key = e * 16 + dup;
+      const prev = this.camelPieces.get(key);
+      const spot = this.edgeXZ[e];
+      const tx = Math.cos(spot.angle);
+      const tz = -Math.sin(spot.angle);
+      const nx = Math.sin(spot.angle);
+      const nz = Math.cos(spot.angle);
+      const [ox, oz] = this.edgeSeaward[e] ?? [0, 0];
+      const inlandSign = ox !== 0 || oz !== 0 ? (nx * ox + nz * oz > 0 ? -1 : 1) : 1;
+      const side = dup % 2 === 0 ? inlandSign : -inlandSign;
+      let angle = spot.angle;
+      const neighbor = camelEdges[idx + 1] ?? camelEdges[idx - 1];
+      if (neighbor !== undefined && neighbor !== e && this.edgeXZ[neighbor]) {
+        const ns = this.edgeXZ[neighbor];
+        const dirX = idx + 1 < camelEdges.length ? ns.x - spot.x : spot.x - ns.x;
+        const dirZ = idx + 1 < camelEdges.length ? ns.z - spot.z : spot.z - ns.z;
+        if (dirX * tx + dirZ * tz < 0) angle += Math.PI;
+      }
+      const x = spot.x + nx * side * 0.135;
+      const z = spot.z + nz * side * 0.135;
+      nextCamels.set(key, prev ? { ...prev, x, z, angle } : { x, z, angle, owner: 0, born: now });
+    });
+    this.camelPieces = nextCamels;
 
     if (pirate === undefined || pirate === null) {
       this.pirate.visible = false;
@@ -1130,6 +1386,7 @@ export class BoardRenderer {
   }
 
   dispose() {
+    this.unsubColorblind();
     this.container.removeEventListener('pointermove', this.onPointerMove);
     this.container.removeEventListener('pointerdown', this.onPointerDown);
     this.container.removeEventListener('pointerup', this.onPointerUp);
@@ -1141,6 +1398,13 @@ export class BoardRenderer {
     this.beach.geometry.dispose();
     for (const d of this.disposables) d.dispose();
     for (const d of this.sceneDisposables) d.dispose();
+    for (const mat of this.seatEmblemMaterials.values()) {
+      mat.map?.dispose();
+      mat.dispose();
+    }
+    this.seatEmblemMaterials.clear();
+    this.seatEmblemSprites.length = 0;
+    this.seatEmblems.clear();
     for (const t of this.numberTextures.values()) t.dispose();
     for (const t of this.harborTextures.values()) t.dispose();
     for (const t of this.fishingTextures.values()) t.dispose();
@@ -1313,6 +1577,20 @@ export class BoardRenderer {
     let n = 0;
     for (const piece of this.roadPieces.values()) place(this.roads, n++, piece, TOP + 0.045);
     this.commit(this.roads, n);
+    let nbr = 0;
+    for (const piece of this.bridgePieces.values()) place(this.bridges, nbr++, piece, TOP);
+    this.commit(this.bridges, nbr);
+    let ncm = 0;
+    for (const piece of this.camelPieces.values()) {
+      const tc = Math.min(1, (now - piece.born) / DROP_MS);
+      if (tc < 1) animating = true;
+      const kc = Math.max(0.001, easeOutBack(tc));
+      q.setFromAxisAngle(up, piece.angle);
+      s.set(kc, kc, kc);
+      p.set(piece.x, TOP + (1 - Math.min(1, tc * 1.4)) * 1.1, piece.z);
+      this.camels.setMatrixAt(ncm++, m.compose(p, q, s));
+    }
+    this.commit(this.camels, ncm);
     let nsh = 0;
     for (const piece of this.shipPieces.values()) place(this.ships, nsh++, piece, WATER);
     this.commit(this.ships, nsh);
@@ -1400,6 +1678,53 @@ export class BoardRenderer {
       nm++;
     }
     this.commit(this.metropolises, nm);
+
+    if (!this._colorblind) {
+      this.seatEmblems.visible = false;
+    } else {
+      this.seatEmblems.visible = true;
+      let ei = 0;
+      const placeEmblem = (owner: number, x: number, y: number, z: number, scale: number) => {
+        let sp = this.seatEmblemSprites[ei];
+        const mat = this.getSeatEmblemMaterial(owner);
+        if (!sp) {
+          sp = new THREE.Sprite(mat);
+          sp.renderOrder = 12;
+          this.seatEmblemSprites.push(sp);
+          this.seatEmblems.add(sp);
+        } else if (sp.material !== mat) {
+          sp.material = mat;
+        }
+        sp.position.set(x, y, z);
+        sp.scale.set(scale, scale, 1);
+        sp.visible = true;
+        ei++;
+      };
+
+      for (const piece of this.buildingPieces.values()) {
+        const tb = Math.min(1, (now - piece.born) / DROP_MS);
+        const kb = Math.max(0.001, easeOutBack(tb));
+        const dropY = (1 - Math.min(1, tb * 1.4)) * 1.2;
+        const hasMetro =
+          piece.city &&
+          this.metropolisPieces.some((mp) => Math.abs(mp.x - piece.x) < 1e-3 && Math.abs(mp.z - piece.z) < 1e-3);
+        const baseOffset = hasMetro ? 0.92 : piece.city ? 0.65 : 0.5;
+        placeEmblem(piece.owner, piece.x, TOP + baseOffset + dropY, piece.z, 0.34 * kb);
+      }
+
+      for (const k of this.knightPieces.values()) {
+        const tk = Math.min(1, (now - k.born) / DROP_MS);
+        const kk = Math.max(0.001, easeOutBack(tk));
+        const rankScale = 0.88 + 0.16 * k.level;
+        const dropY = (1 - Math.min(1, tk * 1.4)) * 1.1;
+        const topH = (k.active ? 0.62 : 0.48) * rankScale + 0.15;
+        placeEmblem(k.owner, k.x, TOP + topH + dropY, k.z, 0.32 * kk);
+      }
+
+      for (let j = ei; j < this.seatEmblemSprites.length; j++) {
+        this.seatEmblemSprites[j].visible = false;
+      }
+    }
 
     const t = Math.min(1, (now - this.robberStart) / ROBBER_MS);
     const from = this.robberFrom ?? this.robberTo;
@@ -1511,7 +1836,124 @@ export class BoardRenderer {
     }
   }
 
-  private addTokens(numbers: number[]) {
+  private getSeatEmblemMaterial(owner: number): THREE.SpriteMaterial {
+    const idx = ((owner % PLAYER_COLORS.length) + PLAYER_COLORS.length) % PLAYER_COLORS.length;
+    let mat = this.seatEmblemMaterials.get(idx);
+    if (!mat) {
+      const tex = seatEmblemTexture(idx);
+      mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true, depthWrite: false });
+      this.seatEmblemMaterials.set(idx, mat);
+    }
+    return mat;
+  }
+
+  /** Renders the Caravans mode Golden River (winding turquoise ribbon + golden shimmer banks) & Desert oasis. */
+  private addGoldenRiver(riverEdges: number[], terrain: number[]) {
+    const valid = riverEdges.filter((e) => e >= 0 && e < this.edgeXZ.length);
+    if (!valid.length || !this.topology) return;
+
+    const bankMaterial = std(0xf2c64d, {
+      metalness: 0.42,
+      roughness: 0.34,
+      emissive: 0x5c3e06,
+    });
+    const waterMaterial = std(0x1cc7d8, {
+      metalness: 0.28,
+      roughness: 0.2,
+      emissive: 0x0b5260,
+    });
+
+    const banks = this.instanced(riverBankGeometry, bankMaterial, valid.length);
+    const ribbons = this.instanced(riverRibbonGeometry, waterMaterial, valid.length);
+    banks.castShadow = false;
+    ribbons.castShadow = false;
+
+    const vertexSet = new Set<number>();
+    const ev = this.topology.edgeVertices;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const s = new THREE.Vector3(1, 1, 1);
+    const p = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+
+    valid.forEach((e, i) => {
+      const spot = this.edgeXZ[e];
+      q.setFromAxisAngle(up, spot.angle);
+      banks.setMatrixAt(i, m.compose(p.set(spot.x, TOP - 0.004, spot.z), q, s));
+      ribbons.setMatrixAt(i, m.compose(p.set(spot.x, TOP + 0.012, spot.z), q, s));
+      if (2 * e + 1 < ev.length) {
+        vertexSet.add(ev[2 * e]);
+        vertexSet.add(ev[2 * e + 1]);
+      }
+    });
+
+    this.commit(banks, valid.length);
+    this.commit(ribbons, valid.length);
+    this.board.add(banks, ribbons);
+    this.disposables.push(bankMaterial, waterMaterial, banks, ribbons);
+
+    const bendVertices = [...vertexSet].filter((v) => v >= 0 && v < this.vertexXZ.length);
+    if (bendVertices.length) {
+      const bendBanks = this.instanced(riverBendBankGeometry, bankMaterial, bendVertices.length);
+      const bendWaters = this.instanced(riverBendWaterGeometry, waterMaterial, bendVertices.length);
+      bendBanks.castShadow = false;
+      bendWaters.castShadow = false;
+      bendVertices.forEach((v, i) => {
+        const [vx, vz] = this.vertexXZ[v];
+        bendBanks.setMatrixAt(i, m.makeTranslation(vx, TOP - 0.004, vz));
+        bendWaters.setMatrixAt(i, m.makeTranslation(vx, TOP + 0.012, vz));
+      });
+      this.commit(bendBanks, bendVertices.length);
+      this.commit(bendWaters, bendVertices.length);
+      this.board.add(bendBanks, bendWaters);
+      this.disposables.push(bendBanks, bendWaters);
+    }
+
+    const deserts = [...terrain.keys()].filter((t) => terrain[t] === DESERT_TERRAIN);
+    if (deserts.length) {
+      const trunkMat = std(0x7a4e2b, { roughness: 0.82 });
+      const crownMat = std(0x2a8a46, { roughness: 0.68 });
+      const oasisBanks = this.instanced(oasisBankGeometry, bankMaterial, deserts.length);
+      const oasisPools = this.instanced(oasisPoolGeometry, waterMaterial, deserts.length);
+      const palmsPerTile = 3;
+      const trunks = this.instanced(oasisTrunkGeometry, trunkMat, deserts.length * palmsPerTile);
+      const crowns = this.instanced(oasisCrownGeometry, crownMat, deserts.length * palmsPerTile);
+      oasisBanks.castShadow = false;
+      oasisPools.castShadow = false;
+
+      const palmAngles = [2.15, 3.55, -1.35];
+      let nPalms = 0;
+      deserts.forEach((t, i) => {
+        const [cx, cz] = this.tileXZ[t];
+        const ox = cx - 0.04;
+        const oz = cz - 0.02;
+        oasisBanks.setMatrixAt(i, m.makeTranslation(ox, TOP + 0.004, oz));
+        oasisPools.setMatrixAt(i, m.makeTranslation(ox, TOP + 0.012, oz));
+
+        palmAngles.forEach((ang, k) => {
+          const r = 0.27 + (k % 2) * 0.03;
+          const px = ox + Math.cos(ang) * r;
+          const pz = oz + Math.sin(ang) * r;
+          const sc = 0.92 + k * 0.08;
+          q.setFromAxisAngle(up, -ang);
+          s.set(sc, sc, sc);
+          m.compose(p.set(px, TOP + 0.006, pz), q, s);
+          trunks.setMatrixAt(nPalms, m);
+          crowns.setMatrixAt(nPalms, m);
+          nPalms++;
+        });
+      });
+
+      this.commit(oasisBanks, deserts.length);
+      this.commit(oasisPools, deserts.length);
+      this.commit(trunks, nPalms);
+      this.commit(crowns, nPalms);
+      this.board.add(oasisBanks, oasisPools, trunks, crowns);
+      this.disposables.push(trunkMat, crownMat, oasisBanks, oasisPools, trunks, crowns);
+    }
+  }
+
+  private addTokens(numbers: number[], terrain: number[]) {
     const discMaterial = std(0xf3ead2, { roughness: 0.7 });
     this.disposables.push(discMaterial);
     numbers.forEach((n, i) => {
@@ -1520,8 +1962,10 @@ export class BoardRenderer {
       const disc = new THREE.Mesh(tokenGeometry, discMaterial);
       disc.position.set(x, TOP + 0.025, z);
       disc.castShadow = true;
-      let tex = this.numberTextures.get(n);
-      if (!tex) this.numberTextures.set(n, (tex = numberTexture(n)));
+      const tCode = this._colorblind ? terrain[i] : undefined;
+      const key = tCode === undefined ? String(n) : `cb:${n}:${tCode}`;
+      let tex = this.numberTextures.get(key);
+      if (!tex) this.numberTextures.set(key, (tex = numberTexture(n, tCode)));
       const labelMaterial = new THREE.MeshStandardMaterial({ map: tex, transparent: true, roughness: 0.7 });
       const label = new THREE.Mesh(labelGeometry, labelMaterial);
       label.position.set(x, TOP + 0.052, z);

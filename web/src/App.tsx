@@ -1,4 +1,6 @@
 import { batch, createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { toggleMute } from './audio/sound';
+import { isColorblindMode, onColorblindChange, toggleColorblindMode } from './board/a11y';
 import type { BoardRenderer, Insets, PickKind } from './board/BoardRenderer';
 import { DailyChallengeModal, SetupAdvisorOverlay } from './components/DailyChallenge';
 import { DiceView, Flights, GameLog, HandBar, PlayerList, SoundToggle, ThemeToggle, TileTooltip } from './components/Hud';
@@ -6,6 +8,7 @@ import { Lobby, randomSeed, type CreateRoom } from './components/Lobby';
 import { MapWorkshopModal } from './components/MapWorkshop';
 import {
   CityUpgradeModal,
+  CoinMarketModal,
   DiscardModal,
   FishMarketModal,
   GameOverModal,
@@ -19,6 +22,8 @@ import {
 } from './components/Modals';
 import { JoinPrompt, RoomLobby } from './components/Room';
 import { RulesModal } from './components/RulesDrawer';
+import { LangToggle, ShortcutsModal } from './components/ShortcutsModal';
+import { TUTORIAL_PRESET, TutorialCoach } from './components/Tutorial';
 import { EngineError, loadEngine, Match, previewCustomMap, Replay, topology } from './engine';
 import { boardData, createGame, type Game } from './game/controller';
 import { recordDailyResult, type DailyChallengeSpec } from './game/daily';
@@ -26,9 +31,11 @@ import { createLocalSource, createOnlineSource, createReplaySource, replayUrl, t
 import { EMBEDDED } from './embed';
 import { errorText } from './game/text';
 import { saveLocalReplay } from './game/replay-history';
+import { t } from './i18n';
 import type { DevCard, HouseRules, ReplayRecord, Scenario } from './generated/proto';
 import { account, initAccounts } from './net/account';
 import { createConnection, savedName, savedToken, type Connection } from './net/connection';
+import { autoSubmitDailyReplay } from './net/daily-api';
 import { initPwa } from './pwa';
 
 declare global {
@@ -87,14 +94,19 @@ export default function App() {
   const [rulesOpen, setRulesOpen] = createSignal(false);
   const [workshopOpen, setWorkshopOpen] = createSignal(false);
   const [dailyOpen, setDailyOpen] = createSignal(false);
+  const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
+  const [tutorialActive, setTutorialActive] = createSignal(false);
+  const [colorblind, setColorblind] = createSignal(isColorblindMode());
   const [tradeOpen, setTradeOpen] = createSignal(false);
   const [citadelOpen, setCitadelOpen] = createSignal(false);
   const [fishOpen, setFishOpen] = createSignal(false);
+  const [coinOpen, setCoinOpen] = createSignal(false);
   const [devModal, setDevModal] = createSignal<'YearOfPlenty' | 'Monopoly' | null>(null);
   // The log (with chat) starts open on wide screens and as a toggle on phones.
   const [logOpen, setLogOpen] = createSignal(window.innerWidth > 720);
   let lastLocal: LocalOptions | null = null;
   let activeDailyKey: string | null = null;
+  onCleanup(onColorblindChange(setColorblind));
 
   onMount(async () => {
     if (!EMBEDDED) {
@@ -145,16 +157,18 @@ export default function App() {
     connect({ type: 'Create', ...o });
   }
 
-  async function startLocal(o: LocalOptions, dailyDateKey: string | null = null) {
+  async function startLocal(o: LocalOptions, dailyDateKey: string | null = null, isTutorial = false) {
     const r = renderer();
     if (!r) return;
     lastLocal = o;
     activeDailyKey = dailyDateKey;
+    setTutorialActive(isTutorial);
     game()?.dispose();
     setGame(null);
     setTradeOpen(false);
     setCitadelOpen(false);
     setFishOpen(false);
+    setCoinOpen(false);
     const source = await createLocalSource(o, (rec) => {
       saveLocalReplay(rec);
       if (activeDailyKey && o.humanSeat !== null) {
@@ -163,6 +177,7 @@ export default function App() {
         const turns = g?.view().turn ?? 0;
         const pts = g?.view().finalPoints?.[o.humanSeat] ?? g?.view().me?.victoryPoints ?? 0;
         recordDailyResult(activeDailyKey, won, turns, pts);
+        void autoSubmitDailyReplay(activeDailyKey, o.humanSeat, rec);
       }
     });
     setGame(createGame(source, r));
@@ -332,16 +347,36 @@ export default function App() {
       setTradeOpen(false);
       setCitadelOpen(false);
       setFishOpen(false);
+      setCoinOpen(false);
       setDevModal(null);
     }
   });
 
   const onKey = (e: KeyboardEvent) => {
+    if ((e.target as HTMLElement).closest('input, select, textarea')) return;
+    if (e.key === '?') {
+      e.preventDefault();
+      setShortcutsOpen(!shortcutsOpen());
+      return;
+    }
+    if (e.key === 'm' || e.key === 'M') {
+      toggleMute();
+      return;
+    }
+    if (e.key === 'r' || e.key === 'R') {
+      setRulesOpen(!rulesOpen());
+      return;
+    }
     const g = game();
-    if (!g || (e.target as HTMLElement).closest('input, select, textarea')) return;
+    if (!g) return;
     if (e.key === 'Escape') {
       g.setMode(null);
       setTradeOpen(false);
+      setCitadelOpen(false);
+      setFishOpen(false);
+      setCoinOpen(false);
+      setRulesOpen(false);
+      setShortcutsOpen(false);
       setDevModal(null);
     } else if (e.key === ' ' && g.replay) {
       // A focused button handles Space itself.
@@ -353,6 +388,17 @@ export default function App() {
     } else if (e.key === ' ' && g.has('RollDice')) {
       e.preventDefault();
       g.act((a) => a.type === 'RollDice');
+    } else if (!g.replay) {
+      if ((e.key === 'e' || e.key === 'E') && g.has('EndTurn')) g.act((a) => a.type === 'EndTurn');
+      else if (e.key === '1' && g.has('BuildRoad')) g.setMode('road');
+      else if (e.key === '2' && g.has('BuildSettlement')) g.setMode('settlement');
+      else if (e.key === '3' && g.has('BuildCity')) g.setMode('city');
+      else if (e.key === '4') {
+        if (g.has('BuildShip')) g.setMode('ship');
+        else if (g.has('BuildBridge')) g.setMode('bridge');
+      } else if ((e.key === 't' || e.key === 'T') && g.view().phase.type === 'Main' && g.view().current === g.me) {
+        setTradeOpen(!tradeOpen());
+      }
     }
   };
   window.addEventListener('keydown', onKey);
@@ -408,6 +454,29 @@ export default function App() {
               onOpenRules={() => setRulesOpen(true)}
               onOpenWorkshop={() => setWorkshopOpen(true)}
               onOpenDaily={() => setDailyOpen(true)}
+              onOpenShortcuts={() => setShortcutsOpen(true)}
+              onStartTutorial={() => {
+                void startLocal(
+                  {
+                    players: TUTORIAL_PRESET.players,
+                    humanSeat: 0,
+                    bot: 'greedy',
+                    seed: TUTORIAL_PRESET.seed,
+                    fast: false,
+                    scenario: TUTORIAL_PRESET.scenario,
+                    rules: {
+                      victoryPoints: TUTORIAL_PRESET.victoryPoints,
+                      friendlyRobber: true,
+                      pairedTurns: false,
+                      eventDeck: true,
+                      turnTimerSecs: 0,
+                      customMap: null,
+                    },
+                  },
+                  null,
+                  true,
+                );
+              }}
               onSeed={setPreviewSeed}
               onStartLocal={(o) => startLocal(o)}
               onCreateRoom={createRoom}
@@ -440,13 +509,13 @@ export default function App() {
           <>
             <header class="topbar">
               <button class="ghost" onClick={() => leave()}>
-                ← 大厅
+                ← {t('大厅', 'Lobby')}
               </button>
               <Show when={conn()}>
-                {(c) => <span class="room-tag muted">房间 {c().roomId()}</span>}
+                {(c) => <span class="room-tag muted">{t('房间', 'Room')} {c().roomId()}</span>}
               </Show>
               <Show when={conn()?.room()?.ranked}>
-                <span class="room-tag mode-tag ranked">排位赛</span>
+                <span class="room-tag mode-tag ranked">{t('排位赛', 'Ranked')}</span>
               </Show>
               <Show when={g().turnSecondsLeft()}>
                 {(secs) => (
@@ -456,11 +525,15 @@ export default function App() {
                 )}
               </Show>
               <Show when={g().replay}>
-                <span class="room-tag muted">回放</span>
+                <span class="room-tag muted">{t('回放', 'Replay')}</span>
               </Show>
               <button class="ghost" onClick={() => setRulesOpen(true)}>
-                规则
+                {t('规则', 'Rules')}
               </button>
+              <button class="ghost" onClick={() => setShortcutsOpen(true)} title="快捷键与色盲无障碍设置 (?)">
+                ?
+              </button>
+              <LangToggle class="ghost" />
               <ThemeToggle renderer={renderer()} class="ghost" />
               <SoundToggle class="ghost" />
               <button
@@ -494,11 +567,15 @@ export default function App() {
               onTrade={() => setTradeOpen(true)}
               onCitadel={() => setCitadelOpen(true)}
               onFishMarket={() => setFishOpen(true)}
+              onCoinMarket={() => setCoinOpen(true)}
               onDevCard={(c) => playDevCard(g(), c)}
             />
             <Flights game={g()} />
             <TileTooltip game={g()} />
-            <Show when={renderer()}>
+            <Show when={tutorialActive() && !g().online && !g().replay}>
+              <TutorialCoach game={g()} onExitTutorial={() => setTutorialActive(false)} />
+            </Show>
+            <Show when={!tutorialActive() && renderer()}>
               {(r) => <SetupAdvisorOverlay game={g()} project={(kind, id) => r().project(kind, id)} />}
             </Show>
 
@@ -521,6 +598,9 @@ export default function App() {
             </Show>
             <Show when={fishOpen()}>
               <FishMarketModal game={g()} onClose={() => setFishOpen(false)} />
+            </Show>
+            <Show when={coinOpen()}>
+              <CoinMarketModal game={g()} onClose={() => setCoinOpen(false)} />
             </Show>
             <Show when={devModal() === 'YearOfPlenty'}>
               <YearOfPlentyModal game={g()} onClose={() => setDevModal(null)} />
@@ -553,6 +633,18 @@ export default function App() {
           rules={activeRules()}
           customMap={activeRules()?.customMap ?? null}
           onClose={() => setRulesOpen(false)}
+        />
+      </Show>
+
+      <Show when={shortcutsOpen()}>
+        <ShortcutsModal
+          colorblind={colorblind()}
+          onToggleColorblind={() => {
+            const next = toggleColorblindMode();
+            setColorblind(next);
+            renderer()?.setColorblind(next);
+          }}
+          onClose={() => setShortcutsOpen(false)}
         />
       </Show>
 

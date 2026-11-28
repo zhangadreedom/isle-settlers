@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-web:
+    name: Build WASM, Web & Single-File Embed
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache wasm-bindgen-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: ${{ runner.os }}-wasm-bindgen-cli-0.2.130
+
+      - name: Install wasm-bindgen-cli 0.2.130
+        run: |
+          if ! wasm-bindgen --version 2>/dev/null | grep -qx 'wasm-bindgen 0.2.130'; then
+            cargo install wasm-bindgen-cli --version 0.2.130 --locked --force
+          fi
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm 10.28.0
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.0 --activate
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build WASM, production web, and embedded web
+        run: pnpm build && pnpm build:embed
+
+      - name: Package isle-settlers-embed.zip
+        run: |
+          cd web/dist-embed
+          zip -r ../../isle-settlers-embed.zip .
+
+      - name: Upload web/dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Upload isle-settlers-embed.zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: embed-bundle
+          path: isle-settlers-embed.zip
+
+  build-server:
+    name: Build Server (${{ matrix.target }})
+    needs: build-web
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            bin: isle-server
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            bin: isle-server.exe
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            bin: isle-server
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Download web/dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Build isle-server release binary
+        run: cargo build --release --locked -p isle-server --target ${{ matrix.target }}
+
+      - name: Bundle server + web/dist (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          pkg="isle-settlers-${{ matrix.target }}"
+          mkdir -p "dist-pkg/${pkg}/web"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist-pkg/${pkg}/"
+          cp -r web/dist "dist-pkg/${pkg}/web/dist"
+          cp README.md "dist-pkg/${pkg}/"
+          tar -C dist-pkg -czf "${pkg}.tar.gz" "${pkg}"
+
+      - name: Bundle server + web/dist (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $pkg = "isle-settlers-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist-pkg/$pkg/web" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist-pkg/$pkg/"
+          Copy-Item -Recurse web/dist "dist-pkg/$pkg/web/dist"
+          Copy-Item README.md "dist-pkg/$pkg/"
+          Compress-Archive -Path "dist-pkg/$pkg" -DestinationPath "$pkg.zip" -Force
+
+      - name: Upload server bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.target }}
+          path: isle-settlers-${{ matrix.target }}.${{ matrix.archive }}
+
+  release:
+    name: Publish GitHub Release
+    needs: [build-web, build-server]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-raw
+          merge-multiple: true
+          pattern: |
+            embed-bundle
+            server-*
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd release-raw
+          sha256sum isle-settlers-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-raw/isle-settlers-embed.zip
+            release-raw/isle-settlers-x86_64-unknown-linux-gnu.tar.gz
+            release-raw/isle-settlers-x86_64-pc-windows-msvc.zip
+            release-raw/isle-settlers-aarch64-apple-darwin.tar.gz
+            release-raw/SHA256SUMS.txt

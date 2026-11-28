@@ -132,6 +132,7 @@ pub(crate) mod tests {
             (isle_core::Scenario::FogIslands, 6u8, false, 22..28u64),
             (isle_core::Scenario::Citadels, 4u8, false, 28..38u64),
             (isle_core::Scenario::Fishermen, 4u8, true, 38..46u64),
+            (isle_core::Scenario::Caravans, 4u8, false, 46..56u64),
         ] {
             for seed in seeds {
                 let config = GameConfig {

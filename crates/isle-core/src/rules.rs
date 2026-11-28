@@ -129,7 +129,7 @@ impl GameState {
                 if !(self.occupied_edges() & bit).is_empty() {
                     return Err(E::Occupied);
                 }
-                if (self.board.land_edges & bit).is_empty() {
+                if (self.board.land_edges & !self.board.river_edges & bit).is_empty() {
                     return Err(E::WrongGround);
                 }
                 match self.phase {
@@ -197,7 +197,9 @@ impl GameState {
                     if !ps.hand.contains(&cost::SETTLEMENT) {
                         return Err(E::InsufficientResources);
                     }
-                    let route = self.roads[player as usize] | self.ships[player as usize];
+                    let route = self.roads[player as usize]
+                        | self.ships[player as usize]
+                        | self.bridges[player as usize];
                     if (topo.vertex_edge_mask[v as usize] & route).is_empty() {
                         return Err(E::NotConnected);
                     }
@@ -662,7 +664,7 @@ impl GameState {
                 if !(self.occupied_edges() & bit).is_empty() {
                     return Err(E::Occupied);
                 }
-                if (self.board.land_edges & bit).is_empty() {
+                if (self.board.land_edges & !self.board.river_edges & bit).is_empty() {
                     return Err(E::WrongGround);
                 }
                 if (self.road_spots(player) & bit).is_empty() {
@@ -680,6 +682,73 @@ impl GameState {
                 }
                 if self.dev_deck_len == 0 {
                     return Err(E::DeckEmpty);
+                }
+                Ok(())
+            }
+
+            Action::PlaceCamel(e) => {
+                self.require_phase(Phase::PlaceCamel)?;
+                if e as usize >= topo.num_edges {
+                    return Err(E::InvalidEdge);
+                }
+                let bit = BitSet::bit(e);
+                if !(self.camels & bit).is_empty() {
+                    return Err(E::Occupied);
+                }
+                if (self.board.land_edges & bit).is_empty() {
+                    return Err(E::WrongGround);
+                }
+                if (self.camel_spots() & bit).is_empty() {
+                    return Err(E::NotConnected);
+                }
+                Ok(())
+            }
+
+            Action::BuildBridge(e) => {
+                if !self.config.scenario.is_caravans() {
+                    return Err(E::WrongPhase);
+                }
+                if !matches!(
+                    self.phase,
+                    Phase::Main
+                        | Phase::RoadBuilding { .. }
+                        | Phase::SpecialBuild { .. }
+                        | Phase::PairedTurn { .. }
+                ) {
+                    return Err(E::WrongPhase);
+                }
+                if e as usize >= topo.num_edges {
+                    return Err(E::InvalidEdge);
+                }
+                let bit = BitSet::bit(e);
+                if !(self.occupied_edges() & bit).is_empty() {
+                    return Err(E::Occupied);
+                }
+                if (self.board.river_edges & bit).is_empty() {
+                    return Err(E::WrongGround);
+                }
+                if ps.bridges_left == 0 {
+                    return Err(E::NoPiecesLeft);
+                }
+                let paid = !matches!(self.phase, Phase::RoadBuilding { .. });
+                if paid && !ps.hand.contains(&cost::BRIDGE) {
+                    return Err(E::InsufficientResources);
+                }
+                if (self.bridge_spots(player) & bit).is_empty() {
+                    return Err(E::NotConnected);
+                }
+                Ok(())
+            }
+
+            Action::SpendCoinsResource(r) => {
+                if !self.config.scenario.is_caravans() || !main_or_paired {
+                    return Err(E::WrongPhase);
+                }
+                if ps.coins < 2 {
+                    return Err(E::InsufficientResources);
+                }
+                if self.bank[r] == 0 {
+                    return Err(E::BankShort);
                 }
                 Ok(())
             }
@@ -729,11 +798,14 @@ impl GameState {
         }
     }
 
-    /// Somewhere to place a free road or ship (Road Building).
+    /// Somewhere to place a free road, ship or bridge (Road Building).
     fn can_build_free_route(&self, player: u8) -> bool {
         let ps = &self.players[player as usize];
         (ps.roads_left > 0 && !self.road_spots(player).is_empty())
             || (ps.ships_left > 0 && !self.ship_spots(player).is_empty())
+            || (self.config.scenario.is_caravans()
+                && ps.bridges_left > 0
+                && !self.bridge_spots(player).is_empty())
     }
 
     fn check_dev_card(&self, player: u8, card: DevCard) -> Result<(), RuleError> {
@@ -926,6 +998,9 @@ impl GameState {
                             player,
                             resources: got,
                         });
+                        if self.config.scenario.is_caravans() {
+                            self.gain_coins(player, 2, sink);
+                        }
                     }
                     self.phase = if gold > 0 {
                         self.pending_gold[p] = gold;
@@ -952,8 +1027,17 @@ impl GameState {
                     // Roads and ships join at one's own settlement, which
                     // can lengthen the builder's own route.
                     let at_v = self.topo().vertex_edge_mask[v as usize];
-                    if !(self.roads[p] & at_v).is_empty() && !(self.ships[p] & at_v).is_empty() {
+                    if !((self.roads[p] | self.bridges[p]) & at_v).is_empty()
+                        && !(self.ships[p] & at_v).is_empty()
+                    {
                         self.update_longest_road_after_build(player, sink);
+                    }
+                    if self.config.scenario.is_caravans() {
+                        self.check_winner(sink);
+                        if self.winner.is_none() && !self.camel_spots().is_empty() {
+                            self.after_camel = self.phase;
+                            self.phase = Phase::PlaceCamel;
+                        }
                     }
                 }
             }
@@ -965,6 +1049,13 @@ impl GameState {
                 self.players[p].settlements_left += 1;
                 self.players[p].cities_left -= 1;
                 sink.emit(Event::CityBuilt { player, vertex: v });
+                if self.config.scenario.is_caravans() {
+                    self.check_winner(sink);
+                    if self.winner.is_none() && !self.camel_spots().is_empty() {
+                        self.after_camel = self.phase;
+                        self.phase = Phase::PlaceCamel;
+                    }
+                }
             }
 
             Action::BuyDevCard => {
@@ -999,8 +1090,13 @@ impl GameState {
                 } else {
                     0
                 };
+                let bridges = if self.config.scenario.is_caravans() {
+                    ps.bridges_left
+                } else {
+                    0
+                };
                 self.phase = Phase::RoadBuilding {
-                    remaining: (ps.roads_left + ships).min(2),
+                    remaining: ps.roads_left.saturating_add(ships).saturating_add(bridges).min(2),
                 };
             }
 
@@ -1330,6 +1426,42 @@ impl GameState {
                 });
             }
 
+            Action::PlaceCamel(edge) => {
+                self.camels.insert(edge);
+                sink.emit(Event::CamelPlaced { player, edge });
+                for q in 0..self.num_players() as u8 {
+                    if (self.roads[q as usize] | self.bridges[q as usize]).contains(edge) {
+                        self.update_longest_road_after_build(q, sink);
+                    }
+                }
+                self.phase = std::mem::replace(&mut self.after_camel, Phase::Main);
+            }
+
+            Action::BuildBridge(e) => {
+                let free = matches!(self.phase, Phase::RoadBuilding { .. });
+                if !free {
+                    self.pay(p, cost::BRIDGE);
+                }
+                self.bridges[p].insert(e);
+                self.players[p].bridges_left -= 1;
+                sink.emit(Event::BridgeBuilt { player, edge: e });
+                self.gain_coins(player, 2, sink);
+                self.update_longest_road_after_build(player, sink);
+                self.after_route_piece(player);
+            }
+
+            Action::SpendCoinsResource(r) => {
+                self.players[p].coins -= 2;
+                self.bank[r] -= 1;
+                self.players[p].hand[r] += 1;
+                self.reassign_wealthiest();
+                sink.emit(Event::CoinsSpent {
+                    player,
+                    cost: 2,
+                    resource: r,
+                });
+            }
+
             Action::EndTurn => {
                 let n = self.num_players();
                 if let Phase::SpecialBuild { builder } = self.phase {
@@ -1385,13 +1517,19 @@ impl GameState {
             }
         }
 
+        self.check_winner(sink);
+    }
+
+    fn check_winner<S: EventSink + ?Sized>(&mut self, sink: &mut S) {
         // A player can only win on their own primary turn; points gained
         // during an opponent's turn or a secondary phase count once theirs begins.
         if self.phase != Phase::GameOver
             && !self.is_setup()
             && !matches!(
                 self.phase,
-                Phase::SpecialBuild { .. } | Phase::PairedTurn { .. }
+                Phase::SpecialBuild { .. }
+                    | Phase::PairedTurn { .. }
+                    | Phase::PlaceCamel
             )
             && self.in_paired_turn.is_none()
         {
@@ -1408,6 +1546,40 @@ impl GameState {
                 });
             }
         }
+    }
+
+    fn gain_coins<S: EventSink + ?Sized>(&mut self, player: u8, amount: u8, sink: &mut S) {
+        let p = player as usize;
+        let before = self.players[p].coins;
+        let after = before.saturating_add(amount).min(MAX_COINS);
+        let gained = after - before;
+        self.players[p].coins = after;
+        if gained > 0 {
+            sink.emit(Event::CoinsGained {
+                player,
+                amount: gained,
+            });
+            self.reassign_wealthiest();
+        }
+    }
+
+    pub fn reassign_wealthiest(&mut self) {
+        let max = (0..self.num_players())
+            .map(|q| self.players[q].coins)
+            .max()
+            .unwrap_or(0);
+        if let Some(h) = self.wealthiest_owner {
+            let c = self.players[h as usize].coins;
+            if c >= WEALTHIEST_MIN_COINS && c == max {
+                return;
+            }
+        }
+        let mut leaders =
+            (0..self.num_players() as u8).filter(|&q| self.players[q as usize].coins == max);
+        self.wealthiest_owner = match (leaders.next(), leaders.next()) {
+            (Some(q), None) if max >= WEALTHIEST_MIN_COINS => Some(q),
+            _ => None,
+        };
     }
 
     fn move_robber_and_steal<S: EventSink + ?Sized>(
@@ -1796,6 +1968,41 @@ impl GameState {
                 gold[q] = 1;
             }
         }
+        if self.config.scenario.is_caravans() {
+            let topo = self.topo();
+            let mut coins_owed = [0u8; MAX_PLAYERS];
+            for &t in &self.board.tiles_by_number[roll as usize] {
+                if t == NONE || t == self.robber {
+                    continue;
+                }
+                let terrain = self.board.terrain[t as usize];
+                let gives_coin =
+                    matches!(terrain, crate::Terrain::Gold | crate::Terrain::Mountains)
+                        || !(topo.tile_edge_mask(t) & self.board.river_edges).is_empty();
+                if !gives_coin {
+                    continue;
+                }
+                let tv = topo.tile_vertex_mask[t as usize];
+                for q in 0..n {
+                    let b_cnt = (self.buildings_of(q as u8) & tv).count_ones() as u8;
+                    if b_cnt == 0 {
+                        continue;
+                    }
+                    let produced = match terrain.resource() {
+                        Some(r) => owed[q][r] > 0,
+                        None => terrain == crate::Terrain::Gold && self.bank.total() > 0,
+                    };
+                    if produced {
+                        coins_owed[q] = coins_owed[q].saturating_add(b_cnt);
+                    }
+                }
+            }
+            for q in 0..n {
+                if coins_owed[q] > 0 {
+                    self.gain_coins(q as u8, coins_owed[q], sink);
+                }
+            }
+        }
         if gold.iter().all(|&g| g == 0) {
             return false;
         }
@@ -1909,7 +2116,8 @@ impl GameState {
         let edges_at_v = self.topo().vertex_edge_mask[v as usize];
         let mut changed = false;
         for q in 0..self.num_players() as u8 {
-            let route = self.roads[q as usize] | self.ships[q as usize];
+            let route =
+                self.roads[q as usize] | self.ships[q as usize] | self.bridges[q as usize];
             if q != builder && (route & edges_at_v).count_ones() >= 2 {
                 let len = self.compute_longest_road(q);
                 if len != self.players[q as usize].longest_road {

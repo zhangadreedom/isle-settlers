@@ -63,13 +63,16 @@ fn parse_args() -> Args {
                 a.max_turns = val().parse().unwrap_or_else(|_| usage("bad --max-turns"))
             }
             "--scenario" => {
-                a.scenario = match val().as_str() {
+                a.scenario = match val().to_ascii_lowercase().as_str() {
                     "classic" => Scenario::Classic,
                     "archipelago" => Scenario::Archipelago,
-                    "fog" | "fog-islands" | "fog_islands" => Scenario::FogIslands,
+                    "fog" | "fog-islands" | "fog_islands" | "fogislands" => Scenario::FogIslands,
                     "citadels" | "cities" | "ck" => Scenario::Citadels,
                     "fishermen" | "fish" => Scenario::Fishermen,
-                    _ => usage("--scenario must be classic, archipelago, fog, citadels or fishermen"),
+                    "caravans" | "camel" | "camels" => Scenario::Caravans,
+                    _ => usage(
+                        "--scenario must be classic, archipelago, fog, citadels, fishermen or caravans",
+                    ),
                 }
             }
             "--friendly-robber" => a.friendly_robber = true,
@@ -102,10 +105,10 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: isle-sim [--games N] [--players 2-6] [--scenario classic|archipelago|fog|citadels|fishermen]\n\
+        "usage: isle-sim [--games N] [--players 2-6] [--scenario classic|archipelago|fog|citadels|fishermen|caravans]\n\
          \x20               [--friendly-robber] [--paired-turns] [--event-deck] [--seed S] [--threads T]\n\
          \x20               [--bot NAME | --bots NAME,NAME,...] [--rotate] [--max-turns N] [--check]\n\
-         bots: random, weighted, greedy, greedy:trade, mcts, mcts:N (N iterations), mcts:N/key=value/..."
+         bots: random, weighted, greedy, greedy:trade, mcts, mcts:N (with optional @road|@city|@warlord|@merchant)"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 });
 }
@@ -129,6 +132,10 @@ struct Stats {
     metropolises: u64,
     defender_points: u64,
     knights: u64,
+    /// Caravans: camel segments placed, stone bridges built and final gold coins.
+    camels: u64,
+    bridges: u64,
+    coins: u64,
 }
 
 fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
@@ -164,7 +171,10 @@ fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
             s.islands += g.players[p].islands.count_ones() as u64;
             s.ships += g.ships[p].count_ones() as u64;
             s.defender_points += g.players[p].defender_points as u64;
+            s.bridges += g.bridges[p].count_ones() as u64;
+            s.coins += g.players[p].coins as u64;
         }
+        s.camels += g.camels.count_ones() as u64;
         if g.board.layout.has_fog() {
             s.revealed += fog_pool_len - g.fog_terrain_len as u64;
         }
@@ -219,6 +229,9 @@ fn main() {
         total.metropolises += s.metropolises;
         total.defender_points += s.defender_points;
         total.knights += s.knights;
+        total.camels += s.camels;
+        total.bridges += s.bridges;
+        total.coins += s.coins;
         for p in 0..MAX_PLAYERS {
             total.wins[p] += s.wins[p];
             total.wins_by_bot[p] += s.wins_by_bot[p];
@@ -296,6 +309,22 @@ fn main() {
         println!(
             "knights at end  {:.2} per player",
             total.knights as f64 / per_player
+        );
+    }
+    if args.scenario == Scenario::Caravans {
+        println!(
+            "camels placed   {:.2} / {} per game",
+            total.camels as f64 / g,
+            isle_core::MAX_CAMELS
+        );
+        println!(
+            "bridges built   {:.2} / {} per player",
+            total.bridges as f64 / per_player,
+            isle_core::MAX_BRIDGES
+        );
+        println!(
+            "coins at end    {:.2} per player",
+            total.coins as f64 / per_player
         );
     }
     let wins: Vec<String> = (0..args.players as usize)

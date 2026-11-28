@@ -47,13 +47,18 @@ impl GameState {
             }
             Phase::SetupRoad { vertex } => {
                 let free = self.topo().vertex_edge_mask[vertex as usize] & !self.occupied_edges();
-                for e in edges_in(free & self.board.land_edges) {
+                for e in edges_in(free & self.board.land_edges & !self.board.river_edges) {
                     out.push(Action::BuildRoad(e));
                 }
                 if self.board.layout.has_ships() {
                     for e in edges_in(free & self.board.sea_edges & !self.pirate_edges()) {
                         out.push(Action::BuildShip(e));
                     }
+                }
+            }
+            Phase::PlaceCamel => {
+                for e in edges_in(self.camel_spots()) {
+                    out.push(Action::PlaceCamel(e));
                 }
             }
             Phase::Gold { .. } => self.push_gold_choices(player, out),
@@ -94,6 +99,13 @@ impl GameState {
                         }
                     }
                 }
+                if self.config.scenario.is_caravans() && ps.coins >= 2 {
+                    for r in Resource::ALL {
+                        if self.bank[r] > 0 {
+                            out.push(Action::SpendCoinsResource(r));
+                        }
+                    }
+                }
                 if self.phase == Phase::Main
                     && let Some(offer) = self.trade
                 {
@@ -117,6 +129,11 @@ impl GameState {
                 if ps.ships_left > 0 {
                     for e in edges_in(self.ship_spots(player)) {
                         out.push(Action::BuildShip(e));
+                    }
+                }
+                if self.config.scenario.is_caravans() && ps.bridges_left > 0 {
+                    for e in edges_in(self.bridge_spots(player)) {
+                        out.push(Action::BuildBridge(e));
                     }
                 }
             }
@@ -322,6 +339,14 @@ impl GameState {
                 out.push(Action::BuildShip(e));
             }
         }
+        if self.config.scenario.is_caravans()
+            && ps.bridges_left > 0
+            && ps.hand.contains(&cost::BRIDGE)
+        {
+            for e in edges_in(self.bridge_spots(player)) {
+                out.push(Action::BuildBridge(e));
+            }
+        }
         if ps.settlements_left > 0 && ps.hand.contains(&cost::SETTLEMENT) {
             for v in vertices_in(self.settlement_spots(player, true)) {
                 out.push(Action::BuildSettlement(v));
@@ -347,7 +372,10 @@ impl GameState {
             out.push(Action::PlayKnight);
         }
         let route = (ps.roads_left > 0 && !self.road_spots(player).is_empty())
-            || (ps.ships_left > 0 && !self.ship_spots(player).is_empty());
+            || (ps.ships_left > 0 && !self.ship_spots(player).is_empty())
+            || (self.config.scenario.is_caravans()
+                && ps.bridges_left > 0
+                && !self.bridge_spots(player).is_empty());
         if has(DevCard::RoadBuilding) && route {
             out.push(Action::PlayRoadBuilding);
         }

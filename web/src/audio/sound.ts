@@ -683,7 +683,17 @@ export function playForEvents(events: Event[], me: number | null): void {
         if (me === null || e.value.player === me) gained = true;
         break;
       case 'FishSpent':
+      case 'CoinsSpent':
         trade = 'done';
+        break;
+      case 'CamelPlaced':
+        build ??= 'knight';
+        break;
+      case 'BridgeBuilt':
+        build ??= 'city';
+        break;
+      case 'CoinsGained':
+        if (me === null || e.value.player === me) gained = true;
         break;
       case 'OldBootDrawn':
       case 'OldBootPassed':

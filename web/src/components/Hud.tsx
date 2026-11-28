@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import { isMuted, onMuteChange, toggleMute } from '../audio/sound';
 import type { BoardRenderer, BoardTheme } from '../board/BoardRenderer';
+import { t } from '../i18n';
 import { Verified } from './Account';
 import type { BuildMode, Game } from '../game/controller';
 import { EMBEDDED } from '../embed';
@@ -112,6 +113,10 @@ export function PlayerList(props: { game: Game }) {
                 <Show when={g.fishermen}>
                   <span title="海鱼筹码（上限 7 条，可在鱼市兑换奇策）">鱼 {p.fishCount}</span>
                 </Show>
+                <Show when={g.caravans}>
+                  <span title="黄金河金币（满 2 枚可兑资源，≥4 枚争富甲一方 +2 分）">币 {p.coins}</span>
+                  <span title={`跨河石拱桥（还能造 ${p.bridgesLeft} 座）`}>桥 {3 - p.bridgesLeft}</span>
+                </Show>
                 <span title={g.seafaring ? '最长连续商路（道路和船）' : '最长连续道路'}>路 {p.longestRoad}</span>
                 <Show when={g.seafaring}>
                   <span title={`海上的船（还能造 ${p.shipsLeft} 艘）`}>船 {15 - p.shipsLeft}</span>
@@ -124,7 +129,9 @@ export function PlayerList(props: { game: Game }) {
                   islandCount(p.islands) > 0 ||
                   p.defenderPoints > 0 ||
                   metrosOf(p.seat).length > 0 ||
-                  g.view().oldBootOwner === p.seat
+                  g.view().oldBootOwner === p.seat ||
+                  g.view().wealthiestOwner === p.seat ||
+                  (g.caravans && g.view().wealthiestOwner !== null && p.coins === 0)
                 }
               >
                 <div class="badges">
@@ -150,6 +157,16 @@ export function PlayerList(props: { game: Game }) {
                   <Show when={g.view().oldBootOwner === p.seat}>
                     <span class="badge boot-badge" title="破旧皮靴：获胜目标 +1 分，可在鱼市转送给分不低于你的玩家">
                       皮靴（需+1分）
+                    </span>
+                  </Show>
+                  <Show when={g.view().wealthiestOwner === p.seat}>
+                    <span class="badge" title="全场金币最多（≥4 币），奖励 +2 分">
+                      富甲一方 +2
+                    </span>
+                  </Show>
+                  <Show when={g.caravans && g.view().wealthiestOwner !== null && p.coins === 0}>
+                    <span class="badge boot-badge" title="已有首富产生，身无分文（0 币）扣 1 分">
+                      赤贫 −1
                     </span>
                   </Show>
                 </div>
@@ -295,6 +312,7 @@ const MODE_PROMPT: Record<Exclude<BuildMode, null>, string> = {
   knightMove: '先点一名已激活铁卫，再点调遣目标或更低阶对手铁卫（再点一次取消）',
   chase: '先点强盗旁已激活的铁卫，再点强盗要去的地块（再点一次取消）',
   fishRoad: '消耗 5 条海鱼：点选发光位置免费铺筑道路（再点一次取消）',
+  bridge: '消耗 2 砖 + 1 木：点选发光黄金河段架设石拱桥（立得 +2 金币）',
 };
 
 function modePrompt(g: Game): string {
@@ -361,6 +379,10 @@ function prompt(g: Game): string {
     case 'RoadBuilding':
       if (g.seafaring) return myTurn ? `免费放置道路或船（还剩 ${v.phase.value.remaining}）` : `${g.name(v.current)} 正在修路造船…`;
       return myTurn ? `免费放置道路（还剩 ${v.phase.value.remaining} 条）` : `${g.name(v.current)} 正在修路…`;
+    case 'PlaceCamel':
+      return myTurn
+        ? '引导骆驼商队：点击绿洲或商道末端发光边放置 1 头骆驼（穿村+1分、重合道路路长翻倍）'
+        : `${g.name(v.toMove ?? v.current)} 正在引导骆驼商队…`;
     case 'Main':
       if (!myTurn) return `${g.name(v.current)} 的回合`;
       if (v.trade) {
@@ -381,6 +403,7 @@ export function HandBar(props: {
   onTrade: () => void;
   onCitadel?: () => void;
   onFishMarket?: () => void;
+  onCoinMarket?: () => void;
   onDevCard: (card: DevCard) => void;
 }) {
   const g = props.game;
@@ -561,6 +584,29 @@ export function HandBar(props: {
                   >
                     鱼市 ({g.me !== null ? g.view().players[g.me]?.fishCount ?? 0 : 0})
                   </button>
+                </Show>
+                <Show when={g.caravans}>
+                  <button
+                    class="build"
+                    classList={{ on: g.mode() === 'bridge' }}
+                    disabled={!g.has('BuildBridge')}
+                    onClick={() => g.setMode('bridge')}
+                    title="跨黄金河架设石拱桥（2砖 + 1木，奖励 +2 金币）"
+                  >
+                    石桥
+                    <SetView set={[2, 1, 0, 0, 0]} />
+                  </button>
+                  <Show when={canActMain()}>
+                    <button
+                      class="build"
+                      classList={{ primary: g.has('SpendCoinsResource') }}
+                      disabled={!g.has('SpendCoinsResource')}
+                      onClick={() => props.onCoinMarket?.()}
+                      title="每 2 枚金币可从银行购买任意 1 张资源"
+                    >
+                      金币兑物 ({g.me !== null ? g.view().players[g.me]?.coins ?? 0 : 0})
+                    </button>
+                  </Show>
                 </Show>
                 <button class="build" disabled={!g.has('BuyDevCard')} onClick={() => g.act((a) => a.type === 'BuyDevCard')}>
                   发展卡
@@ -760,7 +806,7 @@ export function SoundToggle(props: { class?: string }) {
       title={muted() ? '点击开启桌游音效' : '点击静音'}
       onClick={() => setMutedState(toggleMute())}
     >
-      {muted() ? '静音' : '音效'}
+      {muted() ? t('静音', 'Muted') : t('音效', 'SFX')}
     </button>
   );
 }

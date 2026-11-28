@@ -499,7 +499,7 @@ impl Room {
         };
         let s = &game.state;
         let ms = match s.phase {
-            Phase::SetupSettlement | Phase::SetupRoad { .. } => 450.0,
+            Phase::SetupSettlement | Phase::SetupRoad { .. } | Phase::PlaceCamel => 450.0,
             Phase::PreRoll => 750.0,
             Phase::Discard => 350.0,
             Phase::Main if s.trade.is_some() => 700.0,

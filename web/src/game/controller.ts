@@ -22,6 +22,7 @@ export type BuildMode =
   | 'knightMove'
   | 'chase'
   | 'fishRoad'
+  | 'bridge'
   | null;
 
 export interface LogEntry {
@@ -62,6 +63,7 @@ export function boardData(info: BoardInfo): BoardData {
     harbors: info.harbors.map((h) => (h.type === 'Generic' ? 5 : RESOURCES.indexOf(h.value))),
     islands: info.islands ?? info.terrain.map(() => 1),
     fishingGrounds: info.fishingGrounds,
+    riverEdges: info.riverEdges,
   };
 }
 
@@ -116,6 +118,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     source.board.layout === 'FogIslandsExtended';
   const citadels = source.board.config.scenario === 'Citadels';
   const fishermen = source.board.config.scenario === 'Fishermen';
+  const caravans = source.board.config.scenario === 'Caravans';
 
   let logId = 0;
   let flightId = 0;
@@ -208,6 +211,8 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
         buildings: s.view.buildings,
         roads: s.view.roads,
         ships: s.view.ships,
+        bridges: s.view.bridges,
+        camels: s.view.camels,
         robber: s.view.robber,
         pirate: s.view.pirate,
         knights: s.view.citadels?.knights,
@@ -232,6 +237,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     knightMove: 'MoveKnight',
     chase: 'ChaseRobber',
     fishRoad: 'FishBuildRoad',
+    bridge: 'BuildBridge',
   };
 
   function modeAvailable(m: BuildMode, list: Action[]) {
@@ -243,14 +249,26 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     const list = actions();
     if (!v || !list.length) return null;
     const ids = (
-      type: 'BuildRoad' | 'BuildSettlement' | 'BuildCity' | 'BuildShip' | 'RecruitKnight' | 'ActivateKnight' | 'PromoteKnight' | 'FishBuildRoad',
+      type:
+        | 'BuildRoad'
+        | 'BuildSettlement'
+        | 'BuildCity'
+        | 'BuildShip'
+        | 'RecruitKnight'
+        | 'ActivateKnight'
+        | 'PromoteKnight'
+        | 'FishBuildRoad'
+        | 'PlaceCamel'
+        | 'BuildBridge',
     ) => list.flatMap((a) => (a.type === type ? [a.value] : []));
     switch (v.phase.type) {
       case 'SetupSettlement':
         return { kind: 'vertex', ids: ids('BuildSettlement') };
       case 'SetupRoad':
       case 'RoadBuilding':
-        return { kind: 'edge', ids: [...new Set([...ids('BuildRoad'), ...ids('BuildShip')])] };
+        return { kind: 'edge', ids: [...new Set([...ids('BuildRoad'), ...ids('BuildShip'), ...ids('BuildBridge')])] };
+      case 'PlaceCamel':
+        return { kind: 'edge', ids: ids('PlaceCamel') };
       case 'MoveRobber':
         return { kind: 'tile', ids: [...new Set(list.flatMap((a) => (a.type === 'MoveRobber' ? [a.value.tile] : [])))] };
       case 'Main':
@@ -259,6 +277,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
         if (v.toMove !== me() || (v.phase.type === 'Main' && v.current !== me())) return null;
         if (mode() === 'road') return { kind: 'edge', ids: ids('BuildRoad') };
         if (mode() === 'fishRoad') return { kind: 'edge', ids: ids('FishBuildRoad') };
+        if (mode() === 'bridge') return { kind: 'edge', ids: ids('BuildBridge') };
         if (mode() === 'settlement') return { kind: 'vertex', ids: ids('BuildSettlement') };
         if (mode() === 'city') return { kind: 'vertex', ids: ids('BuildCity') };
         if (mode() === 'ship') return { kind: 'edge', ids: ids('BuildShip') };
@@ -329,8 +348,16 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
       return;
     }
     if (kind === 'edge') {
+      if (v.phase.type === 'PlaceCamel') {
+        act((a) => a.type === 'PlaceCamel' && a.value === id);
+        return;
+      }
       if (mode() === 'fishRoad') {
         act((a) => a.type === 'FishBuildRoad' && a.value === id);
+        return;
+      }
+      if (mode() === 'bridge') {
+        act((a) => a.type === 'BuildBridge' && a.value === id);
         return;
       }
       if (mode() === 'move') {
@@ -341,6 +368,11 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
         } else {
           act((a) => a.type === 'MoveShip' && a.value.from === from && a.value.to === id);
         }
+        return;
+      }
+      const bridge = actions().some((a) => a.type === 'BuildBridge' && a.value === id);
+      if (bridge && !actions().some((a) => a.type === 'BuildRoad' && a.value === id)) {
+        act((a) => a.type === 'BuildBridge' && a.value === id);
         return;
       }
       const road = actions().some((a) => a.type === 'BuildRoad' && a.value === id) && mode() !== 'ship';
@@ -501,6 +533,8 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     citadels,
     /** Coastal fishing grounds, fish tokens and the Old Boot are in play. */
     fishermen,
+    /** Oasis camel caravans, golden river bridges and gold coins are in play. */
+    caravans,
     /** Playback controls when watching a replay. */
     replay: source.replay,
     /** The finished game as a replay record (local games and online rooms). */

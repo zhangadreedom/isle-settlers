@@ -38,9 +38,9 @@ impl BotLevel {
         }
     }
 
-    /// Level of a bot given by its `bot_by_name` name (with options).
+    /// Level of a bot given by its `bot_by_name` name (with options / `@persona`).
     pub fn of_bot_name(name: &str) -> BotLevel {
-        match name.split([':', '/']).next().unwrap_or("") {
+        match name.split([':', '/', '@']).next().unwrap_or("") {
             "mcts" => BotLevel::Hard,
             "greedy" => BotLevel::Normal,
             _ => BotLevel::Easy,

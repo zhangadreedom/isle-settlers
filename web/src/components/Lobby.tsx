@@ -2,9 +2,10 @@ import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
 import type { BoardRenderer } from '../board/BoardRenderer';
 import { layoutFor } from '../diy/custom-map';
 import { EMBEDDED } from '../embed';
-import type { BotKind } from '../engine';
+import type { BotKind, BotPersonaSuffix } from '../engine';
 import type { BotLevel, HouseRules, PublicRoomSummary, Scenario } from '../generated/proto';
 import type { LocalOptions } from '../game/source';
+import { scenarioBlurb, scenarioTitle, t } from '../i18n';
 import { account, accountsEnabled } from '../net/account';
 import { fetchPublicRooms, saveName, savedName } from '../net/connection';
 import { canInstallPwa, promptInstallPwa } from '../pwa';
@@ -12,6 +13,7 @@ import { AccountPanel } from './Account';
 import { SoundToggle, ThemeToggle } from './Hud';
 import { Rankings } from './Ranking';
 import { ReplayHistory } from './ReplayHistory';
+import { LangToggle } from './ShortcutsModal';
 
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
 
@@ -31,6 +33,7 @@ const SCENARIO_SHORT: Record<Scenario, string> = {
   FogIslands: '迷雾',
   Citadels: '城邦',
   Fishermen: '渔场',
+  Caravans: '商队',
 };
 
 /** Seats each scenario can be played with. */
@@ -40,15 +43,16 @@ const MAX_SEATS: Record<Scenario, number> = {
   FogIslands: 6,
   Citadels: 6,
   Fishermen: 6,
+  Caravans: 6,
 };
 
-const SCENARIO_DESC: Record<Scenario, string> = {
-  Classic: '在六边形岛屿上开拓、交易、建造，先到 10 分者获胜。5–6 人时使用扩展岛屿，支持传统特殊建造或双人搭档回合。',
-  Archipelago: '航海 · 群岛：从西边的主岛出发，造船驶过海峡，首次在东边外岛建村庄奖励 2 分；金矿任选资源，海盗封锁航线。先到 12 分获胜，支持 2–6 人。',
-  FogIslands: '航海 · 迷雾：从月牙主岛扬帆驶入迷雾，航线触及未知格即翻开地形并获发现奖励，首次登陆迷雾新大陆奖励 2 分。先到 12 分获胜，支持 2–6 人。',
-  Citadels: '城邦与铁卫：第二轮直接起城，城市产出造纸/织布/铸币升级三系科技与 4 分大都会；招募并激活实体铁卫抵御黑帆舰队入侵。先到 13 分获胜，支持 2–6 人。',
-  Fishermen: '渔场与丰年：沿海渔场与荒漠内陆湖产出海鱼筹码，花 2–7 条鱼可驱匪、抽牌、换资源、修路或摸卡，小心捞到 +1 分难度的破旧皮靴！先到 10 分获胜，支持 2–6 人。',
-};
+const PERSONAS: { suffix: BotPersonaSuffix; zh: string; en: string; tip: string }[] = [
+  { suffix: '', zh: '均衡', en: 'Balanced', tip: '全面均衡评估局势' },
+  { suffix: '@road', zh: '修路派', en: 'Road', tip: '偏爱铺路造船、跨河修桥与争夺最长商路' },
+  { suffix: '@city', zh: '筑城派', en: 'City', tip: '优先控麦矿起城、升级三系科技与大都会' },
+  { suffix: '@warlord', zh: '铁卫派', en: 'Warlord', tip: '积极买发展卡、招募激活铁卫与控强盗抢牌' },
+  { suffix: '@merchant', zh: '皇商派', en: 'Merchant', tip: '热衷主动发起报价交易、控港口与积攒鱼/金币' },
+];
 
 export function Lobby(props: {
   ready: boolean;
@@ -65,6 +69,8 @@ export function Lobby(props: {
   onOpenRules: () => void;
   onOpenWorkshop: () => void;
   onOpenDaily: () => void;
+  onOpenShortcuts: () => void;
+  onStartTutorial: () => void;
   onStartLocal: (o: LocalOptions) => void;
   onCreateRoom: (o: CreateRoom) => void;
   onJoinRoom: (room: string) => void;
@@ -84,7 +90,9 @@ export function Lobby(props: {
     if (players() > MAX_SEATS[s]) props.onPlayers(nextPlayers);
     if (props.customMap && layoutFor(s, nextPlayers) !== prevLayout) props.onCustomMap(null);
   };
-  const [bot, setBot] = createSignal<BotKind>('greedy');
+  const [botBase, setBotBase] = createSignal<'weighted' | 'greedy' | 'mcts'>('greedy');
+  const [persona, setPersona] = createSignal<BotPersonaSuffix>('');
+  const bot = (): BotKind => (botBase() === 'weighted' ? 'weighted' : (`${botBase()}${persona()}` as BotKind));
   const [seat, setSeat] = createSignal<'random' | number>('random');
   const [fast, setFast] = createSignal(false);
   const [name, setName] = createSignal(savedName());
@@ -139,7 +147,7 @@ export function Lobby(props: {
     const level: Record<string, BotLevel> = { weighted: 'Easy', greedy: 'Normal', mcts: 'Hard' };
     props.onCreateRoom({
       players: players(),
-      bots: level[bot()] ?? 'Normal',
+      bots: level[botBase()] ?? 'Normal',
       name: n,
       ranked: ranked(),
       scenario: scenario(),
@@ -157,37 +165,44 @@ export function Lobby(props: {
         <div class="lobby-head">
           <h1>Isle Settlers</h1>
           <div class="row lobby-tools">
-            <button class="ghost small" onClick={props.onOpenDaily} title="全球同种子每日固定剧本挑战">
-              每日挑战
+            <button class="ghost small" disabled={!props.ready} onClick={props.onStartTutorial} title="3 分钟手把手实战新手教学">
+              {t('新手教程', 'Tutorial')}
+            </button>
+            <button class="ghost small" onClick={props.onOpenDaily} title="全球同种子每日固定剧本挑战与竞速榜">
+              {t('每日挑战', 'Daily')}
             </button>
             <button class="ghost small" onClick={props.onOpenWorkshop} title="自定义地形、港口、数字圆片并导出 1:1 激光切割 SVG 与 3D 打印 STL">
-              地图工坊
+              {t('地图工坊', 'DIY Map')}
             </button>
             <button class="ghost small" onClick={props.onOpenRules}>
-              规则
+              {t('规则', 'Rules')}
             </button>
+            <button class="ghost small" onClick={props.onOpenShortcuts} title="键盘快捷键与色盲无障碍设置">
+              ?
+            </button>
+            <LangToggle class="ghost small" />
             <ThemeToggle renderer={props.renderer} class="ghost small" />
             <SoundToggle class="ghost small" />
             <Show when={canInstallPwa()}>
               <button class="primary small" onClick={() => void promptInstallPwa()} title="安装为桌面/手机离线应用">
-                安装应用
+                {t('安装应用', 'Install')}
               </button>
             </Show>
           </div>
         </div>
-        <p class="muted">{SCENARIO_DESC[scenario()]}</p>
+        <p class="muted">{scenarioBlurb(scenario())}</p>
 
         <Show when={!EMBEDDED}>
           <div class="tabs">
             <button classList={{ on: tab() === 'local' }} onClick={() => setTab('local')}>
-              单机 · 对战 AI
+              {t('单机 · 对战 AI', 'Solo vs AI')}
             </button>
             <button classList={{ on: tab() === 'online' }} onClick={() => setTab('online')}>
-              联机对战
+              {t('联机对战', 'Online')}
             </button>
             <Show when={accountsEnabled()}>
               <button classList={{ on: tab() === 'rank' }} onClick={() => setTab('rank')}>
-                排行榜
+                {t('排行榜', 'Rankings')}
               </button>
             </Show>
           </div>
@@ -199,38 +214,45 @@ export function Lobby(props: {
 
         <Show when={tab() !== 'rank'}>
           <div class="field">
-            <span>玩法</span>
-            <div class="seg">
+            <span>{t('玩法', 'Scenario')}</span>
+            <div class="seg" style={{ 'flex-wrap': 'wrap' }}>
               <button classList={{ on: scenario() === 'Classic' }} onClick={() => setScenario('Classic')}>
-                经典
+                {scenarioTitle('Classic')}
               </button>
               <button
                 classList={{ on: scenario() === 'Archipelago' }}
                 onClick={() => setScenario('Archipelago')}
-                title="航海扩展：造船出海，登上新岛屿得奖励分，2–4 人"
+                title="航海扩展：造船出海，登上新岛屿得奖励分，2–6 人"
               >
-                航海 · 群岛
+                {scenarioTitle('Archipelago')}
               </button>
               <button
                 classList={{ on: scenario() === 'FogIslands' }}
                 onClick={() => setScenario('FogIslands')}
                 title="未知海域探索翻牌，发现新陆地得资源与登岛分，2–6 人"
               >
-                航海 · 迷雾
+                {scenarioTitle('FogIslands')}
               </button>
               <button
                 classList={{ on: scenario() === 'Citadels' }}
                 onClick={() => setScenario('Citadels')}
                 title="商品产出、三系城邦升级与大都会、实体铁卫抵御黑帆舰队，2–6 人"
               >
-                城邦与铁卫
+                {scenarioTitle('Citadels')}
               </button>
               <button
                 classList={{ on: scenario() === 'Fishermen' }}
                 onClick={() => setScenario('Fishermen')}
                 title="沿海渔场与内陆湖产出海鱼筹码，兑换 5 种奇策并转交破旧皮靴，2–6 人"
               >
-                渔场与丰年
+                {scenarioTitle('Fishermen')}
+              </button>
+              <button
+                classList={{ on: scenario() === 'Caravans' }}
+                onClick={() => setScenario('Caravans')}
+                title="沙漠绿洲延伸骆驼商队（穿村+1分、路长翻倍），跨黄金河架设石桥赚取金币，2–6 人"
+              >
+                {scenarioTitle('Caravans')}
               </button>
             </div>
           </div>
@@ -252,19 +274,37 @@ export function Lobby(props: {
             </div>
           </div>
           <div class="field">
-            <span>AI 难度</span>
+            <span>{t('AI 难度', 'AI Level')}</span>
             <div class="seg">
-              <button classList={{ on: bot() === 'weighted' }} onClick={() => setBot('weighted')}>
-                简单
+              <button classList={{ on: botBase() === 'weighted' }} onClick={() => setBotBase('weighted')}>
+                {t('简单', 'Easy')}
               </button>
-              <button classList={{ on: bot() === 'greedy' }} onClick={() => setBot('greedy')}>
-                普通
+              <button classList={{ on: botBase() === 'greedy' }} onClick={() => setBotBase('greedy')}>
+                {t('普通', 'Normal')}
               </button>
-              <button classList={{ on: bot() === 'mcts' }} onClick={() => setBot('mcts')} title="搜索型 AI，会推演后续局面">
-                困难
+              <button classList={{ on: botBase() === 'mcts' }} onClick={() => setBotBase('mcts')} title="搜索型 AI，会推演后续局面">
+                {t('困难', 'Hard')}
               </button>
             </div>
           </div>
+          <Show when={tab() === 'local' && botBase() !== 'weighted'}>
+            <div class="field">
+              <span>{t('AI 性格', 'Persona')}</span>
+              <div class="seg small" style={{ 'flex-wrap': 'wrap' }}>
+                <For each={PERSONAS}>
+                  {(p) => (
+                    <button
+                      classList={{ on: persona() === p.suffix }}
+                      title={p.tip}
+                      onClick={() => setPersona(p.suffix)}
+                    >
+                      {t(p.zh, p.en)}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+          </Show>
 
           <details class="house-rules">
             <summary>自定义房规与计时</summary>
@@ -400,10 +440,10 @@ export function Lobby(props: {
           </div>
           <div class="row lobby-actions">
             <button class="primary big" disabled={!props.ready} onClick={() => startLocal(false)}>
-              开始游戏
+              {t('开始游戏', 'Play')}
             </button>
             <button disabled={!props.ready} onClick={() => startLocal(true)}>
-              观战 AI 对局
+              {t('观战 AI 对局', 'Watch AI')}
             </button>
           </div>
           <label class="file-link muted small">

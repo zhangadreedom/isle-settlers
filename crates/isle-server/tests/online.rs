@@ -1110,3 +1110,255 @@ async fn public_rooms_directory_kick_swap_rematch_and_custom_map() {
 
     server.stop().await;
 }
+
+fn record_bot_game(scenario: isle_core::Scenario, seed: u64) -> (isle_proto::ReplayRecord, isle_core::GameState) {
+    use isle_ai::{Bot, GreedyBot};
+    use isle_core::{GameConfig, GameState};
+    use isle_proto::{ReplayPlayer, ReplayRecord};
+
+    let config = GameConfig::scenario(scenario, 4);
+    let mut g = GameState::new(config, seed).unwrap();
+    let mut bots: Vec<GreedyBot> = (0..4).map(|k| GreedyBot::new(seed * 11 + k)).collect();
+    let mut actions = Vec::new();
+    let mut legal = Vec::new();
+    while let Some(p) = g.to_move() {
+        g.legal_actions(p, &mut legal);
+        let a = bots[p as usize].choose(&g, p, &legal);
+        g.apply(p, a).unwrap();
+        actions.push((p, a));
+    }
+    let players = (0..4)
+        .map(|i| ReplayPlayer {
+            name: if i == 0 { "Player".into() } else { String::new() },
+            bot: (i != 0).then_some(BotLevel::Normal),
+        })
+        .collect();
+    (
+        ReplayRecord::new(config, seed, players, &actions, g.winner),
+        g,
+    )
+}
+
+#[tokio::test]
+async fn daily_challenge_anti_cheat_leaderboard_and_caravans_room() {
+    use isle_proto::account::{Credentials, SessionGrant};
+    use isle_proto::daily::{DailyLeaderboard, DailySubmitRequest};
+
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!("daily-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = ServerConfig {
+        data_dir: Some(dir.clone()),
+        auth_burst: 0,
+        ..fast_config()
+    };
+    let server = Server::start(config.clone()).await;
+
+    // 1. Date validation on GET /api/daily.
+    for bad_path in ["/api/daily", "/api/daily?date=bad", "/api/daily?date=2026-13-01"] {
+        let (status, _, _) = http(server.addr, "GET", bad_path, &[], None).await;
+        assert_eq!(status, 400, "{bad_path}");
+    }
+    let (status, _, body) = http(server.addr, "GET", "/api/daily?date=2026-11-28", &[], None).await;
+    assert_eq!(status, 200);
+    let empty: DailyLeaderboard = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty.date_key, "2026-11-28");
+    assert!(empty.entries.is_empty());
+
+    // Build two distinct finished replays (pick winning seat for fast & slow wins, plus a losing seat).
+    let (rep_a, end_a) = record_bot_game(isle_core::Scenario::Classic, 10);
+    let (rep_b, end_b) = record_bot_game(isle_core::Scenario::Caravans, 25);
+    let win_seat_a = end_a.winner.unwrap();
+    let lose_seat_a = (win_seat_a + 1) % 4;
+    let win_seat_b = end_b.winner.unwrap();
+
+    // 2. Tampered replay (corrupt action byte) and unfinished replay are rejected with 400!
+    let mut tampered = rep_a.clone();
+    tampered.actions[1] ^= 0x7F;
+    let bad_req = DailySubmitRequest {
+        date_key: "2026-11-28".into(),
+        seat: win_seat_a,
+        player_name: "Cheater".into(),
+        replay: tampered,
+    };
+    let (status, _, _) = http(
+        server.addr,
+        "POST",
+        "/api/daily",
+        &[],
+        Some(&serde_json::to_string(&bad_req).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 400, "tampered replay must be rejected");
+
+    let mut unfinished = rep_a.clone();
+    let half_actions = &rep_a.actions().unwrap()[..12];
+    unfinished.actions = isle_proto::replay::encode_actions(half_actions);
+    unfinished.winner = None;
+    let unfin_req = DailySubmitRequest {
+        date_key: "2026-11-28".into(),
+        seat: win_seat_a,
+        player_name: "Quitter".into(),
+        replay: unfinished,
+    };
+    let (status, _, _) = http(
+        server.addr,
+        "POST",
+        "/api/daily",
+        &[],
+        Some(&serde_json::to_string(&unfin_req).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 400, "unfinished replay must be rejected");
+
+    // 3. Guest loss submitted first, then upgraded by a guest win under same canonical name ("alice").
+    let loss_req = DailySubmitRequest {
+        date_key: "2026-11-28".into(),
+        seat: lose_seat_a,
+        player_name: "  Alice \n".into(),
+        replay: rep_a.clone(),
+    };
+    let (status, _, body) = http(
+        server.addr,
+        "POST",
+        "/api/daily",
+        &[],
+        Some(&serde_json::to_string(&loss_req).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let lb1: DailyLeaderboard = serde_json::from_str(&body).unwrap();
+    assert_eq!(lb1.entries.len(), 1);
+    assert_eq!(lb1.entries[0].player_name, "Alice");
+    assert!(!lb1.entries[0].registered);
+    assert!(!lb1.entries[0].won);
+    assert_eq!(lb1.entries[0].rank, 1);
+
+    // Upgrade "alice" with a winning run -> deduplicates and replaces the loss!
+    let win_req = DailySubmitRequest {
+        date_key: "2026-11-28".into(),
+        seat: win_seat_a,
+        player_name: "alice".into(),
+        replay: rep_a.clone(),
+    };
+    let (status, _, body) = http(
+        server.addr,
+        "POST",
+        "/api/daily",
+        &[],
+        Some(&serde_json::to_string(&win_req).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let lb2: DailyLeaderboard = serde_json::from_str(&body).unwrap();
+    assert_eq!(lb2.entries.len(), 1);
+    assert!(lb2.entries[0].won);
+    assert_eq!(lb2.entries[0].turns, end_a.turn);
+    assert_eq!(lb2.entries[0].points, end_a.victory_points(win_seat_a));
+
+    // Re-submitting the loss does NOT overwrite the better winning run!
+    let (status, _, body) = http(
+        server.addr,
+        "POST",
+        "/api/daily",
+        &[],
+        Some(&serde_json::to_string(&loss_req).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let lb_keep: DailyLeaderboard = serde_json::from_str(&body).unwrap();
+    assert_eq!(lb_keep.entries.len(), 1);
+    assert!(lb_keep.entries[0].won);
+
+    // 4. Signed-in account submission uses verified `session.account.username` and `registered = true`.
+    let creds = Credentials {
+        username: "SpeedRunner".into(),
+        password: "correct-horse-battery".into(),
+    };
+    let (status, _, grant_body) = http(
+        server.addr,
+        "POST",
+        "/api/accounts",
+        &[],
+        Some(&serde_json::to_string(&creds).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let grant: SessionGrant = serde_json::from_str(&grant_body).unwrap();
+    let auth_header = format!("Bearer {}", grant.token);
+    let auth_req = DailySubmitRequest {
+        date_key: "2026-11-28".into(),
+        seat: win_seat_b,
+        player_name: "SpoofedName".into(),
+        replay: rep_b,
+    };
+    let (status, _, body) = http(
+        server.addr,
+        "POST",
+        "/api/daily",
+        &[("Authorization", &auth_header)],
+        Some(&serde_json::to_string(&auth_req).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let lb3: DailyLeaderboard = serde_json::from_str(&body).unwrap();
+    assert_eq!(lb3.entries.len(), 2);
+    assert_eq!(lb3.entries[0].rank, 1);
+    assert_eq!(lb3.entries[1].rank, 2);
+    assert!(lb3.entries[0].turns <= lb3.entries[1].turns);
+    assert!(
+        lb3.entries
+            .iter()
+            .any(|e| e.player_name == "speedrunner" && e.registered)
+    );
+
+    // 5. Scenario::Caravans online room plays cleanly to completion.
+    let mut caravan_host = Client::connect(server.addr).await;
+    caravan_host
+        .send(&ClientMsg::Create {
+            players: 4,
+            bots: BotLevel::Normal,
+            name: "Nomad".into(),
+            ranked: false,
+            scenario: isle_core::Scenario::Caravans,
+            rules: HouseRules {
+                victory_points: Some(8),
+                friendly_robber: false,
+                paired_turns: false,
+                event_deck: false,
+                turn_timer_secs: 0,
+                custom_map: None,
+            },
+            session: None,
+            is_public: false,
+        })
+        .await;
+    caravan_host.until(|c| c.room.is_some()).await;
+    caravan_host.send(&ClientMsg::Start).await;
+    caravan_host.until(|c| c.view.is_some()).await;
+    let caravan_host = timeout(Duration::from_secs(90), play_to_end(caravan_host))
+        .await
+        .expect("caravans online game timed out");
+    assert!(caravan_host.game_over());
+    assert!(
+        caravan_host
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::CamelPlaced { .. })),
+        "expected CamelPlaced events in Caravans room"
+    );
+
+    // 6. Restart server on the same data_dir and verify `daily.json` persisted!
+    server.stop().await;
+    assert!(dir.join("daily.json").exists());
+    let server2 = Server::start(config).await;
+    let (status, _, body2) =
+        http(server2.addr, "GET", "/api/daily?date=2026-11-28", &[], None).await;
+    assert_eq!(status, 200);
+    let lb_reloaded: DailyLeaderboard = serde_json::from_str(&body2).unwrap();
+    assert_eq!(lb_reloaded, lb3);
+    server2.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

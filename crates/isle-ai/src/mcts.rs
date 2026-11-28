@@ -15,14 +15,14 @@ use isle_core::{
     Action, CommoditySet, GameState, MAX_PLAYERS, Phase, ResourceSet, Rng, TradeGood,
 };
 
-use crate::Bot;
 use crate::determinize::determinize;
 use crate::eval::{Weights, rewards};
 use crate::greedy::{
-    citadel_city_value, fishermen_city_value, knight_spot_value, missing, propose_trade_offer,
-    robber_hurts_me, robber_value, setup_spot_value, spot_value, track_for_commodity,
-    upgrade_city_value, vertex_production,
+    bridge_value, camel_spot_value, citadel_city_value, fishermen_city_value, knight_spot_value,
+    missing, propose_trade_offer, robber_hurts_me, robber_value, setup_spot_value, spot_value,
+    track_for_commodity, upgrade_city_value, vertex_production,
 };
+use crate::{Bot, BotPersona};
 
 #[derive(Clone, Copy, Debug)]
 pub struct MctsConfig {
@@ -55,6 +55,14 @@ impl Default for MctsConfig {
 }
 
 impl MctsConfig {
+    /// Default MCTS settings with `persona` evaluation weights.
+    pub fn for_persona(persona: BotPersona) -> Self {
+        MctsConfig {
+            weights: Weights::for_persona(persona),
+            ..MctsConfig::default()
+        }
+    }
+
     /// Overrides one setting by short key (used by `bot_by_name` for
     /// tuning): `c` exploration, `r` rollout turns, `k` max children, `d` max
     /// depth, and evaluation weights `wi` income, `wd` diversity, `ws` spots,
@@ -123,6 +131,14 @@ pub struct MctsBot {
 impl MctsBot {
     pub fn new(seed: u64) -> Self {
         Self::with_config(seed, MctsConfig::default())
+    }
+
+    pub fn with_persona(seed: u64, persona: BotPersona) -> Self {
+        let mut bot = Self::with_config(seed, MctsConfig::for_persona(persona));
+        if persona == BotPersona::Merchant {
+            bot.propose_trades = true;
+        }
+        bot
     }
 
     pub fn with_config(seed: u64, config: MctsConfig) -> Self {
@@ -275,7 +291,13 @@ fn mean(n: &Node) -> f32 {
 
 impl Bot for MctsBot {
     fn name(&self) -> &'static str {
-        "mcts"
+        match self.config.weights.persona {
+            BotPersona::Balanced => "mcts",
+            BotPersona::RoadBuilder => "mcts@road",
+            BotPersona::CityBaron => "mcts@city",
+            BotPersona::Warlord => "mcts@warlord",
+            BotPersona::Merchant => "mcts@merchant",
+        }
     }
 
     fn set_propose_trades(&mut self, enabled: bool) {
@@ -348,7 +370,7 @@ fn candidates(s: &GameState, actor: u8, legal: &[Action], k: usize, out: &mut Ve
     }
     let wide = matches!(
         s.phase,
-        Phase::SetupSettlement | Phase::Discard | Phase::MoveRobber
+        Phase::SetupSettlement | Phase::Discard | Phase::MoveRobber | Phase::PlaceCamel
     );
     if legal.len() <= k || !wide {
         out.extend_from_slice(legal);
@@ -365,6 +387,7 @@ fn candidates(s: &GameState, actor: u8, legal: &[Action], k: usize, out: &mut Ve
             commodities,
         } => citadel_discard_score(s, actor, hand - *resources, comm - *commodities),
         Action::MoveRobber { tile, victim } => robber_value(s, actor, *tile, *victim),
+        Action::PlaceCamel(e) => camel_spot_value(s, actor, *e, BotPersona::Balanced),
         _ => 0.0,
     };
     let mut scored: Vec<(f32, Action)> = legal.iter().map(|a| (score(a), *a)).collect();
@@ -528,7 +551,9 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
             Action::BuildSettlement(v) if citadels => {
                 Some(setup_spot_value(s, p, *v) + rng.below(100) as f32 * 0.01)
             }
-            Action::BuildSettlement(v) if s.config.scenario.is_fishermen() => {
+            Action::BuildSettlement(v)
+                if s.config.scenario.is_fishermen() || s.config.scenario.is_caravans() =>
+            {
                 Some(spot_value(s, p, *v) + rng.below(100) as f32 * 0.01)
             }
             Action::BuildSettlement(v) => {
@@ -538,6 +563,13 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
         })
         .unwrap_or_else(|| pick(rng)),
         Phase::SetupRoad { .. } | Phase::RoadBuilding { .. } => pick(rng),
+        Phase::PlaceCamel => best_of(legal, |a| match a {
+            Action::PlaceCamel(e) => {
+                Some(camel_spot_value(s, p, *e, BotPersona::Balanced) + rng.below(20) as f32 * 0.01)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| pick(rng)),
         Phase::Discard if citadels => {
             let ps = &s.players[p as usize];
             let mut hand = ps.hand;
@@ -643,6 +675,7 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
 fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action {
     let citadels = s.config.scenario.is_citadels();
     let fishermen = s.config.scenario.is_fishermen();
+    let caravans = s.config.scenario.is_caravans();
     if fishermen
         && let Some(a) = best_of(legal, |a| match a {
             Action::PassOldBoot(q) => Some(s.public_victory_points(*q) as f32),
@@ -720,6 +753,10 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
     for target in [cost::CITY, cost::SETTLEMENT] {
         if missing(hand, target) == 1 {
             let trade = legal.iter().find(|a| match a {
+                Action::SpendCoinsResource(get) if caravans => {
+                    hand[*get] < target[*get]
+                        && (s.wealthiest_owner != Some(p) || s.players[p as usize].coins >= 6)
+                }
                 Action::FishTakeResource(get) if fishermen => hand[*get] < target[*get],
                 Action::MaritimeTrade { give, get } => {
                     hand[*get] < target[*get]
@@ -807,6 +844,15 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
         {
             return a;
         }
+    }
+    if caravans
+        && rng.below(2) == 0
+        && let Some(a) = best_of(legal, |a| match a {
+            Action::BuildBridge(e) => Some(bridge_value(s, p, *e, BotPersona::Balanced)),
+            _ => None,
+        })
+    {
+        return a;
     }
     // Seafaring: sail towards islands when ships lead somewhere.
     if s.board.layout.has_ships()

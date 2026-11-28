@@ -45,7 +45,14 @@ function call<T>(f: () => string): T {
   }
 }
 
-export type BotKind = 'greedy' | 'weighted' | 'random' | 'mcts' | `mcts:${number}`;
+export type BotPersonaSuffix = '' | '@road' | '@city' | '@warlord' | '@merchant';
+export type BotKind =
+  | 'greedy'
+  | 'weighted'
+  | 'random'
+  | `greedy${BotPersonaSuffix}`
+  | `mcts${BotPersonaSuffix}`
+  | `mcts:${number}${BotPersonaSuffix}`;
 
 /** A match hosted entirely in WebAssembly. JS only sees the human's view. */
 export class Match {

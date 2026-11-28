@@ -37,7 +37,7 @@ fn random_good(rng: &mut Rng) -> TradeGood {
 
 /// Arbitrary (often illegal) action, excluding open-ended trade proposals.
 fn random_action(rng: &mut Rng) -> Action {
-    match rng.below(34) {
+    match rng.below(37) {
         17 => Action::BuildShip(rng.below(170) as u8),
         18 => Action::MoveShip {
             from: rng.below(170) as u8,
@@ -82,6 +82,9 @@ fn random_action(rng: &mut Rng) -> Action {
         31 => Action::FishTakeResource(random_resource(rng)),
         32 => Action::FishBuildRoad(rng.below(170) as u8),
         33 => Action::FishBuyDevCard,
+        34 => Action::PlaceCamel(rng.below(170) as u8),
+        35 => Action::BuildBridge(rng.below(170) as u8),
+        36 => Action::SpendCoinsResource(random_resource(rng)),
         0 => Action::RollDice,
         1 => Action::BuildRoad(rng.below(170) as u8),
         2 => Action::BuildSettlement(rng.below(125) as u8),
@@ -120,16 +123,19 @@ fn weight(a: &Action) -> u32 {
         Action::BuildCity(_)
         | Action::BuildSettlement(_)
         | Action::UpgradeCity { .. }
-        | Action::PassOldBoot(_) => 1000,
+        | Action::PassOldBoot(_)
+        | Action::PlaceCamel(_) => 1000,
         Action::BuyDevCard
         | Action::FishBuyDevCard
         | Action::RecruitKnight(_)
-        | Action::PromoteKnight(_) => 100,
+        | Action::PromoteKnight(_)
+        | Action::BuildBridge(_) => 100,
         Action::ActivateKnight(_) => 150,
         Action::BuildRoad(_)
         | Action::BuildShip(_)
         | Action::FishBuildRoad(_)
-        | Action::FishTakeResource(_) => 20,
+        | Action::FishTakeResource(_)
+        | Action::SpendCoinsResource(_) => 20,
         Action::MoveShip { .. }
         | Action::MoveKnight { .. }
         | Action::ChaseRobber { .. }
@@ -600,4 +606,31 @@ fn custom_maps_self_play_preserve_invariants_across_all_scenarios() {
         }
     }
     assert!(finished >= 20, "only {finished}/30 fishermen fuzz games finished");
+
+    // 6. Caravans across 2–6 players (including SpecialBuild, Paired Turns, Event Deck & CustomMap).
+    let mut c_finished = 0;
+    let mut saw_camel = false;
+    let mut saw_bridge = false;
+    for seed in 0..30 {
+        let players = 2 + (seed % 5) as u8;
+        let g = play_config(
+            GameConfig {
+                friendly_robber: seed % 2 == 1,
+                paired_turns: players > 4 && seed % 2 == 0,
+                event_deck: seed % 3 == 0,
+                custom_map: (players <= 4 && seed % 5 == 0).then_some(cm_classic),
+                ..GameConfig::scenario(Scenario::Caravans, players)
+            },
+            10_000 + seed,
+            true,
+        );
+        saw_camel |= !g.camels.is_empty();
+        saw_bridge |= (0..g.num_players()).any(|p| !g.bridges[p].is_empty());
+        if let Some(w) = g.winner {
+            c_finished += 1;
+            assert!(g.victory_points(w) >= g.target_victory_points(w));
+        }
+    }
+    assert!(saw_camel && saw_bridge);
+    assert!(c_finished >= 20, "only {c_finished}/30 caravans fuzz games finished");
 }
