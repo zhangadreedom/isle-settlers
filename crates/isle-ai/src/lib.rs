@@ -99,6 +99,7 @@ impl WeightedRandomBot {
         match action {
             Action::BuildCity(_) => 10_000,
             Action::PassOldBoot(_) => 5_000,
+            Action::RaidPirateLair(_) | Action::HaulFishShoal(_) | Action::TradeSpice(_) => 3_000,
             Action::BuildSettlement(_) | Action::PlaceCamel(_) => 1_000,
             Action::BuildBridge(_) => 250,
             Action::BuyDevCard | Action::FishBuyDevCard => 100,
@@ -260,6 +261,47 @@ mod tests {
         }
         assert_eq!(finished, 40);
         assert!(islands >= 40, "only {islands} island bonuses in 40 games");
+    }
+
+    #[test]
+    fn greedy_and_mcts_complete_explorers_missions() {
+        for players in [4u8, 6] {
+            let (mut finished, mut missions) = (0u32, 0u32);
+            for seed in 0..20 {
+                let config = GameConfig::scenario(isle_core::Scenario::Explorers, players);
+                let mut g = GameState::new(config, seed).unwrap();
+                let mut b: Vec<Box<dyn Bot>> = (0..players as u64)
+                    .map(|i| -> Box<dyn Bot> {
+                        if seed < 2 && i == 0 {
+                            let mut m = MctsConfig::default();
+                            m.iterations = 32;
+                            Box::new(MctsBot::with_config(seed * 10 + i, m))
+                        } else {
+                            let persona = match i % 5 {
+                                1 => BotPersona::RoadBuilder,
+                                2 => BotPersona::CityBaron,
+                                3 => BotPersona::Warlord,
+                                4 => BotPersona::Merchant,
+                                _ => BotPersona::Balanced,
+                            };
+                            Box::new(GreedyBot::with_persona(seed * 10 + i, persona))
+                        }
+                    })
+                    .collect();
+                let mut bots: Vec<&mut dyn Bot> =
+                    b.iter_mut().map(|b| &mut **b as &mut dyn Bot).collect();
+                let out = play_game(&mut g, &mut bots, 1000, true);
+                finished += out.winner.is_some() as u32;
+                missions += (0..players as usize)
+                    .map(|p| g.players[p].explorer_missions.iter().sum::<u8>() as u32)
+                    .sum::<u32>();
+            }
+            assert_eq!(finished, 20, "{players}p explorers finished {finished}/20");
+            assert!(
+                missions >= 80,
+                "expected active mission play in {players}p explorers, got {missions}"
+            );
+        }
     }
 
     /// Plays `games` games with a fixed lineup; returns wins per seat.

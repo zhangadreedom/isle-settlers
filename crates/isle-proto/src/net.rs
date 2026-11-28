@@ -19,6 +19,45 @@ pub const MAX_NAME_CHARS: usize = 16;
 /// Maximum length of a chat message, in characters.
 pub const MAX_CHAT_CHARS: usize = 200;
 
+/// Strategic personality bias for computer opponents.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum BotPersona {
+    #[default]
+    Balanced,
+    RoadBuilder,
+    CityBaron,
+    Warlord,
+    Merchant,
+}
+
+impl BotPersona {
+    /// `@persona` suffix understood by `isle_ai::bot_by_name`.
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            BotPersona::Balanced => "",
+            BotPersona::RoadBuilder => "@road",
+            BotPersona::CityBaron => "@city",
+            BotPersona::Warlord => "@warlord",
+            BotPersona::Merchant => "@merchant",
+        }
+    }
+}
+
+/// Preset tabletop quick-chat emotes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum QuickEmote {
+    NeedBrick,
+    NeedGrainOre,
+    OpenToTrade,
+    GoodRoll,
+    MercyRobber,
+    WatchLeader,
+    DefendTogether,
+    WellPlayed,
+}
+
 /// Strength of computer players filling seats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -35,6 +74,16 @@ impl BotLevel {
             BotLevel::Easy => "weighted",
             BotLevel::Normal => "greedy",
             BotLevel::Hard => "mcts",
+        }
+    }
+
+    /// Name understood by `isle_ai::bot_by_name` with an optional `@persona` suffix.
+    pub fn bot_name_with_persona(self, persona: BotPersona, hard_base: &str) -> String {
+        let suffix = persona.suffix();
+        match self {
+            BotLevel::Easy => "weighted".to_owned(),
+            BotLevel::Normal => format!("greedy{suffix}"),
+            BotLevel::Hard => format!("{hard_base}{suffix}"),
         }
     }
 
@@ -66,6 +115,8 @@ pub enum SeatView {
     },
     Bot {
         level: BotLevel,
+        #[serde(default)]
+        persona: BotPersona,
     },
 }
 
@@ -124,6 +175,23 @@ pub struct PublicRoomSummary {
     pub ranked: bool,
     pub started: bool,
     pub has_custom_map: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct MatchmakeRequest {
+    pub scenario: Scenario,
+    pub players: u8,
+    pub ranked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct MatchmakeResponse {
+    pub room_id: String,
+    pub created: bool,
 }
 
 /// Room membership and lobby state.
@@ -249,6 +317,9 @@ pub enum ClientMsg {
     SetSeat {
         seat: u8,
         bot: Option<BotLevel>,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional, as = "Option<BotPersona>"))]
+        persona: BotPersona,
     },
     /// Host only, before the start: make the room ranked or casual.
     SetRanked {
@@ -280,6 +351,9 @@ pub enum ClientMsg {
     Chat {
         text: String,
     },
+    QuickChat {
+        emote: QuickEmote,
+    },
 }
 
 /// Server to browser.
@@ -297,6 +371,11 @@ pub enum ServerMsg {
     Snapshot(Snapshot),
     Update(Update),
     Chat(ChatLine),
+    QuickChat {
+        seat: Option<u8>,
+        name: String,
+        emote: QuickEmote,
+    },
     /// `code` is a `RuleError` name or one of: `BadMessage`, `RoomNotFound`,
     /// `TooManyRooms`, `NotHost`, `AlreadyStarted`, `NotStarted`, `NotFinished`,
     /// `Spectator`, `Kicked`, `Stale`, `RateLimited`, `InvalidSeat`,
@@ -386,6 +465,10 @@ mod tests {
             ClientMsg::SetSeat {
                 seat: 2,
                 bot: Some(BotLevel::Easy),
+                persona: BotPersona::Warlord,
+            },
+            ClientMsg::QuickChat {
+                emote: QuickEmote::OpenToTrade,
             },
             ClientMsg::SetRanked { ranked: false },
             ClientMsg::SetRules {

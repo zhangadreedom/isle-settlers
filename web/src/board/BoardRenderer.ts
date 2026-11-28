@@ -59,6 +59,12 @@ export interface BoardData {
   fishingGrounds?: { edge: number; number: number }[];
   /** Caravans mode: edges forming the Golden River. */
   riverEdges?: number[];
+  /** Explorers mode: sea tiles holding Pirate Lairs to raid. */
+  pirateLairs?: number[];
+  /** Explorers mode: sea tiles holding Deep Fish Shoals to haul. */
+  deepShoals?: number[];
+  /** Explorers mode: outer-island land tiles holding Spice Villages to trade with. */
+  spiceIslands?: number[];
 }
 
 export interface KnightData {
@@ -679,6 +685,46 @@ function fishingTexture(n: number) {
   }, 256);
 }
 
+/** High-DPI 2:1 pill badge texture (`512×256`) for Explorers mission sites. */
+function missionBadgeTexture(
+  label: string,
+  opts: { silhouette: string; rimStart: string; rimEnd: string; face: string; innerStroke: string; ink: string },
+) {
+  const c = document.createElement('canvas');
+  c.width = 512;
+  c.height = 256;
+  const ctx = c.getContext('2d')!;
+
+  roundedPill(ctx, 14, 52, 484, 152, 76);
+  ctx.fillStyle = opts.silhouette;
+  ctx.fill();
+
+  roundedPill(ctx, 24, 62, 464, 132, 66);
+  const grad = ctx.createLinearGradient(24, 62, 488, 194);
+  grad.addColorStop(0, opts.rimStart);
+  grad.addColorStop(1, opts.rimEnd);
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  roundedPill(ctx, 35, 73, 442, 110, 55);
+  ctx.fillStyle = opts.face;
+  ctx.fill();
+  ctx.lineWidth = 3.5;
+  ctx.strokeStyle = opts.innerStroke;
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = opts.ink;
+  ctx.font = '900 54px system-ui, -apple-system, "Segoe UI Emoji", "Apple Color Emoji", "PingFang SC", "Microsoft YaHei", sans-serif';
+  ctx.fillText(label, 256, 130, 412);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
 /** One placed piece; `born` drives the drop-in animation. */
 interface Piece {
   x: number;
@@ -1132,7 +1178,17 @@ export class BoardRenderer {
   }
 
   /** Refreshes board tiles, fog, beaches and tokens in place without resetting the camera or pieces. */
-  updateBoard({ terrain, numbers, harbors, islands, fishingGrounds, riverEdges }: BoardData) {
+  updateBoard({
+    terrain,
+    numbers,
+    harbors,
+    islands,
+    fishingGrounds,
+    riverEdges,
+    pirateLairs,
+    deepShoals,
+    spiceIslands,
+  }: BoardData) {
     this.lastBoardData = {
       terrain: [...terrain],
       numbers: [...numbers],
@@ -1140,6 +1196,9 @@ export class BoardRenderer {
       islands: [...islands],
       fishingGrounds: fishingGrounds ? [...fishingGrounds] : undefined,
       riverEdges: riverEdges ? [...riverEdges] : undefined,
+      pirateLairs: pirateLairs ? [...pirateLairs] : undefined,
+      deepShoals: deepShoals ? [...deepShoals] : undefined,
+      spiceIslands: spiceIslands ? [...spiceIslands] : undefined,
     };
     this.setLand(terrain, islands);
     for (const d of this.disposables) d.dispose();
@@ -1184,11 +1243,15 @@ export class BoardRenderer {
       this.disposables.push(fogMaterial, pads);
     }
 
-    this.addDecorations(terrain);
+    const spiceSet = spiceIslands?.length ? new Set(spiceIslands) : undefined;
+    this.addDecorations(terrain, spiceSet);
     if (riverEdges?.length) this.addGoldenRiver(riverEdges, terrain);
     this.addTokens(numbers, terrain);
     this.addHarbors(harbors);
     if (fishingGrounds?.length) this.addFishingGrounds(fishingGrounds);
+    if (pirateLairs?.length) this.addPirateLairs(pirateLairs);
+    if (deepShoals?.length) this.addDeepShoals(deepShoals);
+    if (spiceIslands?.length) this.addSpiceIslands(spiceIslands);
     this.requestRender();
   }
 
@@ -1793,7 +1856,7 @@ export class BoardRenderer {
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
 
-  private addDecorations(terrain: number[]) {
+  private addDecorations(terrain: number[], spiceSet?: Set<number>) {
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const s = new THREE.Vector3();
@@ -1813,13 +1876,17 @@ export class BoardRenderer {
         const offset = rand() * Math.PI * 2;
         const [rLo, rHi] = deco.radius ?? [0.42, 0.64];
         const baseY = deco.y ?? TOP;
+        const hasSpiceTent = spiceSet?.has(t) ?? false;
         for (let k = 0; k < deco.count; k++) {
           const angle = offset + (k / deco.count) * Math.PI * 2 + (rand() - 0.5) * 0.6;
           const r = k === 0 && deco.radius ? rLo * 0.5 : rLo + rand() * (rHi - rLo);
           const sc = deco.scale[0] + rand() * (deco.scale[1] - deco.scale[0]);
+          const dx = Math.cos(angle) * r;
+          const dz = Math.sin(angle) * r;
+          if (hasSpiceTent && Math.hypot(dx + 0.44, dz - 0.24) < 0.31) continue;
           q.setFromAxisAngle(up, rand() * Math.PI * 2);
           s.set(sc, sc * (deco.squash ?? 1), sc);
-          m.compose(p.set(cx + Math.cos(angle) * r, baseY, cz + Math.sin(angle) * r), q, s);
+          m.compose(p.set(cx + dx, baseY, cz + dz), q, s);
           mesh.setMatrixAt(n, m);
           cap?.setMatrixAt(n, m);
           n++;
@@ -2138,6 +2205,297 @@ export class BoardRenderer {
     this.commit(fishes, nFish);
     this.board.add(pools, ripples, fishes);
     this.disposables.push(poolMaterial, rippleMaterial, fishMaterial, pools, ripples, fishes);
+  }
+
+  /** Explorers mode: menacing jagged sea-fortress reef, black bastion tower & `☠ 海盗巢` pennant at `(x, WATER, z)`. */
+  private addPirateLairs(pirateLairs: number[]) {
+    const valid = [...new Set(pirateLairs)].filter((t) => t >= 0 && t < this.tileXZ.length);
+    if (!valid.length) return;
+
+    const reefGeom = mergeGeometries([
+      new THREE.CylinderGeometry(0.42, 0.54, 0.14, 7).translate(0, -0.04, 0).toNonIndexed(),
+      new THREE.ConeGeometry(0.14, 0.42, 5).rotateZ(0.16).translate(-0.27, 0.16, 0.14).toNonIndexed(),
+      new THREE.ConeGeometry(0.12, 0.34, 5).rotateZ(-0.18).translate(0.29, 0.13, 0.12).toNonIndexed(),
+      new THREE.ConeGeometry(0.13, 0.38, 5).rotateX(0.15).translate(0.06, 0.15, -0.3).toNonIndexed(),
+      new THREE.CylinderGeometry(0.055, 0.13, 0.28, 5).rotateZ(0.12).translate(-0.22, 0.1, -0.22).toNonIndexed(),
+      new THREE.ConeGeometry(0.11, 0.29, 5).rotateX(-0.16).translate(0.22, 0.1, -0.2).toNonIndexed(),
+      new THREE.ConeGeometry(0.1, 0.25, 5).translate(-0.04, 0.09, 0.31).toNonIndexed(),
+    ])!;
+
+    const bastionGeom = mergeGeometries([
+      new THREE.CylinderGeometry(0.21, 0.25, 0.14, 6).translate(0, 0.09, -0.02).toNonIndexed(),
+      new THREE.CylinderGeometry(0.165, 0.195, 0.28, 6).translate(0, 0.28, -0.02).toNonIndexed(),
+      new THREE.CylinderGeometry(0.195, 0.175, 0.06, 6).translate(0, 0.43, -0.02).toNonIndexed(),
+      ...[0, 1, 2, 3, 4, 5].map((k) =>
+        new THREE.BoxGeometry(0.065, 0.055, 0.045)
+          .translate(0, 0.48, 0.165)
+          .rotateY((k * Math.PI) / 3)
+          .translate(0, 0, -0.02)
+          .toNonIndexed(),
+      ),
+      new THREE.CylinderGeometry(0.013, 0.016, 0.3, 6).translate(0.03, 0.58, -0.02).toNonIndexed(),
+    ])!;
+
+    const pennantGeom = mergeGeometries([
+      new THREE.CylinderGeometry(0.176, 0.18, 0.035, 6).translate(0, 0.34, -0.02).toNonIndexed(),
+      box(0.16, 0.09, 0.018, 0.11, 0.67, -0.02),
+      new THREE.ConeGeometry(0.045, 0.09, 4).rotateZ(-Math.PI / 2).translate(0.22, 0.67, -0.02).toNonIndexed(),
+    ])!;
+
+    const reefMat = std(0x272a34, { roughness: 0.9 });
+    const bastionMat = std(0x14151b, { roughness: 0.68, metalness: 0.22 });
+    const pennantMat = std(0xc92a2a, { roughness: 0.42, emissive: 0x610b10 });
+
+    const reefs = this.instanced(reefGeom, reefMat, valid.length);
+    const bastions = this.instanced(bastionGeom, bastionMat, valid.length);
+    const pennants = this.instanced(pennantGeom, pennantMat, valid.length);
+
+    const badgeTex = missionBadgeTexture('☠ 海盗巢', {
+      silhouette: '#12070a',
+      rimStart: '#e03131',
+      rimEnd: '#9c141c',
+      face: '#260c12',
+      innerStroke: '#f0b429',
+      ink: '#fff5eb',
+    });
+    const badgeMat = new THREE.SpriteMaterial({ map: badgeTex, depthTest: true });
+
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const s = new THREE.Vector3(1, 1, 1);
+    const p = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+
+    valid.forEach((t, i) => {
+      const [x, z] = this.tileXZ[t];
+      const rand = prng(t * 6151 + 911);
+      q.setFromAxisAngle(up, (rand() - 0.5) * 0.9);
+      m.compose(p.set(x, WATER, z), q, s);
+      reefs.setMatrixAt(i, m);
+      bastions.setMatrixAt(i, m);
+      pennants.setMatrixAt(i, m);
+
+      const badge = new THREE.Sprite(badgeMat);
+      badge.scale.set(1.04, 0.52, 1);
+      badge.position.set(x, WATER + 0.92, z);
+      this.board.add(badge);
+    });
+
+    this.commit(reefs, valid.length);
+    this.commit(bastions, valid.length);
+    this.commit(pennants, valid.length);
+    this.board.add(reefs, bastions, pennants);
+    this.disposables.push(
+      reefGeom,
+      bastionGeom,
+      pennantGeom,
+      reefMat,
+      bastionMat,
+      pennantMat,
+      reefs,
+      bastions,
+      pennants,
+      badgeTex,
+      badgeMat,
+    );
+  }
+
+  /** Explorers mode: shimmering golden-teal shoal ring, three leaping golden/silver fish & `🐟 远洋渔场` at `(x, WATER, z)`. */
+  private addDeepShoals(deepShoals: number[]) {
+    const valid = [...new Set(deepShoals)].filter((t) => t >= 0 && t < this.tileXZ.length);
+    if (!valid.length) return;
+
+    const poolGeom = new THREE.CircleGeometry(0.5, 24).rotateX(-Math.PI / 2).translate(0, -0.045, 0);
+    const ringGeom = mergeGeometries([
+      new THREE.RingGeometry(0.21, 0.27, 24).rotateX(-Math.PI / 2).translate(0, -0.038, 0).toNonIndexed(),
+      new THREE.RingGeometry(0.39, 0.47, 28).rotateX(-Math.PI / 2).translate(0, -0.038, 0).toNonIndexed(),
+    ])!;
+    const fishGeom = leapingFishGeometry.clone();
+
+    const poolMat = new THREE.MeshStandardMaterial({
+      color: 0x16c9c9,
+      emissive: 0x0a5661,
+      roughness: 0.24,
+      metalness: 0.25,
+      transparent: true,
+      opacity: 0.68,
+      depthWrite: false,
+    });
+    const ringMat = new THREE.MeshStandardMaterial({
+      color: 0xf7cf4c,
+      emissive: 0x2fa89c,
+      roughness: 0.18,
+      metalness: 0.62,
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+    });
+    const fishMat = std(0xffffff, {
+      metalness: 0.68,
+      roughness: 0.2,
+      emissive: 0x30260c,
+    });
+
+    const pools = this.instanced(poolGeom, poolMat, valid.length);
+    const rings = this.instanced(ringGeom, ringMat, valid.length);
+    const fishes = this.instanced(fishGeom, fishMat, valid.length * 3, true);
+    pools.castShadow = pools.receiveShadow = false;
+    rings.castShadow = rings.receiveShadow = false;
+
+    const badgeTex = missionBadgeTexture('🐟 远洋渔场', {
+      silhouette: '#0d222b',
+      rimStart: '#1fd6c8',
+      rimEnd: '#f2be38',
+      face: '#fbf6e8',
+      innerStroke: '#12303d',
+      ink: '#12303d',
+    });
+    const badgeMat = new THREE.SpriteMaterial({ map: badgeTex, depthTest: true });
+
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+    const s = new THREE.Vector3();
+    const p = new THREE.Vector3();
+    const color = new THREE.Color();
+    const fishPalette = [0xffcf40, 0xe2effa, 0xf5a623] as const;
+    const fishScales = [1.06, 0.94, 0.98] as const;
+    const fishHeights = [0.125, 0.095, 0.11] as const;
+
+    let nFish = 0;
+    valid.forEach((t, i) => {
+      const [x, z] = this.tileXZ[t];
+      pools.setMatrixAt(i, m.makeTranslation(x, WATER, z));
+      rings.setMatrixAt(i, m.makeTranslation(x, WATER, z));
+
+      const baseAng = (t * 1.17) % (Math.PI * 2);
+      for (let k = 0; k < 3; k++) {
+        const ang = baseAng + (k * Math.PI * 2) / 3;
+        const r = 0.24;
+        const fx = x + Math.cos(ang) * r;
+        const fz = z + Math.sin(ang) * r;
+        euler.set(0, -ang + Math.PI / 2, -0.38);
+        q.setFromEuler(euler);
+        const sc = fishScales[k];
+        s.set(sc, sc, sc);
+        p.set(fx, WATER + fishHeights[k], fz);
+        fishes.setMatrixAt(nFish, m.compose(p, q, s));
+        fishes.setColorAt(nFish, color.setHex(fishPalette[k]));
+        nFish++;
+      }
+
+      const badge = new THREE.Sprite(badgeMat);
+      badge.scale.set(1.08, 0.54, 1);
+      badge.position.set(x, WATER + 0.52, z);
+      this.board.add(badge);
+    });
+
+    this.commit(pools, valid.length);
+    this.commit(rings, valid.length);
+    this.commit(fishes, nFish);
+    this.board.add(pools, rings, fishes);
+    this.disposables.push(
+      poolGeom,
+      ringGeom,
+      fishGeom,
+      poolMat,
+      ringMat,
+      fishMat,
+      pools,
+      rings,
+      fishes,
+      badgeTex,
+      badgeMat,
+    );
+  }
+
+  /** Explorers mode: purple-gold Spice Merchant Tent, wooden crates & `🏺 香料村` offset on outer land tiles. */
+  private addSpiceIslands(spiceIslands: number[]) {
+    const valid = [...new Set(spiceIslands)].filter((t) => t >= 0 && t < this.tileXZ.length);
+    if (!valid.length) return;
+
+    const canopyGeom = mergeGeometries([
+      new THREE.CylinderGeometry(0.165, 0.19, 0.13, 6).translate(0, 0.065, 0).toNonIndexed(),
+      new THREE.ConeGeometry(0.21, 0.21, 6).translate(0, 0.235, 0).toNonIndexed(),
+    ])!;
+
+    const goldGeom = mergeGeometries([
+      new THREE.CylinderGeometry(0.202, 0.208, 0.028, 6).translate(0, 0.132, 0).toNonIndexed(),
+      ...[0, 1, 2, 3, 4, 5].map((k) =>
+        new THREE.BoxGeometry(0.036, 0.3, 0.018)
+          .rotateX(-0.79)
+          .translate(0, 0.235, 0.107)
+          .rotateY((k * Math.PI) / 3)
+          .toNonIndexed(),
+      ),
+      new THREE.BoxGeometry(0.13, 0.016, 0.09).rotateX(0.28).translate(0, 0.125, 0.19).toNonIndexed(),
+      new THREE.OctahedronGeometry(0.042, 0).translate(0, 0.37, 0),
+    ])!;
+
+    const cratesGeom = mergeGeometries([
+      box(0.085, 0.065, 0.085, -0.155, 0.0325, 0.135),
+      new THREE.BoxGeometry(0.072, 0.056, 0.072).rotateY(0.35).translate(-0.15, 0.093, 0.13).toNonIndexed(),
+      box(0.078, 0.058, 0.078, 0.145, 0.029, 0.145),
+      new THREE.CylinderGeometry(0.034, 0.042, 0.078, 7).translate(-0.205, 0.039, 0.04).toNonIndexed(),
+    ])!;
+
+    const canopyMat = std(0x7b2cbf, { roughness: 0.65, emissive: 0x24093d });
+    const goldMat = std(0xf4b938, { metalness: 0.36, roughness: 0.36, emissive: 0x4d3100 });
+    const cratesMat = std(0x9e6332, { roughness: 0.8 });
+
+    const canopies = this.instanced(canopyGeom, canopyMat, valid.length);
+    const golds = this.instanced(goldGeom, goldMat, valid.length);
+    const crates = this.instanced(cratesGeom, cratesMat, valid.length);
+
+    const badgeTex = missionBadgeTexture('🏺 香料村', {
+      silhouette: '#1d0d2b',
+      rimStart: '#9b4de8',
+      rimEnd: '#f4b938',
+      face: '#fdf5e6',
+      innerStroke: '#3b1554',
+      ink: '#3b1554',
+    });
+    const badgeMat = new THREE.SpriteMaterial({ map: badgeTex, depthTest: true });
+
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const s = new THREE.Vector3(1, 1, 1);
+    const p = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+
+    valid.forEach((t, i) => {
+      const [x, z] = this.tileXZ[t];
+      const sx = x - 0.44;
+      const sz = z + 0.24;
+      q.setFromAxisAngle(up, 0.28);
+      m.compose(p.set(sx, TOP, sz), q, s);
+      canopies.setMatrixAt(i, m);
+      golds.setMatrixAt(i, m);
+      crates.setMatrixAt(i, m);
+
+      const badge = new THREE.Sprite(badgeMat);
+      badge.scale.set(1.02, 0.51, 1);
+      badge.position.set(sx, TOP + 0.58, sz);
+      this.board.add(badge);
+    });
+
+    this.commit(canopies, valid.length);
+    this.commit(golds, valid.length);
+    this.commit(crates, valid.length);
+    this.board.add(canopies, golds, crates);
+    this.disposables.push(
+      canopyGeom,
+      goldGeom,
+      cratesGeom,
+      canopyMat,
+      goldMat,
+      cratesMat,
+      canopies,
+      golds,
+      crates,
+      badgeTex,
+      badgeMat,
+    );
   }
 
   private resize() {

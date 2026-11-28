@@ -741,7 +741,7 @@ impl GameState {
             }
 
             Action::SpendCoinsResource(r) => {
-                if !self.config.scenario.is_caravans() || !main_or_paired {
+                if !self.config.scenario.uses_coins() || !main_or_paired {
                     return Err(E::WrongPhase);
                 }
                 if ps.coins < 2 {
@@ -749,6 +749,63 @@ impl GameState {
                 }
                 if self.bank[r] == 0 {
                     return Err(E::BankShort);
+                }
+                Ok(())
+            }
+
+            Action::RaidPirateLair(tile) => {
+                if !self.can_run_explorer_mission() {
+                    return Err(E::WrongPhase);
+                }
+                if ps.explorer_missions[0] >= 3 {
+                    return Err(E::NoPiecesLeft);
+                }
+                if tile as usize >= topo.num_tiles || !self.board.pirate_lairs.contains(tile) {
+                    return Err(E::InvalidTile);
+                }
+                if !self.can_reach_pirate_lair(player, tile) {
+                    return Err(E::NotConnected);
+                }
+                if !ps.hand.contains(&cost::PIRATE_LAIR) {
+                    return Err(E::InsufficientResources);
+                }
+                Ok(())
+            }
+
+            Action::HaulFishShoal(tile) => {
+                if !self.can_run_explorer_mission() {
+                    return Err(E::WrongPhase);
+                }
+                if ps.explorer_missions[1] >= 3 {
+                    return Err(E::NoPiecesLeft);
+                }
+                if tile as usize >= topo.num_tiles || !self.board.deep_shoals.contains(tile) {
+                    return Err(E::InvalidTile);
+                }
+                if !self.can_reach_deep_shoal(player, tile) {
+                    return Err(E::NotConnected);
+                }
+                if !ps.hand.contains(&cost::FISH_SHOAL) {
+                    return Err(E::InsufficientResources);
+                }
+                Ok(())
+            }
+
+            Action::TradeSpice(tile) => {
+                if !self.can_run_explorer_mission() {
+                    return Err(E::WrongPhase);
+                }
+                if ps.explorer_missions[2] >= 3 {
+                    return Err(E::NoPiecesLeft);
+                }
+                if tile as usize >= topo.num_tiles || !self.board.spice_islands.contains(tile) {
+                    return Err(E::InvalidTile);
+                }
+                if !self.can_reach_spice_island(player, tile) {
+                    return Err(E::NotConnected);
+                }
+                if !ps.hand.contains(&cost::SPICE_TRADE) {
+                    return Err(E::InsufficientResources);
                 }
                 Ok(())
             }
@@ -1462,6 +1519,18 @@ impl GameState {
                 });
             }
 
+            Action::RaidPirateLair(_) => {
+                self.complete_explorer_mission(player, 0, cost::PIRATE_LAIR, sink);
+            }
+
+            Action::HaulFishShoal(_) => {
+                self.complete_explorer_mission(player, 1, cost::FISH_SHOAL, sink);
+            }
+
+            Action::TradeSpice(_) => {
+                self.complete_explorer_mission(player, 2, cost::SPICE_TRADE, sink);
+            }
+
             Action::EndTurn => {
                 let n = self.num_players();
                 if let Phase::SpecialBuild { builder } = self.phase {
@@ -1548,6 +1617,34 @@ impl GameState {
         }
     }
 
+    fn complete_explorer_mission<S: EventSink + ?Sized>(
+        &mut self,
+        player: u8,
+        mission: u8,
+        price: ResourceSet,
+        sink: &mut S,
+    ) {
+        let p = player as usize;
+        let m = mission as usize;
+        self.pay(p, price);
+        self.players[p].explorer_missions[m] += 1;
+        let step = self.players[p].explorer_missions[m];
+        let champion_claimed = if step == 3 && self.explorer_champions[m].is_none() {
+            self.explorer_champions[m] = Some(player);
+            true
+        } else {
+            false
+        };
+        let coins = 2 + u8::from(self.players[p].explorer_missions[2] >= 1);
+        sink.emit(Event::ExplorerMission {
+            player,
+            mission,
+            step,
+            champion_claimed,
+        });
+        self.gain_coins(player, coins, sink);
+    }
+
     fn gain_coins<S: EventSink + ?Sized>(&mut self, player: u8, amount: u8, sink: &mut S) {
         let p = player as usize;
         let before = self.players[p].coins;
@@ -1564,6 +1661,10 @@ impl GameState {
     }
 
     pub fn reassign_wealthiest(&mut self) {
+        if !self.config.scenario.is_caravans() {
+            self.wealthiest_owner = None;
+            return;
+        }
         let max = (0..self.num_players())
             .map(|q| self.players[q].coins)
             .max()
@@ -2000,6 +2101,13 @@ impl GameState {
             for q in 0..n {
                 if coins_owed[q] > 0 {
                     self.gain_coins(q as u8, coins_owed[q], sink);
+                }
+            }
+        }
+        if self.config.scenario.is_explorers() {
+            for q in 0..n {
+                if owed[q].is_empty() && gold[q] == 0 {
+                    self.gain_coins(q as u8, 1, sink);
                 }
             }
         }

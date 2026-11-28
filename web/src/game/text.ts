@@ -298,6 +298,11 @@ export function describe(e: Event, name: (seat: number) => string): string | nul
       return `${name(e.value.player)} 获得 ${e.value.amount} 枚金币`;
     case 'CoinsSpent':
       return `${name(e.value.player)} 花费 ${e.value.cost} 枚金币购入 1 ${RESOURCE_SHORT[e.value.resource]}`;
+    case 'ExplorerMission': {
+      const mName = ['围剿海盗巢穴', '远洋渔运归港', '香料外岛盟约'][e.value.mission] ?? '远洋任务';
+      const crown = e.value.champion_claimed ? '，夺得该系【任务王冠】(+1分)！' : '';
+      return `${name(e.value.player)} 完成【${mName}】第 ${e.value.step}/3 阶（+1分）${crown}`;
+    }
     case 'TurnEnded':
     case 'SpecialBuildPassed':
     case 'PairedTurnEnded':

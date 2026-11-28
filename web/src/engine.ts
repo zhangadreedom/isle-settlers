@@ -1,6 +1,17 @@
 // Typed wrapper around the WebAssembly match host.
 import init, * as wasm from './wasm/isle_wasm.js';
-import type { Action, BoardInfo, BoardLayout, Event, HouseRules, PlayerView, ReplayRecord, ResourceSet, Scenario } from './generated/proto';
+import type {
+  Action,
+  BoardInfo,
+  BoardLayout,
+  Event,
+  HouseRules,
+  PlayerView,
+  ReplayAnalysis,
+  ReplayRecord,
+  ResourceSet,
+  Scenario,
+} from './generated/proto';
 import type { MatchState, WorkerReply, WorkerRequest } from './game/worker';
 
 /** Owner value meaning "nobody" in per-spot arrays. */
@@ -255,6 +266,11 @@ export class Replay {
   /** Applies the next action; `null` at the end. */
   step(viewer: number | null): BotStep | null {
     return call(() => this.inner.step(viewer ?? -1));
+  }
+
+  /** Computes win-probability curves and up to three key turning points across the match. */
+  analyze(): ReplayAnalysis {
+    return call(() => this.inner.analyze());
   }
 
   free() {

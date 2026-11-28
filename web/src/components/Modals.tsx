@@ -453,6 +453,7 @@ export function GameOverModal(props: {
   onAgain?: () => void;
   onLobby: () => void;
   onWatchReplay?: (record: ReplayRecord, link: string | null) => void;
+  onSeekReplay?: (record: ReplayRecord, actionIndex: number, link: string | null) => void;
   /** Online: the room, for rating changes and same-room rematch. */
   room?: RoomInfo | null;
   conn?: Connection | null;
@@ -544,7 +545,17 @@ export function GameOverModal(props: {
                 </Show>
               </div>
               <Show when={showStats() && statsRecord()}>
-                {(rec) => <PostGameStats record={rec()} name={(s) => g.name(s)} />}
+                {(rec) => (
+                  <PostGameStats
+                    record={rec()}
+                    name={(s) => g.name(s)}
+                    onSeekReplay={
+                      props.onSeekReplay
+                        ? (r, step) => props.onSeekReplay!(r, step, g.replayLink?.() ?? null)
+                        : undefined
+                    }
+                  />
+                )}
               </Show>
             </>
           );
@@ -887,5 +898,91 @@ export function CoinMarketModal(props: { game: Game; onClose: () => void }) {
     </Modal>
   );
 }
+
+const EXPLORER_MISSIONS = [
+  {
+    idx: 0,
+    title: '☠ 围剿海盗巢穴',
+    action: 'RaidPirateLair' as const,
+    mode: 'raidLair' as const,
+    cost: [0, 0, 1, 0, 1] as ResourceSet,
+    desc: '航线抵达海盗巢海域后，消耗 1羊+1矿 清剿：升 1 阶（+1分）并获 +2 金币；率先满 3 阶夺【海盗王冠】(+1分)。',
+  },
+  {
+    idx: 1,
+    title: '🐟 远洋渔运归港',
+    action: 'HaulFishShoal' as const,
+    mode: 'haulFish' as const,
+    cost: [0, 1, 0, 1, 0] as ResourceSet,
+    desc: '航线抵达远洋渔场后，消耗 1木+1麦 捕捞运回：升 1 阶（+1分）并获 +2 金币；率先满 3 阶夺【渔运王冠】(+1分)。',
+  },
+  {
+    idx: 2,
+    title: '🏺 香料外岛盟约',
+    action: 'TradeSpice' as const,
+    mode: 'tradeSpice' as const,
+    cost: [0, 0, 1, 1, 0] as ResourceSet,
+    desc: '航线或聚落毗邻香料外岛后，消耗 1羊+1麦 缔约：Lv1 任务额外+1金币，Lv2 全资源 3:1 海贸，满 3 阶夺【香料王冠】(+1分)。',
+  },
+] as const;
+
+/** Explorers & Pirates: three 3-step maritime mission tracks and Champion crowns. */
+export function ExplorersModal(props: { game: Game; onClose: () => void }) {
+  const g = props.game;
+  const progress = () => (g.me !== null ? g.view().players[g.me]?.explorerMissions ?? [0, 0, 0] : [0, 0, 0]);
+  const champions = () => g.view().explorerChampions;
+
+  const triggerMission = (m: (typeof EXPLORER_MISSIONS)[number]) => {
+    const tiles = g
+      .legal()
+      .actions.flatMap((a) => (a.type === m.action ? [a.value] : []));
+    if (!tiles.length) return;
+    if (tiles.length === 1) {
+      g.act((a) => a.type === m.action && a.value === tiles[0]);
+      props.onClose();
+    } else {
+      g.setMode(m.mode);
+      props.onClose();
+    }
+  };
+
+  return (
+    <Modal title="远洋任务总览（探索者与海盗）" onClose={props.onClose} wide>
+      <p class="muted small">
+        每推进 1 阶任务立即获得 <b>+1 胜利分</b> 与金币奖励；每次非 7 点掷骰轮空自动补贴 <b>+1 金币</b>（满 2 币可在钱庄购任意资源）。
+      </p>
+      <div class="tracks-grid">
+        <For each={EXPLORER_MISSIONS}>
+          {(m) => {
+            const lvl = () => progress()[m.idx] ?? 0;
+            const champ = () => champions()[m.idx];
+            const canDo = () => g.has(m.action);
+            return (
+              <div class="track-card">
+                <h4>
+                  <span>{m.title}</span>
+                  <span>{lvl()}/3</span>
+                </h4>
+                <div class="track-pips">
+                  <For each={[1, 2, 3]}>{(k) => <span classList={{ on: lvl() >= k }} />}</For>
+                </div>
+                <p class="muted small">{m.desc}</p>
+                <p class="muted small">
+                  任务王冠：{champ() !== null && champ() !== undefined ? g.name(champ()!) : '虚位以待'}
+                </p>
+                <Show when={lvl() < 3} fallback={<span class="muted small">已完成全部 3 阶</span>}>
+                  <button class="primary small" disabled={!canDo()} onClick={() => triggerMission(m)}>
+                    执行第 {lvl() + 1} 阶（<SetView set={m.cost} />）
+                  </button>
+                </Show>
+              </div>
+            );
+          }}
+        </For>
+      </div>
+    </Modal>
+  );
+}
+
 
 

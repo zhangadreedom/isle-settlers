@@ -1,7 +1,7 @@
 import { createSignal, For, onCleanup, Show } from 'solid-js';
 import type { BoardRenderer } from '../board/BoardRenderer';
 import { PLAYER_CSS } from '../board/palette';
-import type { BotLevel, ChatLine, SeatView } from '../generated/proto';
+import type { BotLevel, BotPersona, ChatLine, SeatView } from '../generated/proto';
 import { errorText } from '../game/text';
 import { account, accountsEnabled } from '../net/account';
 import { inviteLink, savedName, saveName, type Connection } from '../net/connection';
@@ -68,13 +68,23 @@ export function JoinPrompt(props: { room: string; onJoin: (name: string) => void
 }
 
 const LEVEL_NAME: Record<BotLevel, string> = { Easy: 'AI · 简单', Normal: 'AI · 普通', Hard: 'AI · 困难' };
+const PERSONA_NAME: Record<BotPersona, string> = {
+  Balanced: '均衡',
+  RoadBuilder: '修路派',
+  CityBaron: '筑城派',
+  Warlord: '铁卫派',
+  Merchant: '皇商派',
+};
+const PERSONA_LIST: BotPersona[] = ['Balanced', 'RoadBuilder', 'CityBaron', 'Warlord', 'Merchant'];
 
 function seatLabel(s: SeatView): string {
   switch (s.type) {
     case 'Open':
       return '空位 · 等待加入';
-    case 'Bot':
-      return LEVEL_NAME[s.value.level];
+    case 'Bot': {
+      const p = s.value.persona && s.value.persona !== 'Balanced' && s.value.level !== 'Easy' ? ` · ${PERSONA_NAME[s.value.persona]}` : '';
+      return `${LEVEL_NAME[s.value.level]}${p}`;
+    }
     case 'Human':
       return s.value.name;
   }
@@ -229,6 +239,11 @@ export function RoomLobby(props: {
                     骆驼商队
                   </span>
                 </Show>
+                <Show when={room().scenario === 'Explorers'}>
+                  <span class="mode-tag sea" title="推进海盗清剿、远洋渔运与香料盟约三大任务链，轮空补贴金币">
+                    探索与海盗
+                  </span>
+                </Show>
                 <Show when={room().rules.victoryPoints !== null}>
                   <span class="mode-tag">{room().rules.victoryPoints} 分获胜</span>
                 </Show>
@@ -365,17 +380,54 @@ export function RoomLobby(props: {
                           </button>
                           <button
                             classList={{ on: s.type === 'Bot' && s.value.level === 'Normal' }}
-                            onClick={() => c.send({ type: 'SetSeat', value: { seat: i(), bot: 'Normal' } })}
+                            onClick={() =>
+                              c.send({
+                                type: 'SetSeat',
+                                value: { seat: i(), bot: 'Normal', persona: s.type === 'Bot' ? s.value.persona : 'Balanced' },
+                              })
+                            }
                           >
                             普通 AI
                           </button>
                           <button
                             classList={{ on: s.type === 'Bot' && s.value.level === 'Hard' }}
-                            onClick={() => c.send({ type: 'SetSeat', value: { seat: i(), bot: 'Hard' } })}
+                            onClick={() =>
+                              c.send({
+                                type: 'SetSeat',
+                                value: { seat: i(), bot: 'Hard', persona: s.type === 'Bot' ? s.value.persona : 'Balanced' },
+                              })
+                            }
                           >
                             困难 AI
                           </button>
                         </div>
+                        <Show when={s.type === 'Bot' && s.value.level !== 'Easy'}>
+                          <select
+                            class="small"
+                            style={{
+                              font: 'inherit',
+                              'font-size': '12px',
+                              color: 'var(--text)',
+                              background: 'var(--button)',
+                              border: '1px solid var(--panel-border)',
+                              'border-radius': '7px',
+                              padding: '3px 6px',
+                            }}
+                            value={s.type === 'Bot' ? s.value.persona : 'Balanced'}
+                            aria-label="AI 性格"
+                            onChange={(e) => {
+                              if (s.type !== 'Bot') return;
+                              c.send({
+                                type: 'SetSeat',
+                                value: { seat: i(), bot: s.value.level, persona: e.currentTarget.value as BotPersona },
+                              });
+                            }}
+                          >
+                            <For each={PERSONA_LIST}>
+                              {(p) => <option value={p}>{PERSONA_NAME[p]}</option>}
+                            </For>
+                          </select>
+                        </Show>
                       </Show>
                       <Show when={isHost()}>
                         <div class="row seat-ops">

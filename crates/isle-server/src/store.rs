@@ -5,7 +5,7 @@ use std::io;
 use std::path::PathBuf;
 
 use isle_core::Action;
-use isle_proto::net::{BotLevel, HouseRules};
+use isle_proto::net::{BotLevel, BotPersona, HouseRules};
 use isle_proto::ranking::SeatRating;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +53,8 @@ pub enum SeatRecord {
     },
     Bot {
         level: BotLevel,
+        #[serde(default)]
+        persona: BotPersona,
     },
 }
 

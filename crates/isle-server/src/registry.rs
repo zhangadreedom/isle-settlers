@@ -3,14 +3,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use isle_proto::net::PublicRoomSummary;
+use isle_proto::net::{BotLevel, HouseRules, MatchmakeRequest, MatchmakeResponse, PublicRoomSummary};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::ServerConfig;
 use crate::auth::Accounts;
 use crate::daily::DailyArchive;
 use crate::ids;
-use crate::room::{Attached, Outbox, Room, RoomCmd, RoomOptions};
+use crate::room::{Attached, Outbox, Room, RoomCmd, RoomMatchMeta, RoomOptions};
 use crate::store::{ReplayArchive, SeatAccount, Store};
 
 pub type RoomSender = mpsc::Sender<RoomCmd>;
@@ -18,6 +18,7 @@ pub type RoomSender = mpsc::Sender<RoomCmd>;
 struct RoomEntry {
     tx: RoomSender,
     summary: watch::Receiver<Option<PublicRoomSummary>>,
+    meta: watch::Receiver<RoomMatchMeta>,
 }
 
 pub struct Registry {
@@ -100,6 +101,85 @@ impl Registry {
             .collect();
         list.sort_by(|a, b| a.started.cmp(&b.started).then_with(|| a.id.cmp(&b.id)));
         list
+    }
+
+    /// Creates an idle public waiting room where `seat 0..players` are all
+    /// `Open` and `host = 0` is assigned to the first human who attaches.
+    pub fn create_waiting_room(&self, mut options: RoomOptions) -> Result<String, String> {
+        let players = options.players;
+        if !(2..=options.scenario.max_players()).contains(&players)
+            || !options.rules.is_valid_for(options.scenario, players)
+        {
+            return Err("BadMessage".into());
+        }
+        options.is_public = true;
+        let mut rooms = self.rooms.lock().expect("registry lock");
+        self.create_waiting_room_locked(&mut rooms, options)
+    }
+
+    fn create_waiting_room_locked(
+        &self,
+        rooms: &mut HashMap<String, RoomEntry>,
+        options: RoomOptions,
+    ) -> Result<String, String> {
+        if rooms.len() >= self.config.max_rooms {
+            return Err("TooManyRooms".into());
+        }
+        let id = loop {
+            let id = ids::room_id();
+            if !rooms.contains_key(&id) {
+                break id;
+            }
+        };
+        let room = Room::new_waiting(id.clone(), options, self);
+        self.spawn_locked(rooms, id.clone(), room);
+        tracing::info!(room = %id, players = options.players, "waiting room created");
+        Ok(id)
+    }
+
+    /// Finds an open public room matching `(scenario, players, ranked)` with
+    /// at least one `Open` seat, or creates a fresh public waiting room.
+    pub fn matchmake(&self, req: MatchmakeRequest) -> Result<MatchmakeResponse, String> {
+        if !(2..=req.scenario.max_players()).contains(&req.players) {
+            return Err("BadMessage".into());
+        }
+        let mut rooms = self.rooms.lock().expect("registry lock");
+        let mut candidates: Vec<&String> = rooms
+            .iter()
+            .filter_map(|(id, entry)| {
+                let m = *entry.meta.borrow();
+                (m.is_public
+                    && !m.started
+                    && !m.finished
+                    && m.scenario == req.scenario
+                    && m.max_players == req.players
+                    && m.ranked == req.ranked
+                    && m.open_seats >= 1)
+                    .then_some(id)
+            })
+            .collect();
+        candidates.sort();
+        if let Some(&id) = candidates.first() {
+            return Ok(MatchmakeResponse {
+                room_id: id.clone(),
+                created: false,
+            });
+        }
+        let room_id = self.create_waiting_room_locked(
+            &mut rooms,
+            RoomOptions {
+                players: req.players,
+                bots: BotLevel::Normal,
+                ranked: req.ranked,
+                scenario: req.scenario,
+                rules: HouseRules::default(),
+                is_public: true,
+            },
+        )?;
+        Ok(MatchmakeResponse {
+            room_id,
+            created: true,
+        })
     }
 
     /// Creates a room and attaches the creator to seat 0.
@@ -207,13 +287,25 @@ impl Registry {
     }
 
     fn spawn(&self, id: String, room: Room) -> RoomSender {
+        let mut rooms = self.rooms.lock().expect("registry lock");
+        self.spawn_locked(&mut rooms, id, room)
+    }
+
+    fn spawn_locked(
+        &self,
+        rooms: &mut HashMap<String, RoomEntry>,
+        id: String,
+        room: Room,
+    ) -> RoomSender {
         let (tx, rx) = mpsc::channel(256);
         let summary = room.subscribe_summary();
-        self.rooms.lock().expect("registry lock").insert(
+        let meta = room.subscribe_meta();
+        rooms.insert(
             id.clone(),
             RoomEntry {
                 tx: tx.clone(),
                 summary,
+                meta,
             },
         );
         let me = self.me.clone();

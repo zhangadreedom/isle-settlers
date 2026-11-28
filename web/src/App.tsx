@@ -10,6 +10,7 @@ import {
   CityUpgradeModal,
   CoinMarketModal,
   DiscardModal,
+  ExplorersModal,
   FishMarketModal,
   GameOverModal,
   GoldModal,
@@ -20,6 +21,7 @@ import {
   VictimModal,
   YearOfPlentyModal,
 } from './components/Modals';
+import { QuickChatTrigger, SeatSpeechBubbles } from './components/QuickChatBar';
 import { JoinPrompt, RoomLobby } from './components/Room';
 import { RulesModal } from './components/RulesDrawer';
 import { LangToggle, ShortcutsModal } from './components/ShortcutsModal';
@@ -101,6 +103,7 @@ export default function App() {
   const [citadelOpen, setCitadelOpen] = createSignal(false);
   const [fishOpen, setFishOpen] = createSignal(false);
   const [coinOpen, setCoinOpen] = createSignal(false);
+  const [explorersOpen, setExplorersOpen] = createSignal(false);
   const [devModal, setDevModal] = createSignal<'YearOfPlenty' | 'Monopoly' | null>(null);
   // The log (with chat) starts open on wide screens and as a toggle on phones.
   const [logOpen, setLogOpen] = createSignal(window.innerWidth > 720);
@@ -169,6 +172,7 @@ export default function App() {
     setCitadelOpen(false);
     setFishOpen(false);
     setCoinOpen(false);
+    setExplorersOpen(false);
     const source = await createLocalSource(o, (rec) => {
       saveLocalReplay(rec);
       if (activeDailyKey && o.humanSeat !== null) {
@@ -183,8 +187,8 @@ export default function App() {
     setGame(createGame(source, r));
   }
 
-  /** Opens the replay viewer on a record (JSON text). */
-  function openReplay(json: string, link: string | null = null): boolean {
+  /** Opens the replay viewer on a record (JSON text), optionally seeking straight to `initialStep`. */
+  function openReplay(json: string, link: string | null = null, initialStep?: number): boolean {
     const r = renderer();
     if (!r) return false;
     let replay: Replay;
@@ -203,12 +207,17 @@ export default function App() {
     // Unmount the current game's HUD first: its components hold on to the
     // game object they were created with.
     setGame(null);
-    queueMicrotask(() => setGame(createGame(createReplaySource(replay, link), r)));
+    queueMicrotask(() => {
+      const src = createReplaySource(replay, link);
+      const next = createGame(src, r);
+      if (initialStep !== undefined) src.replay?.seek(initialStep);
+      setGame(next);
+    });
     return true;
   }
 
-  function watchReplay(record: ReplayRecord, link: string | null) {
-    if (!openReplay(JSON.stringify(record), link)) return;
+  function watchReplay(record: ReplayRecord, link: string | null, initialStep?: number) {
+    if (!openReplay(JSON.stringify(record), link, initialStep)) return;
     // The address bar shows the replay link (or nothing for a local game).
     history.replaceState(null, '', link ?? location.pathname + location.search);
   }
@@ -348,6 +357,7 @@ export default function App() {
       setCitadelOpen(false);
       setFishOpen(false);
       setCoinOpen(false);
+      setExplorersOpen(false);
       setDevModal(null);
     }
   });
@@ -375,6 +385,7 @@ export default function App() {
       setCitadelOpen(false);
       setFishOpen(false);
       setCoinOpen(false);
+      setExplorersOpen(false);
       setRulesOpen(false);
       setShortcutsOpen(false);
       setDevModal(null);
@@ -480,7 +491,13 @@ export default function App() {
               onSeed={setPreviewSeed}
               onStartLocal={(o) => startLocal(o)}
               onCreateRoom={createRoom}
-              onJoinRoom={(room) => (savedToken(room) ? connect({ type: 'Join', room, name: savedName() || '玩家' }) : setJoinRoom(room))}
+              onJoinRoom={(room, directName) => {
+                if (directName || savedToken(room)) {
+                  connect({ type: 'Join', room, name: directName || savedName() || '玩家' });
+                } else {
+                  setJoinRoom(room);
+                }
+              }}
             />
           }
         >
@@ -527,6 +544,9 @@ export default function App() {
               <Show when={g().replay}>
                 <span class="room-tag muted">{t('回放', 'Replay')}</span>
               </Show>
+              <Show when={!g().replay ? g().quickChat : undefined}>
+                {(send) => <QuickChatTrigger onSend={(emote) => send()(emote)} class="ghost" />}
+              </Show>
               <button class="ghost" onClick={() => setRulesOpen(true)}>
                 {t('规则', 'Rules')}
               </button>
@@ -568,9 +588,11 @@ export default function App() {
               onCitadel={() => setCitadelOpen(true)}
               onFishMarket={() => setFishOpen(true)}
               onCoinMarket={() => setCoinOpen(true)}
+              onExplorers={() => setExplorersOpen(true)}
               onDevCard={(c) => playDevCard(g(), c)}
             />
             <Flights game={g()} />
+            <SeatSpeechBubbles bubbles={g().bubbles()} />
             <TileTooltip game={g()} />
             <Show when={tutorialActive() && !g().online && !g().replay}>
               <TutorialCoach game={g()} onExitTutorial={() => setTutorialActive(false)} />
@@ -602,6 +624,9 @@ export default function App() {
             <Show when={coinOpen()}>
               <CoinMarketModal game={g()} onClose={() => setCoinOpen(false)} />
             </Show>
+            <Show when={explorersOpen()}>
+              <ExplorersModal game={g()} onClose={() => setExplorersOpen(false)} />
+            </Show>
             <Show when={devModal() === 'YearOfPlenty'}>
               <YearOfPlentyModal game={g()} onClose={() => setDevModal(null)} />
             </Show>
@@ -613,7 +638,8 @@ export default function App() {
                 game={g()}
                 onLobby={() => leave()}
                 onAgain={g().online ? undefined : () => lastLocal && startLocal({ ...lastLocal, seed: randomSeed() })}
-                onWatchReplay={watchReplay}
+                onWatchReplay={(r, link) => watchReplay(r, link)}
+                onSeekReplay={(r, step, link) => watchReplay(r, link, step)}
                 room={conn()?.room()}
                 conn={conn()}
               />

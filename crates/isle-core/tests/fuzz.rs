@@ -37,7 +37,10 @@ fn random_good(rng: &mut Rng) -> TradeGood {
 
 /// Arbitrary (often illegal) action, excluding open-ended trade proposals.
 fn random_action(rng: &mut Rng) -> Action {
-    match rng.below(37) {
+    match rng.below(40) {
+        37 => Action::RaidPirateLair(rng.below(48) as u8),
+        38 => Action::HaulFishShoal(rng.below(48) as u8),
+        39 => Action::TradeSpice(rng.below(48) as u8),
         17 => Action::BuildShip(rng.below(170) as u8),
         18 => Action::MoveShip {
             from: rng.below(170) as u8,
@@ -124,7 +127,10 @@ fn weight(a: &Action) -> u32 {
         | Action::BuildSettlement(_)
         | Action::UpgradeCity { .. }
         | Action::PassOldBoot(_)
-        | Action::PlaceCamel(_) => 1000,
+        | Action::PlaceCamel(_)
+        | Action::RaidPirateLair(_)
+        | Action::HaulFishShoal(_)
+        | Action::TradeSpice(_) => 1000,
         Action::BuyDevCard
         | Action::FishBuyDevCard
         | Action::RecruitKnight(_)
@@ -633,4 +639,29 @@ fn custom_maps_self_play_preserve_invariants_across_all_scenarios() {
     }
     assert!(saw_camel && saw_bridge);
     assert!(c_finished >= 20, "only {c_finished}/30 caravans fuzz games finished");
+
+    // 7. Explorers across 2–6 players (including SpecialBuild, Paired Turns, Event Deck & CustomMap).
+    let mut e_finished = 0;
+    let mut saw_mission = false;
+    for seed in 0..30 {
+        let players = 2 + (seed % 5) as u8;
+        let g = play_config(
+            GameConfig {
+                friendly_robber: seed % 2 == 0,
+                paired_turns: players > 4 && seed % 2 == 1,
+                event_deck: seed % 3 == 0,
+                custom_map: (players <= 4 && seed % 5 == 0).then_some(cm_arch),
+                ..GameConfig::scenario(Scenario::Explorers, players)
+            },
+            11_000 + seed,
+            true,
+        );
+        saw_mission |= (0..g.num_players()).any(|p| g.players[p].explorer_missions != [0; 3]);
+        if let Some(w) = g.winner {
+            e_finished += 1;
+            assert!(g.victory_points(w) >= g.target_victory_points(w));
+        }
+    }
+    assert!(saw_mission, "expected explorer missions in fuzz games");
+    assert!(e_finished >= 18, "only {e_finished}/30 explorers fuzz games finished");
 }

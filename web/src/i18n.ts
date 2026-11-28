@@ -82,7 +82,8 @@ export type ScenarioKey =
   | 'FogIslands'
   | 'Citadels'
   | 'Fishermen'
-  | 'Caravans';
+  | 'Caravans'
+  | 'Explorers';
 
 export const SCENARIOS: readonly ScenarioKey[] = [
   'Classic',
@@ -91,6 +92,7 @@ export const SCENARIOS: readonly ScenarioKey[] = [
   'Citadels',
   'Fishermen',
   'Caravans',
+  'Explorers',
 ];
 
 export const SCENARIO_TITLE: Record<ScenarioKey, BilingualText> = {
@@ -100,6 +102,7 @@ export const SCENARIO_TITLE: Record<ScenarioKey, BilingualText> = {
   Citadels: { zh: '城邦与铁卫', en: 'Citadels & Knights' },
   Fishermen: { zh: '渔场与丰年', en: 'Fishermen & Plenty' },
   Caravans: { zh: '商队与桥梁', en: 'Caravans & Bridges' },
+  Explorers: { zh: '探索与海盗', en: 'Explorers & Pirates' },
 };
 
 export const SCENARIO_SHORT: Record<ScenarioKey, BilingualText> = {
@@ -109,6 +112,7 @@ export const SCENARIO_SHORT: Record<ScenarioKey, BilingualText> = {
   Citadels: { zh: '城邦', en: 'Citadels' },
   Fishermen: { zh: '渔场', en: 'Fishery' },
   Caravans: { zh: '商队', en: 'Caravans' },
+  Explorers: { zh: '远洋', en: 'Explorers' },
 };
 
 export const SCENARIO_BLURB: Record<ScenarioKey, BilingualText> = {
@@ -135,6 +139,10 @@ export const SCENARIO_BLURB: Record<ScenarioKey, BilingualText> = {
   Caravans: {
     zh: '商队与桥梁：架设跨河桥梁贯通水系，新建聚落与升级城市推进绿洲骆驼商队延伸，商队途经的村城与跨河贸易网均可斩获额外胜分！支持 2–6 人。',
     en: 'Caravans & Bridges: Span inland rivers with bridges, extend camel caravan routes from the central oasis as settlements and cities rise, and earn bonus VP along connected caravan trade routes! Supports 2–6 players.',
+  },
+  Explorers: {
+    zh: '探索与海盗：扬帆远航推进【围剿海盗巢穴 / 远洋渔运 / 香料外岛盟约】三大任务链（每阶+1分、满阶夺王冠），掷骰轮空自动补贴 +1 金币！先到 15 分获胜，支持 2–6 人。',
+    en: 'Explorers & Pirates: Sail across the archipelago to raid Pirate Lairs, haul Deep Fish Shoals, and forge Spice Trade pacts (+1 VP per step + Champion crowns), with +1 compensation gold on dry rolls! 15 VP to win (2–6 players).',
   },
 };
 

@@ -8,7 +8,7 @@
 //! cards, the order of the development deck, and the RNG state (future dice).
 //! Card *counts* are public.
 
-use isle_core::topology::{NONE, edges_in, vertices_in};
+use isle_core::topology::{NONE, bits, edges_in, vertices_in};
 use isle_core::{
     BARBARIAN_STEPS, BoardLayout, GameConfig, GameState, HarborKind, Phase, Resource, ResourceSet,
     Terrain, TradeOffer,
@@ -27,7 +27,9 @@ pub mod ranking;
 pub mod replay;
 
 pub use daily::{DailyLeaderboard, DailyScoreEntry, DailySubmitRequest};
-pub use replay::{ReplayError, ReplayPlayer, ReplayRecord};
+pub use replay::{
+    ReplayAnalysis, ReplayError, ReplayPlayer, ReplayRecord, TurningPoint, WinProbPoint,
+};
 
 /// Owner value meaning "nobody" in per-spot arrays.
 pub const EMPTY: u8 = u8::MAX;
@@ -56,6 +58,15 @@ pub struct BoardInfo {
     /// Caravans mode: golden river edges flowing from the oasis to the coast.
     #[serde(default)]
     pub river_edges: Vec<u8>,
+    /// Explorers mode: sea tiles holding pirate lairs.
+    #[serde(default)]
+    pub pirate_lairs: Vec<u8>,
+    /// Explorers mode: sea tiles holding deep fish shoals.
+    #[serde(default)]
+    pub deep_shoals: Vec<u8>,
+    /// Explorers mode: land tiles holding spice villages.
+    #[serde(default)]
+    pub spice_islands: Vec<u8>,
 }
 
 /// Public information about a seat.
@@ -93,6 +104,9 @@ pub struct PlayerPublic {
     /// Caravans mode: stone bridges remaining (`0..=3`).
     #[serde(default)]
     pub bridges_left: u8,
+    /// Explorers mode: completed steps `0..=3` on `[PirateLairs, FishHauls, SpiceTrade]`.
+    #[serde(default)]
+    pub explorer_missions: [u8; 3],
 }
 
 /// The viewer's own private information.
@@ -199,6 +213,9 @@ pub struct PlayerView {
     /// Caravans mode: seat currently holding Wealthiest Settler (`+2` VP; 0-coin seats lose 1 VP).
     #[serde(default)]
     pub wealthiest_owner: Option<u8>,
+    /// Explorers mode: first player to reach step 3 on each mission track (`+1` VP each).
+    #[serde(default)]
+    pub explorer_champions: [Option<u8>; 3],
     /// Balanced dice deck house rule: cards remaining before New Year reshuffle.
     #[serde(default)]
     pub dice_deck_left: Option<u8>,
@@ -223,6 +240,9 @@ pub fn board_info(state: &GameState) -> BoardInfo {
         islands: state.board.tile_island[..state.topo().num_tiles].to_vec(),
         fishing_grounds: state.board.active_fishing_grounds().to_vec(),
         river_edges: edges_in(state.board.river_edges).collect(),
+        pirate_lairs: bits(state.board.pirate_lairs).collect(),
+        deep_shoals: bits(state.board.deep_shoals).collect(),
+        spice_islands: bits(state.board.spice_islands).collect(),
     }
 }
 
@@ -274,6 +294,7 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
                 fish_count: ps.fish,
                 coins: ps.coins,
                 bridges_left: ps.bridges_left,
+                explorer_missions: ps.explorer_missions,
             }
         })
         .collect();
@@ -317,6 +338,7 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
         largest_army_owner: state.largest_army_owner,
         old_boot_owner: state.old_boot_owner,
         wealthiest_owner: state.wealthiest_owner,
+        explorer_champions: state.explorer_champions,
         dice_deck_left: state.config.event_deck.then_some(state.dice_deck_len),
         winner: state.winner,
         final_points: state
@@ -369,6 +391,7 @@ mod tests {
             (isle_core::Scenario::Citadels, false, 35..50u64),
             (isle_core::Scenario::Fishermen, true, 50..62u64),
             (isle_core::Scenario::Caravans, false, 62..74u64),
+            (isle_core::Scenario::Explorers, false, 74..86u64),
         ] {
             for seed in seeds {
                 let config = GameConfig {

@@ -129,6 +129,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/ws", get(ws::upgrade))
         .route("/api/health", get(health))
         .route("/api/rooms", get(rooms))
+        .route("/api/matchmake", axum::routing::post(matchmake))
         .route("/api/replays/{id}", get(replay))
         .merge(auth::routes())
         .merge(daily::routes())
@@ -182,6 +183,33 @@ async fn rooms(
         [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
         axum::Json(state.registry.public_rooms()),
     )
+}
+
+async fn matchmake(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<isle_proto::net::MatchmakeRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    match state.registry.matchmake(req) {
+        Ok(resp) => (
+            [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+            axum::Json(resp),
+        )
+            .into_response(),
+        Err(code) => {
+            let status = if code == "TooManyRooms" {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (
+                status,
+                axum::Json(isle_proto::account::ApiError { error: code }),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn health(State(state): State<AppState>) -> axum::Json<serde_json::Value> {

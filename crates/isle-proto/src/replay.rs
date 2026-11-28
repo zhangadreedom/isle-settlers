@@ -34,6 +34,39 @@ pub struct ReplayRecord {
     pub winner: Option<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct WinProbPoint {
+    pub turn: u32,
+    /// Win probability (0.0..=100.0) per seat.
+    pub probs: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct TurningPoint {
+    /// 1-based action index after which the swing occurred (seek to `actionIndex` or `actionIndex - 1` in Replay).
+    pub action_index: u32,
+    pub turn: u32,
+    pub player: u8,
+    pub action: Action,
+    pub before_pct: f32,
+    pub after_pct: f32,
+    pub delta_pct: f32,
+    /// Tag such as `"LongestRoad"`, `"LargestArmy"`, `"Metropolis"`, `"CityBuilt"`, `"SettlementBuilt"`, `"Monopoly"`, `"BarbarianRaid"`, `"ExplorerMission"`, `"CamelCaravan"`, `"DiceSwing"`, `"TacticalPlay"`.
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayAnalysis {
+    pub win_series: Vec<WinProbPoint>,
+    pub turning_points: Vec<TurningPoint>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplayError {
     Format,

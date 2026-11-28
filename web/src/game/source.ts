@@ -12,6 +12,7 @@ import type {
   HouseRules,
   LegalActions,
   PlayerView,
+  QuickEmote,
   ReplayPlayer,
   ReplayRecord,
   Scenario,
@@ -44,6 +45,7 @@ export interface SourceHandlers {
   state: (s: SourceState) => void;
   error: (code: string) => void;
   chat: (line: ChatLine) => void;
+  quickChat?: (q: { seat: number | null; name: string; emote: QuickEmote }) => void;
 }
 
 /** Playback of a recorded game. */
@@ -83,6 +85,7 @@ export interface GameSource {
   /** Plays an action from `legal.actions`, or a trade proposal. */
   play(action: Action, legal: LegalActions): boolean;
   chat?(text: string): void;
+  quickChat?(emote: QuickEmote): void;
   dispose(): void;
 }
 
@@ -204,6 +207,9 @@ export async function createLocalSource(opts: LocalOptions, onFinished?: (record
     async exportReplay() {
       return localRecord();
     },
+    quickChat(emote) {
+      handlers?.quickChat?.({ seat: opts.humanSeat, name: '你', emote });
+    },
     dispose() {
       disposed = true;
       window.clearTimeout(timer);
@@ -260,6 +266,7 @@ export function createOnlineSource(conn: Connection, first: Snapshot): GameSourc
           h.error(code);
         }),
         conn.onChat((line) => h.chat(line)),
+        conn.onQuickChat((q) => h.quickChat?.(q)),
       );
       resync(conn.snapshot() ?? first);
     },
@@ -275,6 +282,9 @@ export function createOnlineSource(conn: Connection, first: Snapshot): GameSourc
     },
     chat(text) {
       conn.send({ type: 'Chat', value: { text } });
+    },
+    quickChat(emote) {
+      conn.send({ type: 'QuickChat', value: { emote } });
     },
     async exportReplay() {
       const id = conn.room()?.replay;

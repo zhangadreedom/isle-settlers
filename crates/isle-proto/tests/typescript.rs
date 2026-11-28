@@ -10,8 +10,9 @@ use isle_core::{
 };
 use isle_proto::account::{AccountInfo, ApiError, Credentials, SessionGrant, SessionInfo};
 use isle_proto::net::{
-    BotLevel, ChatLine, ClientMsg, HouseRules, LegalActions, PublicRoomSummary, RoomInfo, SeatView,
-    ServerMsg, Snapshot, Update,
+    BotLevel, BotPersona, ChatLine, ClientMsg, HouseRules, LegalActions, MatchmakeRequest,
+    MatchmakeResponse, PublicRoomSummary, QuickEmote, RoomInfo, SeatView, ServerMsg, Snapshot,
+    Update,
 };
 use isle_proto::ranking::{
     Leaderboard, LeaderboardEntry, MatchSummary, PlayerProfile, RatingChange, SeatRating, Tier,
@@ -19,8 +20,8 @@ use isle_proto::ranking::{
 use isle_proto::{
     Action, BoardInfo, CitadelView, CityTrack, Commodity, CommoditySet, DailyLeaderboard,
     DailyScoreEntry, DailySubmitRequest, DevCard, Event, FishingGround, FogBoard, KnightView,
-    PlayerPublic, PlayerView, PrivateInfo, ReplayPlayer, ReplayRecord, RuleError, TradeGood,
-    TradeResponse,
+    PlayerPublic, PlayerView, PrivateInfo, ReplayAnalysis, ReplayPlayer, ReplayRecord, RuleError,
+    TradeGood, TradeResponse, TurningPoint, WinProbPoint,
 };
 use ts_rs::{Config, TS};
 
@@ -55,12 +56,16 @@ fn render() -> String {
         PrivateInfo::decl(&cfg),
         PlayerView::decl(&cfg),
         BotLevel::decl(&cfg),
+        BotPersona::decl(&cfg),
+        QuickEmote::decl(&cfg),
         Tier::decl(&cfg),
         SeatRating::decl(&cfg),
         RatingChange::decl(&cfg),
         SeatView::decl(&cfg),
         HouseRules::decl(&cfg),
         PublicRoomSummary::decl(&cfg),
+        MatchmakeRequest::decl(&cfg),
+        MatchmakeResponse::decl(&cfg),
         RoomInfo::decl(&cfg),
         LegalActions::decl(&cfg),
         Snapshot::decl(&cfg),
@@ -70,6 +75,9 @@ fn render() -> String {
         ServerMsg::decl(&cfg),
         ReplayPlayer::decl(&cfg),
         ReplayRecord::decl(&cfg),
+        WinProbPoint::decl(&cfg),
+        TurningPoint::decl(&cfg),
+        ReplayAnalysis::decl(&cfg),
         Credentials::decl(&cfg),
         AccountInfo::decl(&cfg),
         SessionGrant::decl(&cfg),

@@ -552,7 +552,9 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
                 Some(setup_spot_value(s, p, *v) + rng.below(100) as f32 * 0.01)
             }
             Action::BuildSettlement(v)
-                if s.config.scenario.is_fishermen() || s.config.scenario.is_caravans() =>
+                if s.config.scenario.is_fishermen()
+                    || s.config.scenario.is_caravans()
+                    || s.config.scenario.is_explorers() =>
             {
                 Some(spot_value(s, p, *v) + rng.below(100) as f32 * 0.01)
             }
@@ -676,6 +678,7 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
     let citadels = s.config.scenario.is_citadels();
     let fishermen = s.config.scenario.is_fishermen();
     let caravans = s.config.scenario.is_caravans();
+    let explorers = s.config.scenario.is_explorers();
     if fishermen
         && let Some(a) = best_of(legal, |a| match a {
             Action::PassOldBoot(q) => Some(s.public_victory_points(*q) as f32),
@@ -696,6 +699,22 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
         Action::BuildSettlement(v) => Some(vertex_production(s, *v)),
         _ => None,
     }) {
+        return a;
+    }
+    if explorers
+        && let Some(a) = best_of(legal, |a| match a {
+            Action::RaidPirateLair(_) => {
+                Some(crate::greedy::explorer_mission_value(s, p, 0, BotPersona::Balanced))
+            }
+            Action::HaulFishShoal(_) => {
+                Some(crate::greedy::explorer_mission_value(s, p, 1, BotPersona::Balanced))
+            }
+            Action::TradeSpice(_) => {
+                Some(crate::greedy::explorer_mission_value(s, p, 2, BotPersona::Balanced))
+            }
+            _ => None,
+        })
+    {
         return a;
     }
     if citadels
@@ -749,13 +768,32 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
         }
     }
     let hand = s.players[p as usize].hand;
-    // Trade surplus with the bank towards a city or settlement.
+    // Trade surplus with the bank towards a city or settlement (or connected Explorer mission).
+    if explorers && s.players[p as usize].coins >= 2 {
+        for m in [2u8, 0, 1] {
+            if s.players[p as usize].explorer_missions[m as usize] < 3
+                && crate::sea::explorer_track_reached(s, p, m as usize)
+            {
+                let target = crate::greedy::explorer_mission_cost(m);
+                if missing(hand, target) == 1
+                    && let Some(t) = legal.iter().find(|a| match a {
+                        Action::SpendCoinsResource(get) => hand[*get] < target[*get],
+                        _ => false,
+                    })
+                {
+                    return *t;
+                }
+            }
+        }
+    }
     for target in [cost::CITY, cost::SETTLEMENT] {
         if missing(hand, target) == 1 {
             let trade = legal.iter().find(|a| match a {
-                Action::SpendCoinsResource(get) if caravans => {
+                Action::SpendCoinsResource(get) if caravans || explorers => {
                     hand[*get] < target[*get]
-                        && (s.wealthiest_owner != Some(p) || s.players[p as usize].coins >= 6)
+                        && (explorers
+                            || s.wealthiest_owner != Some(p)
+                            || s.players[p as usize].coins >= 6)
                 }
                 Action::FishTakeResource(get) if fishermen => hand[*get] < target[*get],
                 Action::MaritimeTrade { give, get } => {

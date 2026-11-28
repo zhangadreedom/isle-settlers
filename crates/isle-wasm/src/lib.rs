@@ -13,8 +13,8 @@ use isle_core::{
     Action, Board, BoardLayout, CustomMap, Event, GameConfig, GameState, MAX_PLAYERS, ResourceSet,
     Scenario,
 };
-use isle_proto::ReplayError;
 use isle_proto::replay::decode_actions;
+use isle_proto::{ReplayAnalysis, ReplayError, TurningPoint, WinProbPoint};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -402,6 +402,217 @@ impl Replay {
             events: &events,
         })
     }
+
+    /// Computes win-probability curves and up to three key turning points
+    /// across the recorded game (`ReplayAnalysis` JSON).
+    pub fn analyze(&self) -> Result<String, JsError> {
+        to_js(&analyze_replay(&self.checkpoints[0], &self.actions))
+    }
+}
+
+fn win_probs(s: &GameState) -> Vec<f32> {
+    let n = s.num_players();
+    if let Some(w) = s.winner {
+        return (0..n)
+            .map(|p| if p == w as usize { 100.0 } else { 0.0 })
+            .collect();
+    }
+    let mut eval_scores = [0.0f32; MAX_PLAYERS];
+    isle_ai::eval::evaluate(s, isle_ai::BotPersona::Balanced, &mut eval_scores);
+    let mut score = [0.0f32; MAX_PLAYERS];
+    let mut max_score = f32::NEG_INFINITY;
+    for p in 0..n {
+        score[p] = eval_scores[p] + 1.8 * s.victory_points(p as u8) as f32;
+        if score[p] > max_score {
+            max_score = score[p];
+        }
+    }
+    let mut w = [0.0f32; MAX_PLAYERS];
+    let mut sum_w = 0.0f32;
+    for p in 0..n {
+        w[p] = ((score[p] - max_score) * 0.45).exp();
+        sum_w += w[p];
+    }
+    (0..n)
+        .map(|p| ((100.0 * w[p] / sum_w) * 10.0).round() / 10.0)
+        .collect()
+}
+
+fn classify_turning_point(action: Action, events: &[Event]) -> &'static str {
+    if events
+        .iter()
+        .any(|e| matches!(e, Event::BarbariansRepelled { .. } | Event::CityPillaged { .. }))
+    {
+        "BarbarianRaid"
+    } else if events.iter().any(|e| matches!(e, Event::LongestRoadChanged { .. })) {
+        "LongestRoad"
+    } else if events.iter().any(|e| matches!(e, Event::LargestArmyChanged { .. })) {
+        "LargestArmy"
+    } else if matches!(action, Action::UpgradeCity { metropolis: Some(_), .. })
+        || events
+            .iter()
+            .any(|e| matches!(e, Event::CityUpgraded { metropolis: Some(_), .. }))
+    {
+        "Metropolis"
+    } else if events.iter().any(|e| matches!(e, Event::ExplorerMission { .. }))
+        || matches!(
+            action,
+            Action::RaidPirateLair(_) | Action::HaulFishShoal(_) | Action::TradeSpice(_)
+        )
+    {
+        "ExplorerMission"
+    } else if matches!(action, Action::PlayMonopoly(_))
+        || events.iter().any(|e| matches!(e, Event::MonopolyTaken { .. }))
+    {
+        "Monopoly"
+    } else if matches!(action, Action::PlaceCamel(_) | Action::BuildBridge(_))
+        || events
+            .iter()
+            .any(|e| matches!(e, Event::CamelPlaced { .. } | Event::BridgeBuilt { .. }))
+    {
+        "CamelCaravan"
+    } else if events.iter().any(|e| matches!(e, Event::CityBuilt { .. }))
+        || matches!(action, Action::BuildCity(_))
+    {
+        "CityBuilt"
+    } else if events.iter().any(|e| matches!(e, Event::SettlementBuilt { .. }))
+        || matches!(action, Action::BuildSettlement(_))
+    {
+        "SettlementBuilt"
+    } else if matches!(action, Action::RollDice)
+        || events.iter().any(|e| matches!(e, Event::DiceRolled { .. }))
+    {
+        "DiceSwing"
+    } else {
+        "TacticalPlay"
+    }
+}
+
+fn analyze_replay(start: &GameState, actions: &[(u8, Action)]) -> ReplayAnalysis {
+    const MAX_SERIES_POINTS: usize = 90;
+    let mut s = *start;
+    let n = s.num_players();
+    let mut cur_probs = win_probs(&s);
+    let mut raw_series: Vec<WinProbPoint> = Vec::new();
+    if !s.is_setup() {
+        raw_series.push(WinProbPoint {
+            turn: s.turn,
+            probs: cur_probs.clone(),
+        });
+    }
+    let mut candidates: Vec<TurningPoint> = Vec::new();
+    let mut events: Vec<Event> = Vec::new();
+
+    for (idx, &(seat, action)) in actions.iter().enumerate() {
+        let was_setup = s.is_setup();
+        let prev_turn = s.turn;
+        let probs_before = cur_probs;
+
+        events.clear();
+        s.apply_with(seat, action, &mut events)
+            .expect("checked on load");
+        let probs_after = win_probs(&s);
+
+        if was_setup && !s.is_setup() {
+            raw_series.push(WinProbPoint {
+                turn: 0,
+                probs: probs_after.clone(),
+            });
+        } else if !s.is_setup() && s.turn > prev_turn {
+            raw_series.push(WinProbPoint {
+                turn: s.turn,
+                probs: probs_after.clone(),
+            });
+        }
+
+        if !was_setup {
+            let has_raid = events.iter().any(|e| {
+                matches!(
+                    e,
+                    Event::BarbariansRepelled { .. } | Event::CityPillaged { .. }
+                )
+            });
+            let has_win = events.iter().any(|e| matches!(e, Event::GameWon { .. }));
+            let is_pure_pass = action == Action::EndTurn && !has_raid && !has_win;
+            if !is_pure_pass {
+                let target_seat = if matches!(action, Action::RollDice) || has_raid || has_win {
+                    let mut best_q = seat as usize;
+                    let mut best_abs = (probs_after[best_q] - probs_before[best_q]).abs();
+                    for q in 0..n {
+                        let d = (probs_after[q] - probs_before[q]).abs();
+                        if d > best_abs {
+                            best_abs = d;
+                            best_q = q;
+                        }
+                    }
+                    best_q as u8
+                } else {
+                    seat
+                };
+                let before_pct = probs_before[target_seat as usize];
+                let after_pct = probs_after[target_seat as usize];
+                let delta_pct = ((after_pct - before_pct) * 10.0).round() / 10.0;
+                if delta_pct.abs() >= 3.0 {
+                    candidates.push(TurningPoint {
+                        action_index: (idx + 1) as u32,
+                        turn: prev_turn,
+                        player: target_seat,
+                        action,
+                        before_pct,
+                        after_pct,
+                        delta_pct,
+                        kind: classify_turning_point(action, &events).to_owned(),
+                    });
+                }
+            }
+        }
+
+        cur_probs = probs_after;
+    }
+
+    if raw_series
+        .last()
+        .is_none_or(|last| last.turn != s.turn || last.probs != cur_probs)
+    {
+        raw_series.push(WinProbPoint {
+            turn: s.turn,
+            probs: cur_probs,
+        });
+    }
+
+    let win_series = if raw_series.len() > MAX_SERIES_POINTS {
+        let len = raw_series.len();
+        (0..MAX_SERIES_POINTS)
+            .map(|k| raw_series[k * (len - 1) / (MAX_SERIES_POINTS - 1)].clone())
+            .collect()
+    } else {
+        raw_series
+    };
+
+    candidates.sort_by(|a, b| {
+        b.delta_pct
+            .abs()
+            .total_cmp(&a.delta_pct.abs())
+            .then_with(|| a.action_index.cmp(&b.action_index))
+    });
+    let mut turning_points: Vec<TurningPoint> = Vec::with_capacity(3);
+    for cand in candidates {
+        if turning_points
+            .iter()
+            .all(|tp| tp.action_index.abs_diff(cand.action_index) >= 2)
+        {
+            turning_points.push(cand);
+            if turning_points.len() == 3 {
+                break;
+            }
+        }
+    }
+    turning_points.sort_by_key(|tp| tp.action_index);
+
+    ReplayAnalysis {
+        win_series,
+        turning_points,
+    }
 }
 
 /// Plays `games` complete bot-vs-bot games and returns the number of actions
@@ -446,6 +657,7 @@ fn parse_scenario_str(name: &str) -> Result<Scenario, String> {
         "Citadels" | "citadels" => Ok(Scenario::Citadels),
         "Fishermen" | "fishermen" => Ok(Scenario::Fishermen),
         "Caravans" | "caravans" => Ok(Scenario::Caravans),
+        "Explorers" | "explorers" => Ok(Scenario::Explorers),
         _ => Err("UnknownScenario".into()),
     }
 }
@@ -671,5 +883,55 @@ mod tests {
             Replay::from_config_json(&c_cfg_json, &c_rec.seed, &c_rec.actions).unwrap();
         c_rep.seek(c_rep.length());
         assert_eq!(c_rep.state, cm_match.host.state);
+
+        // createMatch with Scenario::Explorers + Replay::analyze() validation!
+        let mut exp_match = LocalMatch::create_match(
+            4,
+            105,
+            -1,
+            "greedy@warlord,greedy@merchant,greedy@road,greedy@city",
+            "Explorers",
+            0,
+            false,
+            false,
+            true,
+            "",
+        )
+        .unwrap();
+        let e_board: isle_proto::BoardInfo =
+            serde_json::from_str(&exp_match.board().unwrap()).unwrap();
+        assert_eq!(e_board.pirate_lairs.len(), 3);
+        assert_eq!(e_board.deep_shoals.len(), 3);
+        assert!(e_board.spice_islands.len() >= 3);
+        while exp_match.host.step_bot().is_some() {}
+        let winner = exp_match.host.state.winner.expect("explorers finished");
+        let e_rec = exp_match.host.replay("Explorer");
+        assert_eq!(e_rec.config.scenario, Scenario::Explorers);
+        let e_cfg_json = serde_json::to_string(&e_rec.config).unwrap();
+        let e_rep = Replay::from_config_json(&e_cfg_json, &e_rec.seed, &e_rec.actions).unwrap();
+        let analysis: ReplayAnalysis = serde_json::from_str(&e_rep.analyze().unwrap()).unwrap();
+        assert!(analysis.win_series.len() >= 2 && analysis.win_series.len() <= 90);
+        assert_eq!(analysis.win_series.first().unwrap().turn, 0);
+        let final_pt = analysis.win_series.last().unwrap();
+        assert_eq!(final_pt.probs[winner as usize], 100.0);
+        for (q, &pct) in final_pt.probs.iter().enumerate() {
+            if q != winner as usize {
+                assert_eq!(pct, 0.0);
+            }
+        }
+        assert!(
+            !analysis.turning_points.is_empty() && analysis.turning_points.len() <= 3,
+            "expected 1..=3 turning points, got {:?}",
+            analysis.turning_points
+        );
+        for tp in &analysis.turning_points {
+            assert!(tp.action_index >= 1 && tp.action_index <= e_rep.length());
+            assert!(tp.delta_pct.abs() >= 3.0);
+            assert!(!tp.kind.is_empty());
+        }
+        for pair in analysis.turning_points.windows(2) {
+            assert!(pair[0].action_index < pair[1].action_index);
+            assert!(pair[1].action_index - pair[0].action_index >= 2);
+        }
     }
 }
