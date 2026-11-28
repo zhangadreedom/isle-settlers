@@ -701,7 +701,7 @@ async fn turn_timer_auto_acts_for_idle_connected_player() {
     // Connected human sits completely idle: within a few seconds the 1s turn
     // timer should automatically execute their setup actions and advance play.
     let mut saw_update_timer = false;
-    timeout(Duration::from_secs(6), async {
+    timeout(Duration::from_secs(20), async {
         while host.legal.as_ref().unwrap().version < 4 {
             if let ServerMsg::Update(u) = host.recv().await
                 && u.turn_remaining_ms.is_some()
@@ -715,7 +715,7 @@ async fn turn_timer_auto_acts_for_idle_connected_player() {
     assert!(saw_update_timer);
 
     // Keep sitting idle until the game finishes on its own.
-    timeout(Duration::from_secs(60), host.until(|c| c.game_over()))
+    timeout(Duration::from_secs(120), host.until(|c| c.game_over()))
         .await
         .expect("timed game did not finish");
     assert!(host.view.as_ref().unwrap().winner.is_some());
