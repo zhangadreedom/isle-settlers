@@ -112,7 +112,9 @@ impl Client {
             name: name.into(),
             ranked,
             scenario: Default::default(),
+            rules: Default::default(),
             session: session.map(str::to_owned),
+            is_public: false,
         })
         .await;
         c.until(|c| c.room.is_some() || !c.errors.is_empty()).await;

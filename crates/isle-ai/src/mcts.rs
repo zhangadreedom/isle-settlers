@@ -10,12 +10,19 @@
 //! the reward of the seat that chose its action.
 
 use isle_core::resources::cost;
-use isle_core::{Action, GameState, MAX_PLAYERS, Phase, ResourceSet, Rng};
+use isle_core::topology::NONE;
+use isle_core::{
+    Action, CommoditySet, GameState, MAX_PLAYERS, Phase, ResourceSet, Rng, TradeGood,
+};
 
 use crate::Bot;
 use crate::determinize::determinize;
 use crate::eval::{Weights, rewards};
-use crate::greedy::{missing, robber_value, spot_value, vertex_production};
+use crate::greedy::{
+    citadel_city_value, fishermen_city_value, knight_spot_value, missing, propose_trade_offer,
+    robber_hurts_me, robber_value, setup_spot_value, spot_value, track_for_commodity,
+    upgrade_city_value, vertex_production,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct MctsConfig {
@@ -103,6 +110,8 @@ pub struct SearchStats {
 pub struct MctsBot {
     config: MctsConfig,
     rng: Rng,
+    propose_trades: bool,
+    last_offer: Option<(u32, u8)>,
     nodes: Vec<Node>,
     legal: Vec<Action>,
     cands: Vec<Action>,
@@ -120,6 +129,8 @@ impl MctsBot {
         MctsBot {
             config,
             rng: Rng::new(seed),
+            propose_trades: false,
+            last_offer: None,
             nodes: Vec::new(),
             legal: Vec::with_capacity(128),
             cands: Vec::with_capacity(64),
@@ -267,26 +278,74 @@ impl Bot for MctsBot {
         "mcts"
     }
 
+    fn set_propose_trades(&mut self, enabled: bool) {
+        self.propose_trades = enabled;
+    }
+
     fn choose(&mut self, state: &GameState, player: u8, legal: &[Action]) -> Action {
-        if legal.len() == 1 {
+        if legal.len() == 1
+            && !(self.propose_trades
+                && state.phase == Phase::Main
+                && player == state.current
+                && state.trade.is_none())
+        {
             return legal[0];
+        }
+        if state.trade.is_some()
+            && player == state.current
+            && !legal.iter().any(|a| matches!(a, Action::ConfirmTrade { .. }))
+            && legal.contains(&Action::CancelTrade)
+        {
+            return Action::CancelTrade;
         }
         let mut cands = Vec::with_capacity(legal.len());
         candidates(state, player, legal, self.config.max_children, &mut cands);
-        if cands.len() == 1 {
-            return cands[0];
+        let chosen = if cands.len() == 1 {
+            cands[0]
+        } else {
+            self.search(state, player, &cands)
+        };
+        if self.propose_trades
+            && chosen == Action::EndTurn
+            && state.phase == Phase::Main
+            && player == state.current
+            && state.trade.is_none()
+            && self.last_offer != Some((state.turn, player))
+        {
+            let ps = &state.players[player as usize];
+            for (ok, target) in [
+                (
+                    ps.cities_left > 0 && !state.settlements[player as usize].is_empty(),
+                    cost::CITY,
+                ),
+                (
+                    ps.settlements_left > 0 && !state.settlement_spots(player, true).is_empty(),
+                    cost::SETTLEMENT,
+                ),
+            ] {
+                if ok && let Some(offer) = propose_trade_offer(state, player, target) {
+                    self.last_offer = Some((state.turn, player));
+                    return offer;
+                }
+            }
         }
-        self.search(state, player, &cands)
+        chosen
     }
 }
 
 // ------------------------------------------------------------ pruning
 
 /// Actions worth searching: everything, except that wide families (setup
-/// spots, discards, robber moves) are cut to their `k` best by heuristics.
+/// spots, discards, robber moves, and wide Citadels knight/commodity lists)
+/// are cut to their best few by heuristics.
 /// Uses only information the actor has (the state is a determinization).
 fn candidates(s: &GameState, actor: u8, legal: &[Action], k: usize, out: &mut Vec<Action>) {
     out.clear();
+    let citadels = s.config.scenario.is_citadels();
+    if citadels && matches!(s.phase, Phase::Main | Phase::PairedTurn { .. }) && legal.len() > k {
+        citadel_main_candidates(s, actor, legal, out);
+        return;
+    }
     let wide = matches!(
         s.phase,
         Phase::SetupSettlement | Phase::Discard | Phase::MoveRobber
@@ -296,15 +355,124 @@ fn candidates(s: &GameState, actor: u8, legal: &[Action], k: usize, out: &mut Ve
         return;
     }
     let hand = s.players[actor as usize].hand;
+    let comm = s.players[actor as usize].commodities;
     let score = |a: &Action| match a {
+        Action::BuildSettlement(v) if citadels => setup_spot_value(s, actor, *v),
         Action::BuildSettlement(v) => spot_value(s, actor, *v),
         Action::Discard(d) => discard_score(hand - *d),
+        Action::DiscardCitadel {
+            resources,
+            commodities,
+        } => citadel_discard_score(s, actor, hand - *resources, comm - *commodities),
         Action::MoveRobber { tile, victim } => robber_value(s, actor, *tile, *victim),
         _ => 0.0,
     };
     let mut scored: Vec<(f32, Action)> = legal.iter().map(|a| (score(a), *a)).collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     out.extend(scored.iter().take(k).map(|&(_, a)| a));
+}
+
+fn citadel_discard_score(
+    s: &GameState,
+    actor: u8,
+    keep_hand: ResourceSet,
+    keep_comm: CommoditySet,
+) -> f32 {
+    let mut score = discard_score(keep_hand);
+    let ps = &s.players[actor as usize];
+    let has_city = !s.cities[actor as usize].is_empty();
+    let ratio = s.commodity_trade_ratio(actor);
+    for track in isle_core::CityTrack::ALL {
+        let lvl = ps.city_progress[track.index()];
+        let c = track.commodity();
+        let kept = keep_comm[c];
+        if has_city && lvl < 5 {
+            let need = lvl + 1;
+            let frac = kept.min(need) as f32 / need as f32;
+            let weight = if s.upgrade_claims_metropolis(actor, track) {
+                6.0
+            } else if need == 3 {
+                4.5
+            } else {
+                2.5
+            };
+            score += frac * weight + if kept >= need { 2.5 } else { 0.0 };
+            score += (kept.saturating_sub(need) / ratio) as f32 * 0.8;
+        } else {
+            score += (kept / ratio) as f32 * 0.9 + kept as f32 * 0.15;
+        }
+    }
+    score
+}
+
+fn citadel_main_candidates(s: &GameState, actor: u8, legal: &[Action], out: &mut Vec<Action>) {
+    let ps = &s.players[actor as usize];
+    let hand = ps.hand;
+    let comm = ps.commodities;
+    let has_city = !s.cities[actor as usize].is_empty();
+    let mut chase: Vec<(f32, Action)> = Vec::new();
+    let mut recruit: Vec<(f32, Action)> = Vec::new();
+    let mut move_k: Vec<(f32, Action)> = Vec::new();
+    let mut trades: Vec<(f32, Action)> = Vec::new();
+
+    for &a in legal {
+        match a {
+            Action::ChaseRobber { tile, victim, .. } => {
+                chase.push((robber_value(s, actor, tile, victim), a));
+            }
+            Action::RecruitKnight(v) => {
+                recruit.push((knight_spot_value(s, actor, v), a));
+            }
+            Action::MoveKnight { from, to } => {
+                if s.knight_owner[to as usize] != NONE && s.knight_owner[to as usize] != actor {
+                    let opp = s.knight_owner[to as usize];
+                    let score = if s.knight_retreat_spot(opp, to, from).is_none() {
+                        10.0
+                    } else {
+                        4.0
+                    };
+                    move_k.push((score, a));
+                }
+            }
+            Action::MaritimeTradeGood { give, get } => {
+                let score = match get {
+                    TradeGood::Commodity(c) if has_city => {
+                        let track = track_for_commodity(c);
+                        let lvl = ps.city_progress[track.index()];
+                        if lvl < 5 && comm[c] + 1 == lvl + 1 {
+                            Some(upgrade_city_value(s, actor, track, None))
+                        } else {
+                            None
+                        }
+                    }
+                    TradeGood::Resource(r) => {
+                        let wants_r = cost::CITY[r] > hand[r]
+                            || cost::SETTLEMENT[r] > hand[r]
+                            || cost::KNIGHT[r] > hand[r]
+                            || cost::ACTIVATE_KNIGHT[r] > hand[r];
+                        match give {
+                            TradeGood::Commodity(c) => {
+                                let lvl = ps.city_progress[track_for_commodity(c).index()];
+                                ((wants_r && (lvl >= 3 || !has_city || ps.total_cards() > 7))
+                                    || ps.total_cards() > 7)
+                                    .then_some(if cost::CITY[r] > hand[r] { 2.0 } else { 1.0 })
+                            }
+                            TradeGood::Resource(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(sc) = score {
+                    trades.push((sc, a));
+                }
+            }
+            _ => out.push(a),
+        }
+    }
+    for (list, cap) in [(&mut chase, 3), (&mut recruit, 3), (&mut move_k, 2), (&mut trades, 4)] {
+        list.sort_by(|a, b| b.0.total_cmp(&a.0));
+        out.extend(list.iter().take(cap).map(|&(_, a)| a));
+    }
 }
 
 /// Prefer keeping cards that complete something, then a varied hand.
@@ -353,9 +521,16 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
     if legal.len() == 1 {
         return legal[0];
     }
+    let citadels = s.config.scenario.is_citadels();
     let pick = |rng: &mut Rng| legal[rng.below(legal.len() as u32) as usize];
     match s.phase {
         Phase::SetupSettlement => best_of(legal, |a| match a {
+            Action::BuildSettlement(v) if citadels => {
+                Some(setup_spot_value(s, p, *v) + rng.below(100) as f32 * 0.01)
+            }
+            Action::BuildSettlement(v) if s.config.scenario.is_fishermen() => {
+                Some(spot_value(s, p, *v) + rng.below(100) as f32 * 0.01)
+            }
             Action::BuildSettlement(v) => {
                 Some(vertex_production(s, *v) + rng.below(100) as f32 * 0.01)
             }
@@ -363,6 +538,56 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
         })
         .unwrap_or_else(|| pick(rng)),
         Phase::SetupRoad { .. } | Phase::RoadBuilding { .. } => pick(rng),
+        Phase::Discard if citadels => {
+            let ps = &s.players[p as usize];
+            let mut hand = ps.hand;
+            let mut comm = ps.commodities;
+            let mut drop_r = ResourceSet::EMPTY;
+            let mut drop_c = CommoditySet::EMPTY;
+            let has_city = !s.cities[p as usize].is_empty();
+            for _ in 0..s.pending_discard[p as usize] {
+                // Drop from the pile with highest disposable count.
+                let mut best_idx = 0usize;
+                let mut best_score = i32::MIN;
+                for i in 0..5 {
+                    if hand.0[i] > 0 {
+                        let sc = hand.0[i] as i32 * 2;
+                        if sc > best_score {
+                            best_score = sc;
+                            best_idx = i;
+                        }
+                    }
+                }
+                for i in 0..3 {
+                    if comm.0[i] > 0 {
+                        let c = isle_core::Commodity::ALL[i];
+                        let lvl = ps.city_progress[track_for_commodity(c).index()];
+                        let saving = has_city && lvl < 5 && comm.0[i] <= lvl + 1;
+                        let sc = comm.0[i] as i32 * 2 - if saving { 5 } else { -1 };
+                        if sc > best_score {
+                            best_score = sc;
+                            best_idx = 5 + i;
+                        }
+                    }
+                }
+                if best_idx < 5 {
+                    hand.0[best_idx] -= 1;
+                    drop_r.0[best_idx] += 1;
+                } else {
+                    comm.0[best_idx - 5] -= 1;
+                    drop_c.0[best_idx - 5] += 1;
+                }
+            }
+            let target = Action::DiscardCitadel {
+                resources: drop_r,
+                commodities: drop_c,
+            };
+            legal
+                .iter()
+                .copied()
+                .find(|a| *a == target)
+                .unwrap_or_else(|| pick(rng))
+        }
         Phase::Discard => {
             // Drop from the largest piles.
             let mut hand = s.players[p as usize].hand;
@@ -384,7 +609,7 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
         })
         .unwrap_or_else(|| pick(rng)),
         Phase::PreRoll => {
-            let robbed = s.buildings_of(p) & s.topo().tile_vertex_mask[s.robber as usize] != 0;
+            let robbed = !(s.buildings_of(p) & s.topo().tile_vertex_mask[s.robber as usize]).is_empty();
             if robbed && legal.contains(&Action::PlayKnight) {
                 Action::PlayKnight
             } else {
@@ -408,13 +633,27 @@ fn rollout_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Acti
             .unwrap_or_else(|| pick(rng))
         }
         Phase::Main if p != s.current => Action::RespondTrade { accept: false },
-        Phase::Main | Phase::SpecialBuild { .. } => main_policy(s, p, legal, rng),
+        Phase::Main | Phase::SpecialBuild { .. } | Phase::PairedTurn { .. } => {
+            main_policy(s, p, legal, rng)
+        }
         Phase::GameOver => legal[0],
     }
 }
 
 fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action {
+    let citadels = s.config.scenario.is_citadels();
+    let fishermen = s.config.scenario.is_fishermen();
+    if fishermen
+        && let Some(a) = best_of(legal, |a| match a {
+            Action::PassOldBoot(q) => Some(s.public_victory_points(*q) as f32),
+            _ => None,
+        })
+    {
+        return a;
+    }
     if let Some(a) = best_of(legal, |a| match a {
+        Action::BuildCity(v) if citadels => Some(citadel_city_value(s, p, *v)),
+        Action::BuildCity(v) if fishermen => Some(fishermen_city_value(s, *v)),
         Action::BuildCity(v) => Some(vertex_production(s, *v)),
         _ => None,
     }) {
@@ -426,27 +665,147 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
     }) {
         return a;
     }
+    if citadels
+        && let Some(a) = best_of(legal, |a| match a {
+            Action::UpgradeCity { track, metropolis } => {
+                Some(upgrade_city_value(s, p, *track, *metropolis))
+            }
+            _ => None,
+        })
+    {
+        return a;
+    }
     if let Some(a) = legal
         .iter()
         .find(|a| matches!(a, Action::ConfirmTrade { .. }))
     {
         return *a;
     }
+    if citadels {
+        let n = s.num_players();
+        let my_vuln = s.non_metropolis_cities(p).count_ones() as u8;
+        let cities_total: u8 = (0..n)
+            .map(|q| s.non_metropolis_cities(q as u8).count_ones() as u8)
+            .sum();
+        let defense_total: u8 = (0..n).map(|q| s.active_knight_strength(q as u8)).sum();
+        let my_str = s.active_knight_strength(p);
+        if my_vuln > 0 && (defense_total < cities_total || my_str == 0) {
+            if let Some(a) = best_of(legal, |a| match a {
+                Action::ActivateKnight(v) => Some(s.knight_level[*v as usize] as f32),
+                _ => None,
+            }) {
+                return a;
+            }
+            if let Some(a) = best_of(legal, |a| match a {
+                Action::PromoteKnight(v) if s.knight_active.contains(*v) => {
+                    Some(10.0 + s.knight_level[*v as usize] as f32)
+                }
+                Action::RecruitKnight(v) => Some(knight_spot_value(s, p, *v)),
+                _ => None,
+            }) {
+                return a;
+            }
+        }
+        if robber_hurts_me(s, p)
+            && let Some(a) = best_of(legal, |a| match a {
+                Action::ChaseRobber { tile, victim, .. } => Some(robber_value(s, p, *tile, *victim)),
+                _ => None,
+            })
+        {
+            return a;
+        }
+    }
     let hand = s.players[p as usize].hand;
     // Trade surplus with the bank towards a city or settlement.
     for target in [cost::CITY, cost::SETTLEMENT] {
         if missing(hand, target) == 1 {
             let trade = legal.iter().find(|a| match a {
+                Action::FishTakeResource(get) if fishermen => hand[*get] < target[*get],
                 Action::MaritimeTrade { give, get } => {
                     hand[*get] < target[*get]
                         && hand[*give] as i32 - target[*give] as i32
                             >= s.trade_ratio(p, *give) as i32
+                }
+                Action::MaritimeTradeGood {
+                    give: TradeGood::Commodity(c),
+                    get: TradeGood::Resource(get),
+                } if citadels => {
+                    let ps = &s.players[p as usize];
+                    let lvl = ps.city_progress[track_for_commodity(*c).index()];
+                    hand[*get] < target[*get] && (lvl >= 3 || s.cities[p as usize].is_empty())
                 }
                 _ => false,
             });
             if let Some(t) = trade {
                 return *t;
             }
+        }
+    }
+    if fishermen {
+        if robber_hurts_me(s, p) && legal.contains(&Action::FishDriveOffRobber) {
+            return Action::FishDriveOffRobber;
+        }
+        if legal.contains(&Action::FishBuyDevCard) {
+            return Action::FishBuyDevCard;
+        }
+        if rng.below(2) == 0 {
+            let f_roads: Vec<&Action> = legal
+                .iter()
+                .filter(|a| matches!(a, Action::FishBuildRoad(_)))
+                .collect();
+            if !f_roads.is_empty() {
+                return *f_roads[rng.below(f_roads.len() as u32) as usize];
+            }
+        }
+        if s.players[p as usize].fish >= 5 || rng.below(3) == 0 {
+            if let Some(a) = best_of(legal, |a| match a {
+                Action::FishSteal(q) => Some(
+                    s.public_victory_points(*q) as f32 * 2.0
+                        + s.players[*q as usize].hand.total() as f32,
+                ),
+                _ => None,
+            }) {
+                return a;
+            }
+        }
+    }
+    if citadels {
+        let ps = &s.players[p as usize];
+        if !s.cities[p as usize].is_empty()
+            && let Some(t) = legal.iter().find(|a| match a {
+                Action::MaritimeTradeGood {
+                    give: TradeGood::Commodity(give_c),
+                    get: TradeGood::Commodity(get_c),
+                } => {
+                    let get_lvl = ps.city_progress[track_for_commodity(*get_c).index()];
+                    let give_lvl = ps.city_progress[track_for_commodity(*give_c).index()];
+                    get_lvl < 5
+                        && ps.commodities[*get_c] + 1 == get_lvl + 1
+                        && (give_lvl >= 5
+                            || ps.commodities[*give_c]
+                                >= give_lvl + 1 + s.commodity_trade_ratio(p))
+                }
+                _ => false,
+            })
+        {
+            return *t;
+        }
+        if rng.below(2) == 0
+            && let Some(a) = best_of(legal, |a| match a {
+                Action::ActivateKnight(v) => Some(s.knight_level[*v as usize] as f32),
+                _ => None,
+            })
+        {
+            return a;
+        }
+        if rng.below(3) == 0
+            && let Some(a) = best_of(legal, |a| match a {
+                Action::PromoteKnight(v) => Some(s.knight_level[*v as usize] as f32 + 5.0),
+                Action::RecruitKnight(v) => Some(knight_spot_value(s, p, *v)),
+                _ => None,
+            })
+        {
+            return a;
         }
     }
     // Seafaring: sail towards islands when ships lead somewhere.
@@ -462,10 +821,11 @@ fn main_policy(s: &GameState, p: u8, legal: &[Action], rng: &mut Rng) -> Action 
     {
         return a;
     }
-    if legal.contains(&Action::BuyDevCard) && rng.below(2) == 0 {
+    let dev_denom = if citadels { 5 } else { 2 };
+    if legal.contains(&Action::BuyDevCard) && rng.below(dev_denom) == 0 {
         return Action::BuyDevCard;
     }
-    let robbed = s.buildings_of(p) & s.topo().tile_vertex_mask[s.robber as usize] != 0;
+    let robbed = !(s.buildings_of(p) & s.topo().tile_vertex_mask[s.robber as usize]).is_empty();
     if robbed && legal.contains(&Action::PlayKnight) {
         return Action::PlayKnight;
     }
@@ -553,5 +913,36 @@ mod tests {
         let a = MctsBot::with_config(1, small()).choose(&g, me, &legal);
         let b = MctsBot::with_config(1, small()).choose(&g, me, &legal);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn plays_citadels_games_cleanly() {
+        let mut g =
+            GameState::new(GameConfig::scenario(isle_core::Scenario::Citadels, 4), 7).unwrap();
+        let mut m = MctsBot::with_config(7, small());
+        let mut b: Vec<GreedyBot> = (0..3).map(|k| GreedyBot::new(k + 1)).collect();
+        let [b1, b2, b3] = &mut b[..] else {
+            unreachable!()
+        };
+        let mut bots: Vec<&mut dyn Bot> = vec![&mut m, b1, b2, b3];
+        let out = play_game(&mut g, &mut bots, 1000, true);
+        assert!(out.winner.is_some(), "citadels game with MctsBot did not finish");
+    }
+
+    #[test]
+    fn plays_fishermen_and_event_deck_games_cleanly() {
+        let config = GameConfig {
+            event_deck: true,
+            ..GameConfig::scenario(isle_core::Scenario::Fishermen, 4)
+        };
+        let mut g = GameState::new(config, 13).unwrap();
+        let mut m = MctsBot::with_config(13, small());
+        let mut b: Vec<GreedyBot> = (0..3).map(|k| GreedyBot::new(k + 10)).collect();
+        let [b1, b2, b3] = &mut b[..] else {
+            unreachable!()
+        };
+        let mut bots: Vec<&mut dyn Bot> = vec![&mut m, b1, b2, b3];
+        let out = play_game(&mut g, &mut bots, 1000, true);
+        assert!(out.winner.is_some(), "fishermen game with MctsBot did not finish");
     }
 }

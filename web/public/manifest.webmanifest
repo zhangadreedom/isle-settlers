@@ -1,0 +1,19 @@
+{
+  "name": "Isle Settlers · 六边形岛屿开拓桌游",
+  "short_name": "Isle Settlers",
+  "description": "2–6 人六边形岛屿开拓、航海探索、城邦铁卫与 DIY 地图工坊 Web 桌游",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#082433",
+  "theme_color": "#0d3b52",
+  "icons": [
+    {
+      "src": "./isle-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

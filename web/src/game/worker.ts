@@ -3,10 +3,10 @@
 // Requests are handled strictly in order; every reply carries the full state.
 
 import init, { LocalMatch } from '../wasm/isle_wasm.js';
-import type { BoardInfo, Event, LegalActions, PlayerView, ReplayRecord, Scenario } from '../generated/proto';
+import type { BoardInfo, Event, HouseRules, LegalActions, PlayerView, ReplayRecord, Scenario } from '../generated/proto';
 
 export type WorkerRequest =
-  | { id: number; op: 'create'; players: number; seed: number; humanSeat: number | null; bot: string; scenario: Scenario }
+  | { id: number; op: 'create'; players: number; seed: number; humanSeat: number | null; bot: string; scenario: Scenario; rules?: HouseRules }
   | { id: number; op: 'apply'; version: number; index: number }
   | { id: number; op: 'propose'; give: number[]; get: number[] }
   | { id: number; op: 'step' };
@@ -45,7 +45,18 @@ function handle(r: WorkerRequest): MatchState {
   switch (r.op) {
     case 'create': {
       match?.free();
-      match = new LocalMatch(r.players, r.seed >>> 0, r.humanSeat ?? -1, r.bot, r.scenario);
+      match = LocalMatch.createMatch(
+        r.players,
+        r.seed >>> 0,
+        r.humanSeat ?? -1,
+        r.bot,
+        r.scenario,
+        r.rules?.victoryPoints ?? 0,
+        r.rules?.friendlyRobber ?? false,
+        r.rules?.pairedTurns ?? false,
+        r.rules?.eventDeck ?? false,
+        r.rules?.customMap ?? '',
+      );
       return { ...snapshot([]), board: JSON.parse(match.board()) };
     }
     case 'apply':

@@ -1,5 +1,18 @@
 // Labels and event descriptions (zh-CN).
-import type { BotLevel, DevCard, Event, Resource, ResourceSet, RuleError, Tier } from '../generated/proto';
+import type {
+  BotLevel,
+  CityTrack,
+  Commodity,
+  CommoditySet,
+  DevCard,
+  Event,
+  Resource,
+  ResourceSet,
+  RuleError,
+  Terrain,
+  Tier,
+  TradeGood,
+} from '../generated/proto';
 
 export const BOT_LEVEL_NAME: Record<BotLevel, string> = { Easy: '简单', Normal: '普通', Hard: '困难' };
 
@@ -9,6 +22,32 @@ export const RESOURCES: Resource[] = ['Brick', 'Lumber', 'Wool', 'Grain', 'Ore']
 export const RESOURCE_NAME: Record<Resource, string> = { Brick: '砖', Lumber: '木', Wool: '羊毛', Grain: '小麦', Ore: '矿石' };
 export const RESOURCE_SHORT: Record<Resource, string> = { Brick: '砖', Lumber: '木', Wool: '羊', Grain: '麦', Ore: '矿' };
 export const RESOURCE_CSS = ['#c0623a', '#2f7d4a', '#9fd27a', '#e2b74a', '#8a8f99'] as const;
+
+export const COMMODITIES: Commodity[] = ['Paper', 'Cloth', 'Coin'];
+export const COMMODITY_NAME: Record<Commodity, string> = { Paper: '造纸', Cloth: '织布', Coin: '铸币' };
+export const COMMODITY_SHORT: Record<Commodity, string> = { Paper: '纸', Cloth: '布', Coin: '币' };
+export const COMMODITY_CSS = ['#b89b67', '#9b59d0', '#d99e1a'] as const;
+
+export const CITY_TRACKS: CityTrack[] = ['Trade', 'Politics', 'Science'];
+export const TRACK_NAME: Record<CityTrack, string> = { Trade: '商贸', Politics: '军政', Science: '学术' };
+export const TRACK_COMMODITY: Record<CityTrack, Commodity> = { Trade: 'Cloth', Politics: 'Coin', Science: 'Paper' };
+export const TRACK_PERK: Record<CityTrack, string> = {
+  Trade: 'Lv3 商馆：任意商品 2:1 交易',
+  Politics: 'Lv3 帅印：铁卫可晋升至 3 阶',
+  Science: 'Lv3 水渠：掷骰轮空任选 1 资源',
+};
+
+export const TERRAIN_NAME: Record<Terrain, string> = {
+  Hills: '丘陵',
+  Forest: '森林',
+  Pasture: '牧场',
+  Fields: '农田',
+  Mountains: '山脉',
+  Desert: '沙漠',
+  Sea: '海面',
+  Gold: '金矿',
+  Fog: '迷雾',
+};
 
 export const DEV_CARDS: DevCard[] = ['Knight', 'VictoryPoint', 'RoadBuilding', 'YearOfPlenty', 'Monopoly'];
 export const DEV_NAME: Record<DevCard, string> = {
@@ -66,6 +105,12 @@ const ERRORS: Record<RuleError, string> = {
   ShipCannotMove: '这艘船不能移动',
   NoGoldOwed: '你没有要选的金矿资源',
   WrongGoldAmount: '要选够金矿给你的数量',
+  FriendlyRobber: '友好强盗：不能针对公开分 ≤ 2 分的玩家',
+  NoCityForUpgrade: '需要先拥有城市才能升级城邦科技',
+  InvalidMetropolis: '请选择一座尚未加冕的普通城市作为大都会',
+  NotYourKnight: '这里不是你的铁卫',
+  KnightNotActive: '这名铁卫尚未激活',
+  KnightCannotAct: '这名铁卫本回合不能执行此操作',
 };
 
 const SERVER_ERRORS: Record<string, string> = {
@@ -81,6 +126,16 @@ const SERVER_ERRORS: Record<string, string> = {
   Spectator: '观众不能操作',
   RateLimited: '发言太快了',
   InvalidSeat: '不能修改这个座位',
+  Kicked: '你已被房主移出座位，现为观众状态',
+  GameNotOver: '对局尚未结束',
+  BadCustomCode: '自定义地图短码格式无效',
+  MissingDesert: '自定义地图至少需要 1 格沙漠',
+  MissingSea: '航海地图至少需要 1 格海面',
+  UnexpectedSea: '当前剧本不支持海面地块',
+  UnexpectedFog: '当前剧本不支持迷雾地块',
+  TooMuchFog: '迷雾地块数量超出上限',
+  FogTouchesLand: '迷雾地块需由海面与初始陆地隔开',
+  TooLittleLand: '初始可建村陆地交叉点不足',
   BadReplay: '不是有效的回放文件',
   UnsupportedReplay: '不支持这个版本的回放文件',
   BadReplaySeed: '回放文件已损坏',
@@ -115,7 +170,16 @@ export function setText(set: ResourceSet): string {
   return parts.length ? parts.join('、') : '无';
 }
 
-export const setTotal = (set: ResourceSet) => set.reduce((a, b) => a + b, 0);
+export function commSetText(set: CommoditySet): string {
+  const parts = COMMODITIES.flatMap((c, i) => (set[i] > 0 ? [`${set[i]} ${COMMODITY_SHORT[c]}`] : []));
+  return parts.length ? parts.join('、') : '无';
+}
+
+export function goodName(g: TradeGood): string {
+  return g.type === 'Resource' ? RESOURCE_SHORT[g.value] : COMMODITY_SHORT[g.value];
+}
+
+export const setTotal = (set: readonly number[]) => set.reduce((a, b) => a + b, 0);
 
 /** Text for one event, or null for events that are not worth a log line. */
 export function describe(e: Event, name: (seat: number) => string): string | null {
@@ -176,8 +240,59 @@ export function describe(e: Event, name: (seat: number) => string): string | nul
       return `${name(e.value.player)} 从金矿选取 ${setText(e.value.resources)}`;
     case 'IslandSettled':
       return `${name(e.value.player)} 登上新的岛屿，奖励 ${e.value.points} 分`;
+    case 'TileRevealed': {
+      const what = TERRAIN_NAME[e.value.terrain];
+      const num = e.value.number ? `（${e.value.number}）` : '';
+      const got = e.value.reward ? `，奖励 1 ${RESOURCE_SHORT[e.value.reward]}` : '';
+      return `${name(e.value.player)} 拨开迷雾，发现${what}${num}${got}`;
+    }
+    case 'CommoditiesProduced':
+      return `${name(e.value.player)} 获得商品 ${commSetText(e.value.commodities)}`;
+    case 'CommoditiesDiscarded':
+      return `${name(e.value.player)} 弃掉商品 ${commSetText(e.value.commodities)}`;
+    case 'CommodityStolen': {
+      const what = e.value.commodity ? `1 张${COMMODITY_NAME[e.value.commodity]}` : '1 张牌';
+      return `${name(e.value.thief)} 从 ${name(e.value.victim)} 手里抢走 ${what}`;
+    }
+    case 'GoodTraded':
+      return `${name(e.value.player)} 与银行交易：${e.value.ratio} ${goodName(e.value.give)} → 1 ${goodName(e.value.get)}`;
+    case 'CityUpgraded': {
+      const metro = e.value.metropolis !== null ? `，加冕【${TRACK_NAME[e.value.track]}大都会】！` : '';
+      return `${name(e.value.player)} 将【${TRACK_NAME[e.value.track]}】升至 Lv.${e.value.level}${metro}`;
+    }
+    case 'KnightRecruited':
+      return `${name(e.value.player)} 招募了一名初阶铁卫`;
+    case 'KnightActivated':
+      return `${name(e.value.player)} 激活了铁卫`;
+    case 'KnightPromoted':
+      return `${name(e.value.player)} 将铁卫晋升至 ${e.value.level} 阶`;
+    case 'KnightMoved': {
+      const disp = e.value.displaced
+        ? `，驱逐了 ${name(e.value.displaced[0])} 的铁卫${e.value.displaced[1] === null ? '（撤回库存）' : ''}`
+        : '';
+      return `${name(e.value.player)} 调遣了铁卫${disp}`;
+    }
+    case 'BarbarianAdvanced':
+      return e.value.pos === 6 ? '黑帆舰队逼近（6/7），下一次前进即将攻城！' : null;
+    case 'BarbariansRepelled':
+      return e.value.sole_defender !== null
+        ? `击退黑帆舰队（战力 ${e.value.defense}/${e.value.cities}）！${name(e.value.sole_defender)} 独得 1 点卫城勋章`
+        : `击退黑帆舰队（战力 ${e.value.defense}/${e.value.cities}），并列首功者各获 1 张发展卡`;
+    case 'CityPillaged':
+      return `黑帆舰队攻破防线，${name(e.value.player)} 的一座城市沦陷降为村庄！`;
+    case 'FishCaught':
+      return `${name(e.value.player)} 捕得 ${e.value.count} 条海鱼`;
+    case 'OldBootDrawn':
+      return `${name(e.value.player)} 捞到了【破旧皮靴】（获胜目标 +1 分）！`;
+    case 'OldBootPassed':
+      return `${name(e.value.from)} 将【破旧皮靴】转送给 ${name(e.value.to)}！`;
+    case 'FishSpent':
+      return `${name(e.value.player)} 消耗 ${e.value.cost} 条海鱼兑换奇策`;
+    case 'FishResourceTaken':
+      return `${name(e.value.player)} 用海鱼从银行选取 1 ${RESOURCE_SHORT[e.value.resource]}`;
     case 'TurnEnded':
     case 'SpecialBuildPassed':
+    case 'PairedTurnEnded':
     case 'GoldOwed':
       return null;
     case 'GameWon':

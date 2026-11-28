@@ -15,6 +15,9 @@ struct Args {
     games: u64,
     players: u8,
     scenario: Scenario,
+    friendly_robber: bool,
+    paired_turns: bool,
+    event_deck: bool,
     seed: u64,
     threads: usize,
     /// Bot name per seat.
@@ -30,6 +33,9 @@ fn parse_args() -> Args {
         games: 20_000,
         players: 4,
         scenario: Scenario::Classic,
+        friendly_robber: false,
+        paired_turns: false,
+        event_deck: false,
         seed: 1,
         threads: std::thread::available_parallelism()
             .map(|n| n.get())
@@ -60,9 +66,15 @@ fn parse_args() -> Args {
                 a.scenario = match val().as_str() {
                     "classic" => Scenario::Classic,
                     "archipelago" => Scenario::Archipelago,
-                    _ => usage("--scenario must be classic or archipelago"),
+                    "fog" | "fog-islands" | "fog_islands" => Scenario::FogIslands,
+                    "citadels" | "cities" | "ck" => Scenario::Citadels,
+                    "fishermen" | "fish" => Scenario::Fishermen,
+                    _ => usage("--scenario must be classic, archipelago, fog, citadels or fishermen"),
                 }
             }
+            "--friendly-robber" => a.friendly_robber = true,
+            "--paired-turns" => a.paired_turns = true,
+            "--event-deck" => a.event_deck = true,
             "--check" => a.check = true,
             "--rotate" => a.rotate = true,
             "-h" | "--help" => usage(""),
@@ -70,7 +82,7 @@ fn parse_args() -> Args {
         }
     }
     if !(2..=a.scenario.max_players()).contains(&a.players) {
-        usage("--players must be 2-6 (2-4 on the archipelago)");
+        usage("--players must be 2-6");
     }
     if a.bots.is_empty() {
         a.bots = vec![bot; a.players as usize];
@@ -90,10 +102,10 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: isle-sim [--games N] [--players 2-6] [--scenario classic|archipelago]\n\
-         \x20               [--seed S] [--threads T]\n\
+        "usage: isle-sim [--games N] [--players 2-6] [--scenario classic|archipelago|fog|citadels|fishermen]\n\
+         \x20               [--friendly-robber] [--paired-turns] [--event-deck] [--seed S] [--threads T]\n\
          \x20               [--bot NAME | --bots NAME,NAME,...] [--rotate] [--max-turns N] [--check]\n\
-         bots: random, weighted, greedy, mcts, mcts:N (N iterations), mcts:N/key=value/..."
+         bots: random, weighted, greedy, greedy:trade, mcts, mcts:N (N iterations), mcts:N/key=value/..."
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 });
 }
@@ -111,11 +123,23 @@ struct Stats {
     /// summed over players.
     islands: u64,
     ships: u64,
+    /// Fog maps: tiles uncovered across all games.
+    revealed: u64,
+    /// Citadels: metropolises claimed, defender points earned and knights on board at the end.
+    metropolises: u64,
+    defender_points: u64,
+    knights: u64,
 }
 
 fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
     let mut s = Stats::default();
-    let config = GameConfig::scenario(args.scenario, args.players);
+    let config = GameConfig {
+        friendly_robber: args.friendly_robber,
+        paired_turns: args.paired_turns,
+        event_deck: args.event_deck,
+        ..GameConfig::scenario(args.scenario, args.players)
+    };
+    let fog_pool_len = config.layout().fog_terrain_pool().len() as u64;
     for i in 0..count {
         let game_seed = args
             .seed
@@ -139,6 +163,18 @@ fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
         for p in 0..n {
             s.islands += g.players[p].islands.count_ones() as u64;
             s.ships += g.ships[p].count_ones() as u64;
+            s.defender_points += g.players[p].defender_points as u64;
+        }
+        if g.board.layout.has_fog() {
+            s.revealed += fog_pool_len - g.fog_terrain_len as u64;
+        }
+        if args.scenario == Scenario::Citadels {
+            s.metropolises += g
+                .metropolis_owners
+                .iter()
+                .filter(|o| o.is_some())
+                .count() as u64;
+            s.knights += g.all_knights().count_ones() as u64;
         }
         s.games += 1;
         s.turns += outcome.turns as u64;
@@ -179,15 +215,33 @@ fn main() {
         total.actions += s.actions;
         total.islands += s.islands;
         total.ships += s.ships;
+        total.revealed += s.revealed;
+        total.metropolises += s.metropolises;
+        total.defender_points += s.defender_points;
+        total.knights += s.knights;
         for p in 0..MAX_PLAYERS {
             total.wins[p] += s.wins[p];
             total.wins_by_bot[p] += s.wins_by_bot[p];
         }
     }
     let g = total.games.max(1) as f64;
+    let layout = GameConfig::scenario(args.scenario, args.players).layout();
     println!("bots            {}", args.bots.join(", "));
     println!("players         {}", args.players);
     println!("scenario        {:?}", args.scenario);
+    if args.friendly_robber || args.paired_turns || args.event_deck {
+        let mut rules = Vec::new();
+        if args.friendly_robber {
+            rules.push("friendly-robber");
+        }
+        if args.paired_turns {
+            rules.push("paired-turns");
+        }
+        if args.event_deck {
+            rules.push("event-deck");
+        }
+        println!("house rules     {}", rules.join(", "));
+    }
     println!("threads         {}", args.threads);
     println!(
         "invariants      {}",
@@ -212,8 +266,8 @@ fn main() {
     println!("actions/s       {:.0}", total.actions as f64 / secs);
     println!("avg turns       {:.1}", total.turns as f64 / g);
     println!("avg actions     {:.1}", total.actions as f64 / g);
-    if args.scenario != Scenario::Classic {
-        let per_player = g * args.players as f64;
+    let per_player = g * args.players as f64;
+    if layout.has_ships() {
         println!(
             "island bonuses  {:.2} per player",
             total.islands as f64 / per_player
@@ -221,6 +275,27 @@ fn main() {
         println!(
             "ships at end    {:.2} per player",
             total.ships as f64 / per_player
+        );
+        if layout.has_fog() {
+            println!(
+                "fog revealed    {:.2} / {} tiles",
+                total.revealed as f64 / g,
+                layout.fog_terrain_pool().len()
+            );
+        }
+    }
+    if args.scenario == Scenario::Citadels {
+        println!(
+            "metropolises    {:.2} / 3 per game",
+            total.metropolises as f64 / g
+        );
+        println!(
+            "defender pts    {:.2} per player",
+            total.defender_points as f64 / per_player
+        );
+        println!(
+            "knights at end  {:.2} per player",
+            total.knights as f64 / per_player
         );
     }
     let wins: Vec<String> = (0..args.players as usize)

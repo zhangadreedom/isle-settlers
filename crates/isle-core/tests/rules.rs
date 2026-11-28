@@ -5,8 +5,8 @@ use isle_core::topology::{BASE, NONE, Topology, edges_in};
 /// Scenarios run on the base island unless they say otherwise.
 const T: &Topology = &BASE;
 use isle_core::{
-    Action, BoardLayout, ConfigError, DevCard, Event, GameConfig, GameState, HarborKind, Phase,
-    Resource, ResourceSet, Rng, RuleError, Terrain,
+    Action, BitSet, BoardLayout, ConfigError, DevCard, Event, GameConfig, GameState, HarborKind,
+    Phase, Resource, ResourceSet, Rng, RuleError, Terrain,
 };
 
 // ---------- helpers ----------
@@ -38,18 +38,18 @@ fn give(g: &mut GameState, p: u8, set: ResourceSet) {
 }
 
 fn put_settlement(g: &mut GameState, p: u8, v: u8) {
-    g.settlements[p as usize] |= 1 << v;
+    g.settlements[p as usize].insert(v);
     g.players[p as usize].settlements_left -= 1;
     g.players[p as usize].harbors |= g.board.vertex_harbor[v as usize];
 }
 
 fn put_city(g: &mut GameState, p: u8, v: u8) {
-    g.cities[p as usize] |= 1 << v;
+    g.cities[p as usize].insert(v);
     g.players[p as usize].cities_left -= 1;
 }
 
 fn put_road(g: &mut GameState, p: u8, e: u8) {
-    g.roads[p as usize] |= 1 << e;
+    g.roads[p as usize].insert(e);
     g.players[p as usize].roads_left -= 1;
     g.players[p as usize].longest_road = g.compute_longest_road(p);
 }
@@ -70,14 +70,19 @@ fn put_path(g: &mut GameState, p: u8, path: &[u8]) {
 
 /// Finds a simple path of `len` edges avoiding `forbidden` vertices, such
 /// that `pred` accepts it.
-fn find_path(len: usize, forbidden: u128, pred: &dyn Fn(&[u8]) -> bool) -> Vec<u8> {
-    fn dfs(path: &mut Vec<u8>, len: usize, forbidden: u128, pred: &dyn Fn(&[u8]) -> bool) -> bool {
+fn find_path(len: usize, forbidden: BitSet, pred: &dyn Fn(&[u8]) -> bool) -> Vec<u8> {
+    fn dfs(
+        path: &mut Vec<u8>,
+        len: usize,
+        forbidden: BitSet,
+        pred: &dyn Fn(&[u8]) -> bool,
+    ) -> bool {
         if path.len() == len + 1 {
             return pred(path);
         }
         let v = *path.last().unwrap();
         for &n in &T.vertex_vertices[v as usize] {
-            if n == NONE || forbidden & (1 << n) != 0 || path.contains(&n) {
+            if n == NONE || forbidden.contains(n) || path.contains(&n) {
                 continue;
             }
             path.push(n);
@@ -89,7 +94,7 @@ fn find_path(len: usize, forbidden: u128, pred: &dyn Fn(&[u8]) -> bool) -> Vec<u
         false
     }
     for start in 0..T.num_vertices as u8 {
-        if forbidden & (1 << start) != 0 {
+        if forbidden.contains(start) {
             continue;
         }
         let mut path = vec![start];
@@ -101,9 +106,10 @@ fn find_path(len: usize, forbidden: u128, pred: &dyn Fn(&[u8]) -> bool) -> Vec<u
 }
 
 /// Path vertices plus their neighbours.
-fn halo(path: &[u8]) -> u128 {
-    path.iter()
-        .fold(0, |m, &v| m | 1 << v | T.vertex_adj_mask[v as usize])
+fn halo(path: &[u8]) -> BitSet {
+    path.iter().fold(BitSet::EMPTY, |m, &v| {
+        m | BitSet::bit(v) | T.vertex_adj_mask[v as usize]
+    })
 }
 
 /// Third neighbour of `path[i]` (not on the path), if the vertex has degree 3.
@@ -183,7 +189,7 @@ fn setup_road_must_touch_the_new_settlement() {
     let mut g = game(3);
     g.apply(0, Action::BuildSettlement(0)).unwrap();
     let far = (0..T.num_edges as u8)
-        .find(|&e| T.vertex_edge_mask[0] & (1 << e) == 0)
+        .find(|&e| !T.vertex_edge_mask[0].contains(e))
         .unwrap();
     assert_eq!(
         g.apply(0, Action::BuildRoad(far)),
@@ -295,7 +301,7 @@ fn bank_shortage_rule() {
 
     // A single claimant takes whatever is left.
     let mut g2 = g;
-    g2.settlements[0] = 0;
+    g2.settlements[0] = BitSet::EMPTY;
     g2.players[0].settlements_left += 1;
     let only_tile = T.vertex_tiles[T.tile_vertices[t][2] as usize]
         .iter()
@@ -553,7 +559,7 @@ fn road_building_places_two_free_roads() {
 #[test]
 fn roads_cannot_continue_through_an_opponent_settlement() {
     let mut g = main_phase(2);
-    let path = find_path(1, 0, &|p| side_neighbor(p, 1).is_some());
+    let path = find_path(1, BitSet::EMPTY, &|p| side_neighbor(p, 1).is_some());
     put_settlement(&mut g, 0, path[0]);
     put_path(&mut g, 0, &path);
     put_settlement(&mut g, 1, path[1]);
@@ -568,7 +574,7 @@ fn roads_cannot_continue_through_an_opponent_settlement() {
 #[test]
 fn longest_road_needs_five_and_must_be_exceeded() {
     let mut g = main_phase(3);
-    let a = find_path(5, 0, &|_| true);
+    let a = find_path(5, BitSet::EMPTY, &|_| true);
     put_settlement(&mut g, 0, a[0]);
     put_path(&mut g, 0, &a[..5]); // 4 roads
     give(&mut g, 0, ResourceSet::new(1, 1, 0, 0, 0));
@@ -595,7 +601,7 @@ fn longest_road_needs_five_and_must_be_exceeded() {
 /// `c_len`, and player 1 is about to settle on `a[cut]`.
 fn break_scenario(a_len: usize, cut: usize, c_len: usize, d_len: usize) -> GameState {
     let mut g = main_phase(4);
-    let a = find_path(a_len, 0, &|p| side_neighbor(p, cut).is_some());
+    let a = find_path(a_len, BitSet::EMPTY, &|p| side_neighbor(p, cut).is_some());
     put_path(&mut g, 0, &a);
     let side = side_neighbor(&a, cut).unwrap();
     let mut used = halo(&a);
@@ -780,7 +786,7 @@ fn no_trading_or_building_before_rolling() {
 #[test]
 fn win_immediately_on_own_turn() {
     let mut g = main_phase(2);
-    let path = find_path(1, 0, &|_| true);
+    let path = find_path(1, BitSet::EMPTY, &|_| true);
     put_settlement(&mut g, 0, path[0]);
     put_road(&mut g, 0, edge_between(path[0], path[1]));
     let far = find_path(2, halo(&path), &|_| true);
@@ -844,14 +850,14 @@ fn games_are_reproducible_from_seed() {
 /// `k` vertices of the board being played that respect the distance rule.
 fn spread_vertices(g: &GameState, k: usize) -> Vec<u8> {
     let topo = g.topo();
-    let mut taken = 0u128;
+    let mut taken = BitSet::EMPTY;
     let mut out = Vec::new();
     for v in 0..topo.num_vertices as u8 {
         if out.len() == k {
             break;
         }
-        if (taken | topo.neighbors_of(taken)) & (1 << v) == 0 {
-            taken |= 1 << v;
+        if !(taken | topo.neighbors_of(taken)).contains(v) {
+            taken.insert(v);
             out.push(v);
         }
     }
@@ -1005,23 +1011,25 @@ fn extended_island_production_reaches_three_tiles_per_number() {
             n != 7
                 && g.board.tiles_by_number[n as usize]
                     .iter()
-                    .all(|&t| t != NONE)
+                    .filter(|&&t| t != NONE)
+                    .count()
+                    == 3
         })
         .expect("most numbers appear three times");
     let tiles = g.board.tiles_by_number[roll_sum as usize];
-    let mut taken = 0u128;
+    let mut taken = BitSet::EMPTY;
     let mut expected = ResourceSet::EMPTY;
     for &t in &tiles {
-        if t == g.robber {
+        if t == NONE || t == g.robber {
             continue;
         }
         let topo = g.topo();
         let v = topo.tile_vertices[t as usize]
             .iter()
             .copied()
-            .find(|&v| (taken | topo.neighbors_of(taken)) & (1 << v) == 0)
+            .find(|&v| !(taken | topo.neighbors_of(taken)).contains(v))
             .unwrap();
-        taken |= 1 << v;
+        taken.insert(v);
         put_settlement(&mut g, 3, v);
         for &u in &topo.vertex_tiles[v as usize] {
             if u != NONE
@@ -1037,5 +1045,93 @@ fn extended_island_production_reaches_three_tiles_per_number() {
     g.dice = None;
     roll(&mut g, roll_sum);
     assert_eq!(g.players[3].hand, expected);
+    g.check_invariants().unwrap();
+}
+
+#[test]
+fn friendly_robber_protects_novices_unless_no_other_tile_exists() {
+    let mut g = GameState::new(
+        GameConfig {
+            friendly_robber: true,
+            ..GameConfig::new(3)
+        },
+        7,
+    )
+    .unwrap();
+    g.setup_step = 6;
+    g.phase = Phase::MoveRobber;
+    g.dice = Some((3, 4));
+    // Player 1 has only 2 public VP (protected); Player 2 has 4 public VP (unprotected).
+    let t1 = (0..T.num_tiles as u8).find(|&t| t != g.robber).unwrap();
+    let v1 = T.tile_vertices[t1 as usize][0];
+    put_city(&mut g, 1, v1); // 2 VP -> novice!
+    assert_eq!(
+        g.apply(
+            0,
+            Action::MoveRobber {
+                tile: t1,
+                victim: None
+            }
+        ),
+        Err(RuleError::FriendlyRobber)
+    );
+    // Give player 1 a settlement elsewhere so they reach 3 VP: protection lifts.
+    let far = (0..T.num_vertices as u8)
+        .find(|&v| !(BitSet::bit(v1) | T.vertex_adj_mask[v1 as usize]).contains(v))
+        .unwrap();
+    put_settlement(&mut g, 1, far);
+    assert_eq!(g.public_victory_points(1), 3);
+    g.apply(
+        0,
+        Action::MoveRobber {
+            tile: t1,
+            victim: None,
+        },
+    )
+    .unwrap();
+    g.check_invariants().unwrap();
+}
+
+#[test]
+fn paired_turns_let_the_partner_trade_with_bank_and_play_cards() {
+    let mut g = GameState::new(
+        GameConfig {
+            paired_turns: true,
+            ..GameConfig::new(5)
+        },
+        7,
+    )
+    .unwrap();
+    g.setup_step = 10;
+    g.phase = Phase::Main;
+    g.dice = Some((2, 4));
+    // For seat 0 in a 5-player game, partner is (0 + 3) % 5 = 3.
+    give(&mut g, 3, ResourceSet::new(4, 0, 0, 0, 0));
+    g.apply(0, Action::EndTurn).unwrap();
+    assert_eq!(g.phase, Phase::PairedTurn { partner: 3 });
+    assert_eq!(g.to_move(), Some(3));
+    // Partner can trade with the bank, unlike classic SpecialBuild!
+    g.apply(
+        3,
+        Action::MaritimeTrade {
+            give: Resource::Brick,
+            get: Resource::Ore,
+        },
+    )
+    .unwrap();
+    assert_eq!(g.players[3].hand[Resource::Ore], 1);
+    // Partner cannot propose domestic trades.
+    assert_eq!(
+        g.apply(
+            3,
+            Action::ProposeTrade {
+                give: ResourceSet::single(Resource::Ore, 1),
+                get: ResourceSet::single(Resource::Lumber, 1),
+            }
+        ),
+        Err(RuleError::WrongPhase)
+    );
+    g.apply(3, Action::EndTurn).unwrap();
+    assert_eq!((g.phase, g.current), (Phase::PreRoll, 1));
     g.check_invariants().unwrap();
 }

@@ -3,10 +3,13 @@
 
 use isle_core::board::GOLD_NUMBERS;
 use isle_core::resources::cost;
-use isle_core::topology::{ARCHIPELAGO, ARCHIPELAGO_MAP, NONE, Topology, edges_in, vertices_in};
+use isle_core::topology::{
+    ARCHIPELAGO, ARCHIPELAGO_MAP, FOG_ISLANDS, FOG_ISLANDS_MAP, NONE, Topology, edges_in,
+    vertices_in,
+};
 use isle_core::{
-    Action, Board, BoardLayout, ConfigError, Event, GameConfig, GameState, MAX_SHIPS, Phase,
-    ResourceSet, Rng, RuleError, Scenario, Terrain,
+    Action, BitSet, Board, BoardLayout, ConfigError, Event, GameConfig, GameState, MAX_SHIPS,
+    Phase, Resource, ResourceSet, Rng, RuleError, Scenario, Terrain,
 };
 
 const T: &Topology = &ARCHIPELAGO;
@@ -32,19 +35,19 @@ fn give(g: &mut GameState, p: u8, set: ResourceSet) {
 }
 
 fn put_settlement(g: &mut GameState, p: u8, v: u8) {
-    g.settlements[p as usize] |= 1 << v;
+    g.settlements[p as usize].insert(v);
     g.players[p as usize].settlements_left -= 1;
     g.players[p as usize].home_islands |= 1 << g.board.vertex_island[v as usize];
 }
 
 fn put_ship(g: &mut GameState, p: u8, e: u8) {
-    g.ships[p as usize] |= 1 << e;
+    g.ships[p as usize].insert(e);
     g.players[p as usize].ships_left -= 1;
     g.players[p as usize].longest_road = g.compute_longest_road(p);
 }
 
 fn put_road(g: &mut GameState, p: u8, e: u8) {
-    g.roads[p as usize] |= 1 << e;
+    g.roads[p as usize].insert(e);
     g.players[p as usize].roads_left -= 1;
     g.players[p as usize].longest_road = g.compute_longest_road(p);
 }
@@ -67,14 +70,14 @@ fn island_of(g: &GameState, v: u8) -> u8 {
 /// edges and the landing vertex.
 fn sea_path(g: &GameState, from: u8, island: u8) -> (Vec<u8>, u8) {
     let mut prev = [NONE; 128];
-    let mut seen = 1u128 << from;
+    let mut seen = BitSet::bit(from);
     let mut queue = vec![from];
     let spots = g.settlement_spots(0, false);
     let mut i = 0;
     while i < queue.len() {
         let v = queue[i];
         i += 1;
-        if island_of(g, v) == island && spots & (1 << v) != 0 {
+        if island_of(g, v) == island && spots.contains(v) {
             let mut path = Vec::new();
             let mut w = v;
             while w != from {
@@ -86,13 +89,12 @@ fn sea_path(g: &GameState, from: u8, island: u8) -> (Vec<u8>, u8) {
             return (path, v);
         }
         for e in edges_at(v) {
-            let bit = 1u128 << e;
-            if g.board.sea_edges & bit == 0 || g.pirate_edges() & bit != 0 {
+            if !g.board.sea_edges.contains(e) || g.pirate_edges().contains(e) {
                 continue;
             }
             let u = other_end(e, v);
-            if seen & (1 << u) == 0 {
-                seen |= 1 << u;
+            if !seen.contains(u) {
+                seen.insert(u);
                 prev[u as usize] = e;
                 queue.push(u);
             }
@@ -105,7 +107,7 @@ fn sea_path(g: &GameState, from: u8, island: u8) -> (Vec<u8>, u8) {
 /// reached, with the path there.
 fn launch_point(g: &GameState, island: u8) -> (u8, Vec<u8>, u8) {
     vertices_in(g.setup_spots())
-        .filter(|&v| edges_at(v).any(|e| g.board.sea_edges & (1 << e) != 0))
+        .filter(|&v| edges_at(v).any(|e| g.board.sea_edges.contains(e)))
         .map(|v| {
             let (path, land) = sea_path(g, v, island);
             (v, path, land)
@@ -171,18 +173,18 @@ fn boards_follow_the_map() {
         assert_eq!(b.tile_island[b.desert as usize], 1);
         assert_eq!(ARCHIPELAGO_MAP[b.pirate_start as usize], b'~');
         assert_eq!(b.land_vertices.count_ones(), 72);
-        assert_eq!(b.setup_vertices & !b.land_vertices, 0);
+        assert_eq!(b.setup_vertices & !b.land_vertices, BitSet::EMPTY);
         assert!(vertices_in(b.setup_vertices).all(|v| b.vertex_island[v as usize] == 1));
         assert_eq!(b.vertex_harbor.iter().filter(|&&h| h != 0).count(), 18);
         // Coasts take both roads and ships; inland only roads, open sea
         // only ships.
-        assert_ne!(b.land_edges & b.sea_edges, 0);
+        assert_ne!(b.land_edges & b.sea_edges, BitSet::EMPTY);
         assert_eq!(b.land_edges | b.sea_edges, T.all_edges);
     }
 }
 
 #[test]
-fn the_archipelago_seats_two_to_four() {
+fn seafaring_seats_two_to_six_growing_to_extended_maps() {
     let config = GameConfig::scenario(Scenario::Archipelago, 4);
     assert_eq!(config.victory_points, 12);
     assert_eq!(config.layout(), BoardLayout::Archipelago);
@@ -192,8 +194,21 @@ fn the_archipelago_seats_two_to_four() {
         assert!(g.players.iter().all(|p| p.ships_left == MAX_SHIPS));
         g.check_invariants().unwrap();
     }
+    for n in 5..=6 {
+        let g_arch = GameState::new(GameConfig::scenario(Scenario::Archipelago, n), 11).unwrap();
+        assert_eq!(g_arch.board.layout, BoardLayout::ArchipelagoExtended);
+        assert_eq!(g_arch.topo().num_tiles, 46);
+        assert_eq!(g_arch.bank, ResourceSet([24; 5]));
+        g_arch.check_invariants().unwrap();
+
+        let g_fog = GameState::new(GameConfig::scenario(Scenario::FogIslands, n), 11).unwrap();
+        assert_eq!(g_fog.board.layout, BoardLayout::FogIslandsExtended);
+        assert_eq!(g_fog.fog_terrain_len, 18);
+        assert_eq!(g_fog.fog_numbers_len, 13);
+        g_fog.check_invariants().unwrap();
+    }
     assert_eq!(
-        GameState::new(GameConfig::scenario(Scenario::Archipelago, 5), 1).unwrap_err(),
+        GameState::new(GameConfig::scenario(Scenario::Archipelago, 7), 1).unwrap_err(),
         ConfigError::PlayerCount
     );
     // Records from before seafaring are classic.
@@ -208,7 +223,7 @@ fn setup_is_on_the_home_island_with_a_road_or_a_ship() {
     let mut legal = Vec::new();
     g.legal_actions(0, &mut legal);
     assert!(legal.iter().all(|a| matches!(a, Action::BuildSettlement(v)
-        if g.board.setup_vertices & (1 << v) != 0)));
+        if g.board.setup_vertices.contains(*v))));
     let off_home = vertices_in(g.board.land_vertices & !g.board.setup_vertices)
         .next()
         .unwrap();
@@ -220,7 +235,8 @@ fn setup_is_on_the_home_island_with_a_road_or_a_ship() {
     let v = vertices_in(g.setup_spots())
         .find(|&v| {
             let m = T.vertex_edge_mask[v as usize];
-            m & g.board.sea_edges & !g.pirate_edges() != 0 && m & g.board.land_edges != 0
+            !(m & g.board.sea_edges & !g.pirate_edges()).is_empty()
+                && !(m & g.board.land_edges).is_empty()
         })
         .unwrap();
     g.apply(0, Action::BuildSettlement(v)).unwrap();
@@ -235,7 +251,7 @@ fn setup_is_on_the_home_island_with_a_road_or_a_ship() {
         })
         .unwrap();
     g.apply(0, Action::BuildShip(ship)).unwrap();
-    assert_eq!(g.ships[0], 1 << ship);
+    assert_eq!(g.ships[0], BitSet::bit(ship));
     assert_eq!(g.players[0].ships_left, MAX_SHIPS - 1);
     assert_eq!(g.players[0].home_islands, 1 << 1);
     assert_eq!(g.current, 1);
@@ -251,7 +267,7 @@ fn ships_sail_from_buildings_and_other_ships() {
     put_settlement(&mut g, 0, v);
     give(&mut g, 0, cost::SHIP + cost::SHIP + cost::ROAD);
     let (e1, e2) = (path[0], path[1]);
-    assert_ne!(g.ship_spots(0) & (1 << e1), 0);
+    assert!(g.ship_spots(0).contains(e1));
     // Not yet connected.
     assert_eq!(
         g.apply(0, Action::BuildShip(e2)),
@@ -270,8 +286,8 @@ fn ships_sail_from_buildings_and_other_ships() {
             .find(|&x| T.edge_vertices[e2 as usize].contains(&x))
             .unwrap(),
     );
-    let from_ship = edges_at(tip).find(|&e| g.board.land_edges & (1 << e) != 0);
-    if let Some(e) = from_ship.filter(|e| g.occupied_edges() & (1 << e) == 0) {
+    let from_ship = edges_at(tip).find(|&e| g.board.land_edges.contains(e));
+    if let Some(e) = from_ship.filter(|&e| !g.occupied_edges().contains(e)) {
         assert_eq!(
             g.apply(0, Action::BuildRoad(e)),
             Err(RuleError::NotConnected)
@@ -307,7 +323,7 @@ fn ships_stop_at_opponents_and_the_pirate() {
         .copied()
         .find(|&x| x != v)
         .unwrap();
-    if g.board.land_vertices & (1 << joint) != 0 {
+    if g.board.land_vertices.contains(joint) {
         let mut h = g;
         put_settlement(&mut h, 1, joint);
         assert_eq!(
@@ -317,14 +333,14 @@ fn ships_stop_at_opponents_and_the_pirate() {
     }
     // The pirate on a tile next to the next edge blocks it.
     let tile = (0..T.num_tiles as u8)
-        .find(|&t| g.board.is_sea(t) && T.tile_edge_mask(t) & (1 << path[1]) != 0)
+        .find(|&t| g.board.is_sea(t) && T.tile_edge_mask(t).contains(path[1]))
         .unwrap();
     g.pirate = tile;
     assert_eq!(
         g.apply(0, Action::BuildShip(path[1])),
         Err(RuleError::PirateBlocks)
     );
-    assert_eq!(g.ship_spots(0) & T.tile_edge_mask(tile), 0);
+    assert_eq!(g.ship_spots(0) & T.tile_edge_mask(tile), BitSet::EMPTY);
 }
 
 #[test]
@@ -335,7 +351,7 @@ fn open_ships_move_once_per_turn() {
     put_ship(&mut g, 0, path[0]);
     put_ship(&mut g, 0, path[1]);
     // Only the end of the line can move.
-    assert_eq!(g.movable_ships(0), 1 << path[1]);
+    assert_eq!(g.movable_ships(0), BitSet::bit(path[1]));
     let to = edges_in(g.ship_moves(0, path[1]))
         .find(|&e| e != path[1])
         .unwrap();
@@ -351,7 +367,7 @@ fn open_ships_move_once_per_turn() {
         from: path[1],
         to
     }));
-    assert_eq!(g.ships[0], (1 << path[0]) | (1 << to));
+    assert_eq!(g.ships[0], BitSet::bit(path[0]) | BitSet::bit(to));
     let again = edges_in(g.ship_moves(0, to)).next().unwrap();
     assert_eq!(
         g.apply(
@@ -370,7 +386,7 @@ fn open_ships_move_once_per_turn() {
     put_settlement(&mut h, 0, v);
     give(&mut h, 0, cost::SHIP);
     h.apply(0, Action::BuildShip(path[0])).unwrap();
-    assert_eq!(h.movable_ships(0), 0);
+    assert_eq!(h.movable_ships(0), BitSet::EMPTY);
     h.check_invariants().unwrap();
 }
 
@@ -382,9 +398,9 @@ fn ships_between_two_settlements_are_fixed() {
     for &e in &path {
         put_ship(&mut g, 0, e);
     }
-    assert_ne!(g.movable_ships(0), 0);
+    assert_ne!(g.movable_ships(0), BitSet::EMPTY);
     put_settlement(&mut g, 0, land);
-    assert_eq!(g.movable_ships(0), 0, "a closed route cannot move");
+    assert_eq!(g.movable_ships(0), BitSet::EMPTY, "a closed route cannot move");
 }
 
 // ---------- pirate, gold, islands ----------
@@ -398,7 +414,7 @@ fn the_pirate_robs_ship_owners() {
     put_ship(&mut g, 1, path[0]);
     give(&mut g, 1, ResourceSet::new(0, 0, 0, 3, 0));
     let tile = (0..T.num_tiles as u8)
-        .find(|&t| g.board.is_sea(t) && t != g.pirate && T.tile_edge_mask(t) & (1 << path[0]) != 0)
+        .find(|&t| g.board.is_sea(t) && t != g.pirate && T.tile_edge_mask(t).contains(path[0]))
         .unwrap();
     assert_eq!(g.robber_victims(tile, 0), 1 << 1);
     let robber = g.robber;
@@ -433,7 +449,7 @@ fn gold_fields_let_players_pick() {
         .unwrap();
     let (a, b) = (T.tile_vertices[t][0], T.tile_vertices[t][3]);
     put_settlement(&mut g, 1, a);
-    g.cities[2] |= 1 << b;
+    g.cities[2].insert(b);
     g.players[2].cities_left -= 1;
     let mut events = Vec::new();
     let number = g.board.numbers[t];
@@ -542,7 +558,7 @@ fn trade_routes_join_roads_and_ships_at_settlements() {
     put_ship(&mut g, 0, path[0]);
     put_ship(&mut g, 0, path[1]);
     let free_land = |g: &GameState, e: u8| {
-        g.board.land_edges & (1 << e) != 0 && g.occupied_edges() & (1 << e) == 0
+        g.board.land_edges.contains(e) && !g.occupied_edges().contains(e)
     };
     let r1 = edges_at(v).find(|&e| free_land(&g, e)).unwrap();
     let w = other_end(r1, v);
@@ -591,11 +607,11 @@ fn settling_where_road_meets_ship_lengthens_the_route() {
     // A road reaching v from inland, ships leaving v: two separate routes
     // until a settlement joins them.
     let r = edges_at(v)
-        .find(|&e| g.board.land_edges & (1 << e) != 0 && e != path[0])
+        .find(|&e| g.board.land_edges.contains(e) && e != path[0])
         .unwrap();
     let w = other_end(r, v);
     let r0 = edges_at(w)
-        .find(|&e| e != r && g.board.land_edges & (1 << e) != 0)
+        .find(|&e| e != r && g.board.land_edges.contains(e))
         .unwrap();
     put_road(&mut g, 0, r0);
     put_road(&mut g, 0, r);
@@ -605,5 +621,224 @@ fn settling_where_road_meets_ship_lengthens_the_route() {
     give(&mut g, 0, cost::SETTLEMENT);
     g.apply(0, Action::BuildSettlement(v)).unwrap();
     assert_eq!(g.players[0].longest_road, 4);
+    g.check_invariants().unwrap();
+}
+
+// ---------- fog islands ----------
+
+#[test]
+fn fog_boards_follow_the_map() {
+    const F: &Topology = &FOG_ISLANDS;
+    let mut rng = Rng::new(17);
+    for _ in 0..200 {
+        let g = GameState::new(
+            GameConfig::scenario(Scenario::FogIslands, 4),
+            rng.next_u64(),
+        )
+        .unwrap();
+        let b = &g.board;
+        let mut fog = 0;
+        for t in 0..F.num_tiles {
+            match FOG_ISLANDS_MAP[t] {
+                b'.' | b'~' => {
+                    assert_eq!(b.terrain[t], Terrain::Sea);
+                    assert_eq!(b.tile_island[t], 0);
+                    assert_eq!(b.numbers[t], 0);
+                }
+                b'?' => {
+                    fog += 1;
+                    assert_eq!(b.terrain[t], Terrain::Fog);
+                    assert_eq!(b.tile_island[t], 0);
+                    assert_eq!(b.numbers[t], 0);
+                }
+                b'M' => {
+                    assert!(b.terrain[t].is_land());
+                    assert_eq!(b.tile_island[t], 1);
+                    assert_eq!(b.numbers[t] != 0, b.terrain[t].produces());
+                }
+                _ => unreachable!(),
+            }
+            for &n in &F.tile_neighbors[t] {
+                let red = |x: u8| x == 6 || x == 8;
+                assert!(n == NONE || !(red(b.numbers[t]) && red(b.numbers[n as usize])));
+            }
+        }
+        assert_eq!(fog, 13);
+        assert_eq!(g.fog_terrain_len, 13);
+        assert_eq!(g.fog_numbers_len, 9);
+        assert!(vertices_in(b.setup_vertices).all(|v| b.vertex_island[v as usize] == 1));
+        g.check_invariants().unwrap();
+    }
+}
+
+#[test]
+fn ships_reveal_fog_tiles_and_grant_discovery_rewards() {
+    const F: &Topology = &FOG_ISLANDS;
+    let mut g = GameState::new(GameConfig::scenario(Scenario::FogIslands, 3), 29).unwrap();
+    g.setup_step = 6;
+    g.phase = Phase::Main;
+    g.dice = Some((3, 3));
+
+    // Find a fog tile for the robber check.
+    let any_fog = (0..F.num_tiles as u8)
+        .find(|&t| g.board.terrain[t as usize] == Terrain::Fog)
+        .unwrap();
+    // Robber and pirate cannot move onto unrevealed fog.
+    let mut r = g;
+    r.phase = Phase::MoveRobber;
+    assert_eq!(
+        r.apply(
+            0,
+            Action::MoveRobber {
+                tile: any_fog,
+                victim: None
+            }
+        ),
+        Err(RuleError::InvalidTile)
+    );
+
+    // Pick a vertex of `sea_neighbor` that does not yet touch any fog tile, and an edge from it
+    // whose other end touches `fog_tile`.
+    let touches_fog = |s: &GameState, v: u8| {
+        F.vertex_tiles[v as usize]
+            .iter()
+            .any(|&t| t != NONE && s.board.terrain[t as usize] == Terrain::Fog)
+    };
+    let (start_v, explore_edge, fog_tile) = vertices_in(g.board.land_vertices)
+        .filter(|&v| !touches_fog(&g, v))
+        .find_map(|v| {
+            edges_in(F.vertex_edge_mask[v as usize] & g.board.sea_edges & !g.pirate_edges())
+                .find_map(|e| {
+                    let [a, b] = F.edge_vertices[e as usize];
+                    let far = if a == v { b } else { a };
+                    // Pick an edge whose tip touches exactly one fog tile.
+                    let mut ft: Vec<u8> = F.vertex_tiles[far as usize]
+                        .iter()
+                        .copied()
+                        .filter(|&t| t != NONE && g.board.terrain[t as usize] == Terrain::Fog)
+                        .collect();
+                    (ft.len() == 1).then(|| (v, e, ft.pop().unwrap()))
+                })
+        })
+        .unwrap();
+
+    // Force the top of the fog stack to Mountains (8) so we test regular land reward + settling.
+    let top = g.fog_terrain_len as usize - 1;
+    let m_idx = g.fog_terrain[..=top]
+        .iter()
+        .position(|&t| t == Terrain::Mountains)
+        .unwrap();
+    g.fog_terrain.swap(top, m_idx);
+    let ntop = g.fog_numbers_len as usize - 1;
+    let eight_idx = g.fog_numbers[..=ntop].iter().position(|&n| n == 8).unwrap();
+    g.fog_numbers.swap(ntop, eight_idx);
+    g.check_invariants().unwrap();
+
+    g.settlements[0].insert(start_v);
+    g.players[0].settlements_left -= 1;
+    g.players[0].home_islands = 1 << 1;
+    give(&mut g, 0, cost::SHIP);
+    let mut events = Vec::new();
+    g.apply_with(0, Action::BuildShip(explore_edge), &mut events)
+        .unwrap();
+    assert_eq!(g.board.terrain[fog_tile as usize], Terrain::Mountains);
+    assert_eq!(g.board.numbers[fog_tile as usize], 8);
+    assert_eq!(g.board.tile_island[fog_tile as usize], 2);
+    assert_eq!(g.players[0].hand[Resource::Ore], 1);
+    assert!(events.contains(&Event::TileRevealed {
+        player: 0,
+        tile: fog_tile,
+        terrain: Terrain::Mountains,
+        number: 8,
+        reward: Some(Resource::Ore),
+    }));
+    g.check_invariants().unwrap();
+
+    // Sail one coastal edge along the newly revealed island (respecting the distance rule) and settle it.
+    let ship_edge = edges_in(g.ship_spots(0) & F.tile_edge_mask(fog_tile))
+        .find(|&e| {
+            let [u, w] = F.edge_vertices[e as usize];
+            !(g.settlement_spots(0, false) & (BitSet::bit(u) | BitSet::bit(w))).is_empty()
+        })
+        .unwrap();
+    give(&mut g, 0, cost::SHIP + cost::SETTLEMENT);
+    g.apply(0, Action::BuildShip(ship_edge)).unwrap();
+    let settle_v = vertices_in(g.settlement_spots(0, true) & F.tile_vertex_mask[fog_tile as usize])
+        .next()
+        .unwrap();
+    let vp_before = g.victory_points(0);
+    events.clear();
+    g.apply_with(0, Action::BuildSettlement(settle_v), &mut events)
+        .unwrap();
+    assert_eq!(g.victory_points(0), vp_before + 3);
+    assert!(events.contains(&Event::IslandSettled {
+        player: 0,
+        island: 2,
+        points: 2,
+    }));
+    g.check_invariants().unwrap();
+}
+
+#[test]
+fn discovering_gold_during_road_building_resumes_the_second_ship() {
+    const F: &Topology = &FOG_ISLANDS;
+    let mut g = GameState::new(GameConfig::scenario(Scenario::FogIslands, 3), 41).unwrap();
+    g.setup_step = 6;
+    g.phase = Phase::Main;
+    g.dice = Some((2, 4));
+
+    let touches_fog = |s: &GameState, v: u8| {
+        F.vertex_tiles[v as usize]
+            .iter()
+            .any(|&t| t != NONE && s.board.terrain[t as usize] == Terrain::Fog)
+    };
+    let (start_v, explore_edge) = vertices_in(g.board.land_vertices)
+        .filter(|&v| !touches_fog(&g, v))
+        .find_map(|v| {
+            edges_in(F.vertex_edge_mask[v as usize] & g.board.sea_edges & !g.pirate_edges())
+                .find(|&e| {
+                    let [a, b] = F.edge_vertices[e as usize];
+                    let far = if a == v { b } else { a };
+                    touches_fog(&g, far)
+                })
+                .map(|e| (v, e))
+        })
+        .unwrap();
+
+    // Put Gold on top of the fog stack (and Sea below it in case two fog tiles touch `far`).
+    let top = g.fog_terrain_len as usize - 1;
+    let g_idx = g.fog_terrain[..=top]
+        .iter()
+        .position(|&t| t == Terrain::Gold)
+        .unwrap();
+    g.fog_terrain.swap(top, g_idx);
+    let s_idx = g.fog_terrain[..top]
+        .iter()
+        .position(|&t| t == Terrain::Sea)
+        .unwrap();
+    g.fog_terrain.swap(top - 1, s_idx);
+
+    g.settlements[0].insert(start_v);
+    g.players[0].settlements_left -= 1;
+    g.players[0].home_islands = 1 << 1;
+    let dlen = g.dev_deck_len as usize;
+    let rb_pos = g.dev_deck[..dlen]
+        .iter()
+        .position(|&c| c == isle_core::DevCard::RoadBuilding)
+        .unwrap();
+    g.dev_deck.swap(rb_pos, dlen - 1);
+    g.dev_deck_len -= 1;
+    g.players[0].dev_cards[isle_core::DevCard::RoadBuilding.index()] = 1;
+    g.check_invariants().unwrap();
+
+    g.apply(0, Action::PlayRoadBuilding).unwrap();
+    assert_eq!(g.phase, Phase::RoadBuilding { remaining: 2 });
+    g.apply(0, Action::BuildShip(explore_edge)).unwrap();
+    assert_eq!(g.phase, Phase::Gold { vertex: None });
+    assert_eq!(g.pending_gold[0], 1);
+    g.apply(0, Action::ChooseGold(ResourceSet::single(Resource::Brick, 1)))
+        .unwrap();
+    assert_eq!(g.players[0].hand[Resource::Brick], 1);
+    assert_eq!(g.phase, Phase::RoadBuilding { remaining: 1 });
     g.check_invariants().unwrap();
 }

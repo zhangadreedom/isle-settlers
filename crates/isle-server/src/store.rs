@@ -5,7 +5,7 @@ use std::io;
 use std::path::PathBuf;
 
 use isle_core::Action;
-use isle_proto::net::BotLevel;
+use isle_proto::net::{BotLevel, HouseRules};
 use isle_proto::ranking::SeatRating;
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +29,10 @@ pub struct RoomRecord {
     /// Absent in records from before seafaring: classic.
     #[serde(default)]
     pub scenario: isle_core::Scenario,
+    #[serde(default)]
+    pub rules: HouseRules,
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 impl RoomRecord {

@@ -52,21 +52,23 @@ pub enum Terrain {
     Sea = 6,
     /// Seafaring maps: produces a resource of the owner's choice.
     Gold = 7,
+    /// Fog maps: unexplored tile, revealed when a route reaches it.
+    Fog = 8,
 }
 
 impl Terrain {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 
     /// Land carries buildings and roads; the sea carries ships.
     #[inline]
     pub const fn is_land(self) -> bool {
-        !matches!(self, Terrain::Sea)
+        !matches!(self, Terrain::Sea | Terrain::Fog)
     }
 
     /// Carries a number token.
     #[inline]
     pub const fn produces(self) -> bool {
-        !matches!(self, Terrain::Desert | Terrain::Sea)
+        !matches!(self, Terrain::Desert | Terrain::Sea | Terrain::Fog)
     }
 
     /// Resource produced by this terrain, if any.
@@ -78,7 +80,183 @@ impl Terrain {
             Terrain::Pasture => Some(Resource::Wool),
             Terrain::Fields => Some(Resource::Grain),
             Terrain::Mountains => Some(Resource::Ore),
-            Terrain::Desert | Terrain::Sea | Terrain::Gold => None,
+            Terrain::Desert | Terrain::Sea | Terrain::Gold | Terrain::Fog => None,
+        }
+    }
+
+    /// Commodity produced by a city on this terrain in Citadels mode.
+    #[inline]
+    pub const fn commodity(self) -> Option<Commodity> {
+        match self {
+            Terrain::Forest => Some(Commodity::Paper),
+            Terrain::Pasture => Some(Commodity::Cloth),
+            Terrain::Mountains => Some(Commodity::Coin),
+            _ => None,
+        }
+    }
+}
+
+/// Refined urban goods produced by cities in Citadels (Cities & Knights) mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[repr(u8)]
+pub enum Commodity {
+    /// Produced by cities on Forest; advances Science.
+    Paper = 0,
+    /// Produced by cities on Pasture; advances Trade.
+    Cloth = 1,
+    /// Produced by cities on Mountains; advances Politics.
+    Coin = 2,
+}
+
+impl Commodity {
+    pub const ALL: [Commodity; 3] = [Commodity::Paper, Commodity::Cloth, Commodity::Coin];
+
+    #[inline]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    #[inline]
+    pub fn from_index(i: usize) -> Option<Commodity> {
+        Self::ALL.get(i).copied()
+    }
+}
+
+/// Three-track urban improvements in Citadels mode (levels 0..=5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[repr(u8)]
+pub enum CityTrack {
+    /// Paid in Cloth; Lv3 unlocks 2:1 commodity maritime trade.
+    Trade = 0,
+    /// Paid in Coin; Lv3 unlocks promoting knights to Lv3 (Mighty).
+    Politics = 1,
+    /// Paid in Paper; Lv3 unlocks Aqueduct (1 free resource on dry non-7 rolls).
+    Science = 2,
+}
+
+impl CityTrack {
+    pub const ALL: [CityTrack; 3] = [CityTrack::Trade, CityTrack::Politics, CityTrack::Science];
+
+    #[inline]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    #[inline]
+    pub fn from_index(i: usize) -> Option<CityTrack> {
+        Self::ALL.get(i).copied()
+    }
+
+    #[inline]
+    pub const fn commodity(self) -> Commodity {
+        match self {
+            CityTrack::Trade => Commodity::Cloth,
+            CityTrack::Politics => Commodity::Coin,
+            CityTrack::Science => Commodity::Paper,
+        }
+    }
+}
+
+/// A multiset of commodities (counts of Paper, Cloth, Coin).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CommoditySet(pub [u8; 3]);
+
+impl CommoditySet {
+    pub const EMPTY: CommoditySet = CommoditySet([0; 3]);
+
+    #[inline]
+    pub const fn new(paper: u8, cloth: u8, coin: u8) -> Self {
+        CommoditySet([paper, cloth, coin])
+    }
+
+    #[inline]
+    pub fn single(c: Commodity, n: u8) -> Self {
+        let mut s = Self::EMPTY;
+        s.0[c.index()] = n;
+        s
+    }
+
+    #[inline]
+    pub fn total(&self) -> u32 {
+        self.0.iter().map(|&c| c as u32).sum()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0 == [0; 3]
+    }
+
+    #[inline]
+    pub fn contains(&self, other: &CommoditySet) -> bool {
+        self.0.iter().zip(other.0.iter()).all(|(a, b)| a >= b)
+    }
+
+    #[inline]
+    pub fn nth_card(&self, mut index: u32) -> Option<Commodity> {
+        for c in Commodity::ALL {
+            let n = self.0[c.index()] as u32;
+            if index < n {
+                return Some(c);
+            }
+            index -= n;
+        }
+        None
+    }
+}
+
+impl Index<Commodity> for CommoditySet {
+    type Output = u8;
+    #[inline]
+    fn index(&self, c: Commodity) -> &u8 {
+        &self.0[c.index()]
+    }
+}
+
+impl IndexMut<Commodity> for CommoditySet {
+    #[inline]
+    fn index_mut(&mut self, c: Commodity) -> &mut u8 {
+        &mut self.0[c.index()]
+    }
+}
+
+impl Add for CommoditySet {
+    type Output = CommoditySet;
+    #[inline]
+    fn add(mut self, rhs: CommoditySet) -> CommoditySet {
+        self += rhs;
+        self
+    }
+}
+
+impl AddAssign for CommoditySet {
+    #[inline]
+    fn add_assign(&mut self, rhs: CommoditySet) {
+        for i in 0..3 {
+            self.0[i] += rhs.0[i];
+        }
+    }
+}
+
+impl Sub for CommoditySet {
+    type Output = CommoditySet;
+    #[inline]
+    fn sub(mut self, rhs: CommoditySet) -> CommoditySet {
+        self -= rhs;
+        self
+    }
+}
+
+impl SubAssign for CommoditySet {
+    #[inline]
+    fn sub_assign(&mut self, rhs: CommoditySet) {
+        for i in 0..3 {
+            self.0[i] -= rhs.0[i];
         }
     }
 }
@@ -243,6 +421,10 @@ pub mod cost {
     pub const DEV_CARD: ResourceSet = ResourceSet::new(0, 0, 1, 1, 1);
     /// Seafaring.
     pub const SHIP: ResourceSet = ResourceSet::new(0, 1, 1, 0, 0);
+    /// Citadels: recruiting or promoting a knight.
+    pub const KNIGHT: ResourceSet = ResourceSet::new(0, 0, 1, 0, 1);
+    /// Citadels: activating a knight with grain rations.
+    pub const ACTIVATE_KNIGHT: ResourceSet = ResourceSet::new(0, 0, 0, 1, 0);
 }
 
 #[cfg(test)]

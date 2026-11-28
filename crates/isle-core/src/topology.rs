@@ -2,7 +2,9 @@
 //!
 //! The tables are generated at compile time by `build.rs`, one [`Topology`]
 //! per [`BoardLayout`]. Indices are `u8`; sets of vertices and of edges are
-//! `u128` bitmasks.
+//! 192-bit [`BitSet`] masks.
+
+use crate::bitset::{BitSet, bits as bitset_bits};
 
 /// Sentinel used to pad fixed-size adjacency arrays.
 pub const NONE: u8 = u8::MAX;
@@ -20,6 +22,13 @@ pub enum BoardLayout {
     /// Seafaring: a home island and two small islands in 33 tiles of land
     /// and sea, 9 harbors, ships and the pirate: 2–4 players.
     Archipelago,
+    /// Seafaring: a crescent home island and thirteen unexplored fog tiles
+    /// revealed as ships reach them: 2–4 players.
+    FogIslands,
+    /// Seafaring (5–6 players): 46 tiles with three outer gold islands.
+    ArchipelagoExtended,
+    /// Seafaring (5–6 players): 46 tiles with eighteen unexplored fog tiles.
+    FogIslandsExtended,
 }
 
 impl BoardLayout {
@@ -29,15 +38,21 @@ impl BoardLayout {
             BoardLayout::Base => &BASE,
             BoardLayout::Extended => &EXTENDED,
             BoardLayout::Archipelago => &ARCHIPELAGO,
+            BoardLayout::FogIslands => &FOG_ISLANDS,
+            BoardLayout::ArchipelagoExtended => &ARCHIPELAGO_EXTENDED,
+            BoardLayout::FogIslandsExtended => &FOG_ISLANDS_EXTENDED,
         }
     }
 
     /// Map characters of a seafaring layout, one per tile (`.` and `~` sea,
-    /// letters islands, `M` the home island); `None` for all-land boards.
+    /// `?` fog, letters islands, `M` the home island); `None` for all-land boards.
     #[inline]
     pub fn map(self) -> Option<&'static [u8]> {
         match self {
             BoardLayout::Archipelago => Some(ARCHIPELAGO_MAP),
+            BoardLayout::FogIslands => Some(FOG_ISLANDS_MAP),
+            BoardLayout::ArchipelagoExtended => Some(ARCHIPELAGO_EXTENDED_MAP),
+            BoardLayout::FogIslandsExtended => Some(FOG_ISLANDS_EXTENDED_MAP),
             _ => None,
         }
     }
@@ -45,7 +60,30 @@ impl BoardLayout {
     /// Ships and the pirate are in play.
     #[inline]
     pub const fn has_ships(self) -> bool {
-        matches!(self, BoardLayout::Archipelago)
+        matches!(
+            self,
+            BoardLayout::Archipelago
+                | BoardLayout::FogIslands
+                | BoardLayout::ArchipelagoExtended
+                | BoardLayout::FogIslandsExtended
+        )
+    }
+
+    /// Unexplored fog tiles are revealed during play.
+    #[inline]
+    pub const fn has_fog(self) -> bool {
+        matches!(self, BoardLayout::FogIslands | BoardLayout::FogIslandsExtended)
+    }
+
+    /// Extended (5–6 player) supply sizes and out-of-turn building.
+    #[inline]
+    pub const fn is_extended(self) -> bool {
+        matches!(
+            self,
+            BoardLayout::Extended
+                | BoardLayout::ArchipelagoExtended
+                | BoardLayout::FogIslandsExtended
+        )
     }
 
     /// The board normally used with `players` seats.
@@ -84,17 +122,17 @@ pub struct Topology {
     /// Endpoints of each edge.
     pub edge_vertices: &'static [[u8; 2]],
     /// Vertices adjacent to each vertex.
-    pub vertex_adj_mask: &'static [u128],
+    pub vertex_adj_mask: &'static [BitSet],
     /// Edges touching each vertex.
-    pub vertex_edge_mask: &'static [u128],
+    pub vertex_edge_mask: &'static [BitSet],
     /// Vertices of each tile.
-    pub tile_vertex_mask: &'static [u128],
+    pub tile_vertex_mask: &'static [BitSet],
     /// Coastal edges, clockwise from the top.
     pub coast_edges: &'static [u8],
     /// Coastal edge of each harbor slot.
     pub harbor_edges: &'static [u8],
-    pub all_vertices: u128,
-    pub all_edges: u128,
+    pub all_vertices: BitSet,
+    pub all_edges: BitSet,
 }
 
 include!(concat!(env!("OUT_DIR"), "/topology_gen.rs"));
@@ -102,57 +140,50 @@ include!(concat!(env!("OUT_DIR"), "/topology_gen.rs"));
 impl Topology {
     /// Union of the vertices adjacent to any vertex in `mask`.
     #[inline]
-    pub fn neighbors_of(&self, mask: u128) -> u128 {
-        vertices_in(mask).fold(0, |acc, v| acc | self.vertex_adj_mask[v as usize])
+    pub fn neighbors_of(&self, mask: BitSet) -> BitSet {
+        vertices_in(mask).fold(BitSet::EMPTY, |acc, v| acc | self.vertex_adj_mask[v as usize])
     }
 
     /// Union of the edges touching any vertex in `mask`.
     #[inline]
-    pub fn edges_touching(&self, mask: u128) -> u128 {
-        vertices_in(mask).fold(0, |acc, v| acc | self.vertex_edge_mask[v as usize])
+    pub fn edges_touching(&self, mask: BitSet) -> BitSet {
+        vertices_in(mask).fold(BitSet::EMPTY, |acc, v| acc | self.vertex_edge_mask[v as usize])
     }
 
     /// The six edges of tile `t`.
     #[inline]
-    pub fn tile_edge_mask(&self, t: u8) -> u128 {
+    pub fn tile_edge_mask(&self, t: u8) -> BitSet {
         self.tile_edges[t as usize]
             .iter()
-            .fold(0, |m, &e| m | (1u128 << e))
+            .fold(BitSet::EMPTY, |m, &e| m | BitSet::bit(e))
     }
 
     /// Union of the endpoints of every edge in `mask`.
     #[inline]
-    pub fn endpoints_of(&self, mask: u128) -> u128 {
-        edges_in(mask).fold(0, |acc, e| {
+    pub fn endpoints_of(&self, mask: BitSet) -> BitSet {
+        edges_in(mask).fold(BitSet::EMPTY, |acc, e| {
             let [a, b] = self.edge_vertices[e as usize];
-            acc | (1u128 << a) | (1u128 << b)
+            acc | BitSet::bit(a) | BitSet::bit(b)
         })
     }
 }
 
 /// Iterates the indices of the set bits of a mask.
 #[inline]
-pub fn bits(mut mask: u128) -> impl Iterator<Item = u8> {
-    std::iter::from_fn(move || {
-        if mask == 0 {
-            return None;
-        }
-        let i = mask.trailing_zeros() as u8;
-        mask &= mask - 1;
-        Some(i)
-    })
+pub fn bits(mask: BitSet) -> impl Iterator<Item = u8> {
+    bitset_bits(mask)
 }
 
 /// Iterates the vertices of a vertex mask.
 #[inline]
-pub fn vertices_in(mask: u128) -> impl Iterator<Item = u8> {
-    bits(mask)
+pub fn vertices_in(mask: BitSet) -> impl Iterator<Item = u8> {
+    bitset_bits(mask)
 }
 
 /// Iterates the edges of an edge mask.
 #[inline]
-pub fn edges_in(mask: u128) -> impl Iterator<Item = u8> {
-    bits(mask)
+pub fn edges_in(mask: BitSet) -> impl Iterator<Item = u8> {
+    bitset_bits(mask)
 }
 
 /// World-space position of a lattice point for a hex of circumradius `size`.
@@ -166,7 +197,14 @@ pub fn lattice_to_world((x, y): (i16, i16), size: f32) -> (f32, f32) {
 mod tests {
     use super::*;
 
-    const ALL: [&Topology; 3] = [&BASE, &EXTENDED, &ARCHIPELAGO];
+    const ALL: [&Topology; 6] = [
+        &BASE,
+        &EXTENDED,
+        &ARCHIPELAGO,
+        &FOG_ISLANDS,
+        &ARCHIPELAGO_EXTENDED,
+        &FOG_ISLANDS_EXTENDED,
+    ];
 
     #[test]
     fn counts() {
@@ -187,6 +225,34 @@ mod tests {
         );
         assert_eq!(ARCHIPELAGO_MAP.len(), 33);
         assert_eq!(ARCHIPELAGO.harbor_edges.len(), 9);
+        assert_eq!(
+            (
+                FOG_ISLANDS.num_tiles,
+                FOG_ISLANDS.num_vertices,
+                FOG_ISLANDS.num_edges
+            ),
+            (33, 90, 122)
+        );
+        assert_eq!(FOG_ISLANDS_MAP.len(), 33);
+        assert_eq!(FOG_ISLANDS.harbor_edges.len(), 9);
+        assert_eq!(
+            (
+                ARCHIPELAGO_EXTENDED.num_tiles,
+                ARCHIPELAGO_EXTENDED.num_vertices,
+                ARCHIPELAGO_EXTENDED.num_edges
+            ),
+            (46, 120, 165)
+        );
+        assert_eq!(ARCHIPELAGO_EXTENDED.harbor_edges.len(), 11);
+        assert_eq!(
+            (
+                FOG_ISLANDS_EXTENDED.num_tiles,
+                FOG_ISLANDS_EXTENDED.num_vertices,
+                FOG_ISLANDS_EXTENDED.num_edges
+            ),
+            (46, 120, 165)
+        );
+        assert_eq!(FOG_ISLANDS_EXTENDED.harbor_edges.len(), 11);
         for t in ALL {
             // Euler's formula for a disc tiled by hexes: E = V + F - 1.
             assert_eq!(t.num_edges, t.num_vertices + t.num_tiles - 1);
@@ -268,14 +334,20 @@ mod tests {
     #[test]
     fn harbors_do_not_share_vertices() {
         for topo in ALL {
-            let mut seen = 0u128;
+            let mut seen = BitSet::EMPTY;
             for &e in topo.harbor_edges {
                 // Seafaring harbors may face inner sea; build.rs checks
                 // that they face water.
-                assert!(std::ptr::eq(topo, &ARCHIPELAGO) || topo.coast_edges.contains(&e));
+                assert!(
+                    std::ptr::eq(topo, &ARCHIPELAGO)
+                        || std::ptr::eq(topo, &FOG_ISLANDS)
+                        || std::ptr::eq(topo, &ARCHIPELAGO_EXTENDED)
+                        || std::ptr::eq(topo, &FOG_ISLANDS_EXTENDED)
+                        || topo.coast_edges.contains(&e)
+                );
                 let [a, b] = topo.edge_vertices[e as usize];
-                let m = (1u128 << a) | (1u128 << b);
-                assert_eq!(seen & m, 0);
+                let m = BitSet::bit(a) | BitSet::bit(b);
+                assert!((seen & m).is_empty());
                 seen |= m;
             }
         }
@@ -283,8 +355,8 @@ mod tests {
 
     #[test]
     fn bit_iterators() {
-        let m = (1u128 << 3) | (1u128 << 79);
-        assert_eq!(bits(m).collect::<Vec<_>>(), vec![3, 79]);
+        let m = BitSet::bit(3) | BitSet::bit(79) | BitSet::bit(155);
+        assert_eq!(bits(m).collect::<Vec<_>>(), vec![3, 79, 155]);
         assert_eq!(BoardLayout::for_players(4), BoardLayout::Base);
         assert_eq!(BoardLayout::for_players(5), BoardLayout::Extended);
     }

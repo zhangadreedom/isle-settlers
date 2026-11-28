@@ -2,8 +2,37 @@
 
 use std::fmt;
 
-use crate::resources::{Resource, ResourceSet};
+use crate::resources::{CityTrack, Commodity, CommoditySet, Resource, ResourceSet, Terrain};
 use crate::state::DevCard;
+
+/// Either a basic resource or an urban commodity (Citadels maritime trade).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
+pub enum TradeGood {
+    Resource(Resource),
+    Commodity(Commodity),
+}
+
+impl TradeGood {
+    #[inline]
+    pub const fn code(self) -> u8 {
+        match self {
+            TradeGood::Resource(r) => r as u8,
+            TradeGood::Commodity(c) => 5 + c as u8,
+        }
+    }
+
+    #[inline]
+    pub fn from_code(b: u8) -> Option<Self> {
+        if b < 5 {
+            Resource::from_index(b as usize).map(TradeGood::Resource)
+        } else {
+            Commodity::from_index((b - 5) as usize).map(TradeGood::Commodity)
+        }
+    }
+}
 
 /// Everything a player can do. The acting seat is passed separately to
 /// [`crate::GameState::apply`].
@@ -59,9 +88,57 @@ pub enum Action {
         from: u8,
         to: u8,
     },
-    /// Seafaring: resources for gold fields, as many as owed (fewer if the
-    /// bank runs short).
+    /// Seafaring: resources for gold fields (or Citadels Aqueduct), as many
+    /// as owed (fewer if the bank runs short).
     ChooseGold(ResourceSet),
+    /// Citadels: discard half of resources + commodities combined after a 7.
+    DiscardCitadel {
+        resources: ResourceSet,
+        commodities: CommoditySet,
+    },
+    /// Citadels: trade commodities (4:1, or 2:1 with Trade Lv3) or buy a
+    /// commodity with resources at the player's maritime ratio.
+    MaritimeTradeGood {
+        give: TradeGood,
+        get: TradeGood,
+    },
+    /// Citadels: advance `track` by one level; `metropolis` names the city
+    /// crowned when claiming a Metropolis at level 4 or 5.
+    UpgradeCity {
+        track: CityTrack,
+        metropolis: Option<u8>,
+    },
+    /// Citadels: recruit a level-1 knight at `vertex`.
+    RecruitKnight(u8),
+    /// Citadels: activate an inactive knight at `vertex` with 1 grain.
+    ActivateKnight(u8),
+    /// Citadels: promote a knight at `vertex` by one level.
+    PromoteKnight(u8),
+    /// Citadels: move an active knight along own routes (displacing a weaker
+    /// opponent knight if present).
+    MoveKnight {
+        from: u8,
+        to: u8,
+    },
+    /// Citadels: use an active knight adjacent to the robber/pirate to drive
+    /// it to `tile` and rob `victim`.
+    ChaseRobber {
+        vertex: u8,
+        tile: u8,
+        victim: Option<u8>,
+    },
+    /// Fishermen: pass the Old Boot to another player with at least as many public VP.
+    PassOldBoot(u8),
+    /// Fishermen (2 fish): send the robber back to the desert / inland lake.
+    FishDriveOffRobber,
+    /// Fishermen (3 fish): steal one random card from `victim`.
+    FishSteal(u8),
+    /// Fishermen (4 fish): take one resource card of choice from the bank.
+    FishTakeResource(Resource),
+    /// Fishermen (5 fish): build a road on `edge`.
+    FishBuildRoad(u8),
+    /// Fishermen (7 fish): draw one development card.
+    FishBuyDevCard,
 }
 
 impl Action {
@@ -103,6 +180,33 @@ impl Action {
                 out.push(19);
                 out.extend(set.0);
             }
+            Action::DiscardCitadel {
+                resources,
+                commodities,
+            } => {
+                out.push(20);
+                out.extend(resources.0);
+                out.extend(commodities.0);
+            }
+            Action::MaritimeTradeGood { give, get } => out.extend([21, give.code(), get.code()]),
+            Action::UpgradeCity { track, metropolis } => {
+                out.extend([22, track as u8, metropolis.unwrap_or(u8::MAX)]);
+            }
+            Action::RecruitKnight(v) => out.extend([23, v]),
+            Action::ActivateKnight(v) => out.extend([24, v]),
+            Action::PromoteKnight(v) => out.extend([25, v]),
+            Action::MoveKnight { from, to } => out.extend([26, from, to]),
+            Action::ChaseRobber {
+                vertex,
+                tile,
+                victim,
+            } => out.extend([27, vertex, tile, victim.unwrap_or(u8::MAX)]),
+            Action::PassOldBoot(target) => out.extend([28, target]),
+            Action::FishDriveOffRobber => out.push(29),
+            Action::FishSteal(victim) => out.extend([30, victim]),
+            Action::FishTakeResource(r) => out.extend([31, resource(r)]),
+            Action::FishBuildRoad(e) => out.extend([32, e]),
+            Action::FishBuyDevCard => out.push(33),
         }
     }
 
@@ -114,6 +218,9 @@ impl Action {
         let resource = |i: usize| arg(i).and_then(|r| Resource::from_index(r as usize));
         let set = |from: usize| -> Option<ResourceSet> {
             Some(ResourceSet(rest.get(from..from + 5)?.try_into().ok()?))
+        };
+        let cset = |from: usize| -> Option<CommoditySet> {
+            Some(CommoditySet(rest.get(from..from + 3)?.try_into().ok()?))
         };
         let (action, operands) = match tag {
             0 => (Action::RollDice, 0),
@@ -168,6 +275,57 @@ impl Action {
                 2,
             ),
             19 => (Action::ChooseGold(set(0)?), 5),
+            20 => (
+                Action::DiscardCitadel {
+                    resources: set(0)?,
+                    commodities: cset(5)?,
+                },
+                8,
+            ),
+            21 => (
+                Action::MaritimeTradeGood {
+                    give: TradeGood::from_code(arg(0)?)?,
+                    get: TradeGood::from_code(arg(1)?)?,
+                },
+                2,
+            ),
+            22 => {
+                let m = arg(1)?;
+                (
+                    Action::UpgradeCity {
+                        track: CityTrack::from_index(arg(0)? as usize)?,
+                        metropolis: (m != u8::MAX).then_some(m),
+                    },
+                    2,
+                )
+            }
+            23 => (Action::RecruitKnight(arg(0)?), 1),
+            24 => (Action::ActivateKnight(arg(0)?), 1),
+            25 => (Action::PromoteKnight(arg(0)?), 1),
+            26 => (
+                Action::MoveKnight {
+                    from: arg(0)?,
+                    to: arg(1)?,
+                },
+                2,
+            ),
+            27 => {
+                let victim = arg(2)?;
+                (
+                    Action::ChaseRobber {
+                        vertex: arg(0)?,
+                        tile: arg(1)?,
+                        victim: (victim != u8::MAX).then_some(victim),
+                    },
+                    3,
+                )
+            }
+            28 => (Action::PassOldBoot(arg(0)?), 1),
+            29 => (Action::FishDriveOffRobber, 0),
+            30 => (Action::FishSteal(arg(0)?), 1),
+            31 => (Action::FishTakeResource(resource(0)?), 1),
+            32 => (Action::FishBuildRoad(arg(0)?), 1),
+            33 => (Action::FishBuyDevCard, 0),
             _ => return None,
         };
         Some((action, 1 + operands))
@@ -273,6 +431,10 @@ pub enum Event {
     SpecialBuildPassed {
         player: u8,
     },
+    /// Partner finished their paired turn.
+    PairedTurnEnded {
+        player: u8,
+    },
     ShipBuilt {
         player: u8,
         edge: u8,
@@ -300,6 +462,91 @@ pub enum Event {
         island: u8,
         points: u8,
     },
+    /// Fog maps: an unexplored tile was turned face up (`reward` is the free
+    /// resource card drawn from the bank for regular land, if any).
+    TileRevealed {
+        player: u8,
+        tile: u8,
+        terrain: Terrain,
+        number: u8,
+        reward: Option<Resource>,
+    },
+    CommoditiesProduced {
+        player: u8,
+        commodities: CommoditySet,
+    },
+    CommoditiesDiscarded {
+        player: u8,
+        commodities: CommoditySet,
+    },
+    /// `commodity` is `None` in views of players other than thief and victim.
+    CommodityStolen {
+        thief: u8,
+        victim: u8,
+        commodity: Option<Commodity>,
+    },
+    GoodTraded {
+        player: u8,
+        give: TradeGood,
+        ratio: u8,
+        get: TradeGood,
+    },
+    CityUpgraded {
+        player: u8,
+        track: CityTrack,
+        level: u8,
+        metropolis: Option<u8>,
+    },
+    KnightRecruited {
+        player: u8,
+        vertex: u8,
+    },
+    KnightActivated {
+        player: u8,
+        vertex: u8,
+    },
+    KnightPromoted {
+        player: u8,
+        vertex: u8,
+        level: u8,
+    },
+    KnightMoved {
+        player: u8,
+        from: u8,
+        to: u8,
+        displaced: Option<(u8, Option<u8>)>,
+    },
+    BarbarianAdvanced {
+        pos: u8,
+    },
+    BarbariansRepelled {
+        cities: u8,
+        defense: u8,
+        sole_defender: Option<u8>,
+    },
+    CityPillaged {
+        player: u8,
+        vertex: u8,
+    },
+    FishCaught {
+        player: u8,
+        count: u8,
+    },
+    OldBootDrawn {
+        player: u8,
+    },
+    OldBootPassed {
+        from: u8,
+        to: u8,
+    },
+    FishSpent {
+        player: u8,
+        cost: u8,
+    },
+    FishResourceTaken {
+        player: u8,
+        resource: Resource,
+    },
     GameWon {
         player: u8,
         points: u8,
@@ -318,6 +565,15 @@ impl Event {
                     thief,
                     victim,
                     resource: None,
+                }
+            }
+            Event::CommodityStolen { thief, victim, .. }
+                if viewer != Some(thief) && viewer != Some(victim) =>
+            {
+                Event::CommodityStolen {
+                    thief,
+                    victim,
+                    commodity: None,
                 }
             }
             Event::DevCardBought { player, .. } if viewer != Some(player) => {
@@ -382,6 +638,13 @@ pub enum RuleError {
     ShipCannotMove,
     NoGoldOwed,
     WrongGoldAmount,
+    /// Friendly robber: may not target a player with 2 or fewer public points.
+    FriendlyRobber,
+    NoCityForUpgrade,
+    InvalidMetropolis,
+    NotYourKnight,
+    KnightNotActive,
+    KnightCannotAct,
 }
 
 impl fmt::Display for RuleError {
@@ -418,6 +681,12 @@ impl fmt::Display for RuleError {
             RuleError::ShipCannotMove => "that ship cannot move",
             RuleError::NoGoldOwed => "you have no gold to pick",
             RuleError::WrongGoldAmount => "pick exactly the gold you are owed",
+            RuleError::FriendlyRobber => "friendly robber protects players with 2 or fewer points",
+            RuleError::NoCityForUpgrade => "you need a city to advance urban improvements",
+            RuleError::InvalidMetropolis => "invalid metropolis city selection",
+            RuleError::NotYourKnight => "you have no knight there",
+            RuleError::KnightNotActive => "that knight is not active",
+            RuleError::KnightCannotAct => "that knight cannot act right now",
         };
         f.write_str(msg)
     }

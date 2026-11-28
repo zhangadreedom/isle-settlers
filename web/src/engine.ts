@@ -1,6 +1,6 @@
 // Typed wrapper around the WebAssembly match host.
 import init, * as wasm from './wasm/isle_wasm.js';
-import type { Action, BoardInfo, BoardLayout, Event, PlayerView, ReplayRecord, ResourceSet, Scenario } from './generated/proto';
+import type { Action, BoardInfo, BoardLayout, Event, HouseRules, PlayerView, ReplayRecord, ResourceSet, Scenario } from './generated/proto';
 import type { MatchState, WorkerReply, WorkerRequest } from './game/worker';
 
 /** Owner value meaning "nobody" in per-spot arrays. */
@@ -52,8 +52,26 @@ export class Match {
   private readonly inner: wasm.LocalMatch;
   readonly board: BoardInfo;
 
-  constructor(players: number, seed: number, humanSeat: number | null, bot: BotKind, scenario: Scenario = 'Classic') {
-    this.inner = new wasm.LocalMatch(players, seed >>> 0, humanSeat ?? -1, bot, scenario);
+  constructor(
+    players: number,
+    seed: number,
+    humanSeat: number | null,
+    bot: BotKind,
+    scenario: Scenario = 'Classic',
+    rules?: Partial<HouseRules>,
+  ) {
+    this.inner = wasm.LocalMatch.createMatch(
+      players,
+      seed >>> 0,
+      humanSeat ?? -1,
+      bot,
+      scenario,
+      rules?.victoryPoints ?? 0,
+      rules?.friendlyRobber ?? false,
+      rules?.pairedTurns ?? false,
+      rules?.eventDeck ?? false,
+      rules?.customMap ?? '',
+    );
     this.board = call(() => this.inner.board());
   }
 
@@ -111,8 +129,15 @@ export class WorkerMatch {
     });
   }
 
-  create(players: number, seed: number, humanSeat: number | null, bot: BotKind, scenario: Scenario) {
-    return this.call({ op: 'create', players, seed, humanSeat, bot, scenario });
+  create(
+    players: number,
+    seed: number,
+    humanSeat: number | null,
+    bot: BotKind,
+    scenario: Scenario,
+    rules: HouseRules,
+  ) {
+    return this.call({ op: 'create', players, seed, humanSeat, bot, scenario, rules });
   }
 
   apply(version: number, index: number) {
@@ -187,9 +212,19 @@ export class Replay {
     if (record.format !== 1) throw new EngineError('UnsupportedReplay');
     if (record.players.length !== c.numPlayers) throw new EngineError('BadReplayConfig');
     try {
-      // Replays from before seafaring have no scenario: classic.
-      const scenario = c.scenario ?? 'Classic';
-      this.inner = new wasm.Replay(c.numPlayers, c.victoryPoints, c.balancedBoard, scenario, record.seed, Uint8Array.from(record.actions));
+      // Replays from before seafaring/variants default missing flags.
+      const normalized = {
+        ...c,
+        scenario: c.scenario ?? 'Classic',
+        friendlyRobber: c.friendlyRobber ?? false,
+        pairedTurns: c.pairedTurns ?? false,
+        eventDeck: c.eventDeck ?? false,
+      };
+      this.inner = wasm.Replay.fromConfigJson(
+        JSON.stringify(normalized),
+        record.seed,
+        Uint8Array.from(record.actions),
+      );
     } catch (e) {
       throw new EngineError(e instanceof Error ? e.message : String(e));
     }
@@ -221,3 +256,8 @@ export class Replay {
 }
 
 export const runBenchmark = (games: number, seed: number) => wasm.runBenchmark(games, seed);
+
+/** Validates and previews an `IM1:...` custom map for `(players, scenario)`. */
+export function previewCustomMap(players: number, scenario: Scenario, code: string): BoardInfo {
+  return call(() => wasm.previewCustomMap(players, scenario, code));
+}

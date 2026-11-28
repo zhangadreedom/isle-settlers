@@ -5,19 +5,21 @@
 #![cfg(feature = "ts")]
 
 use isle_core::{
-    BoardLayout, GameConfig, HarborKind, Phase, Resource, ResourceSet, Scenario, Terrain,
-    TradeOffer,
+    BoardLayout, CustomMap, GameConfig, HarborKind, Phase, Resource, ResourceSet, Scenario,
+    Terrain, TradeOffer,
 };
 use isle_proto::account::{AccountInfo, ApiError, Credentials, SessionGrant, SessionInfo};
 use isle_proto::net::{
-    BotLevel, ChatLine, ClientMsg, LegalActions, RoomInfo, SeatView, ServerMsg, Snapshot, Update,
+    BotLevel, ChatLine, ClientMsg, HouseRules, LegalActions, PublicRoomSummary, RoomInfo, SeatView,
+    ServerMsg, Snapshot, Update,
 };
 use isle_proto::ranking::{
     Leaderboard, LeaderboardEntry, MatchSummary, PlayerProfile, RatingChange, SeatRating, Tier,
 };
 use isle_proto::{
-    Action, BoardInfo, DevCard, Event, PlayerPublic, PlayerView, PrivateInfo, ReplayPlayer,
-    ReplayRecord, RuleError, TradeResponse,
+    Action, BoardInfo, CitadelView, CityTrack, Commodity, CommoditySet, DevCard, Event,
+    FishingGround, FogBoard, KnightView, PlayerPublic, PlayerView, PrivateInfo, ReplayPlayer,
+    ReplayRecord, RuleError, TradeGood, TradeResponse,
 };
 use ts_rs::{Config, TS};
 
@@ -28,8 +30,13 @@ fn render() -> String {
         Terrain::decl(&cfg),
         HarborKind::decl(&cfg),
         ResourceSet::decl(&cfg),
+        Commodity::decl(&cfg),
+        CommoditySet::decl(&cfg),
+        CityTrack::decl(&cfg),
+        TradeGood::decl(&cfg),
         DevCard::decl(&cfg),
         BoardLayout::decl(&cfg),
+        CustomMap::decl(&cfg),
         Scenario::decl(&cfg),
         GameConfig::decl(&cfg),
         Phase::decl(&cfg),
@@ -38,7 +45,11 @@ fn render() -> String {
         Action::decl(&cfg),
         Event::decl(&cfg),
         RuleError::decl(&cfg),
+        FishingGround::decl(&cfg),
         BoardInfo::decl(&cfg),
+        FogBoard::decl(&cfg),
+        KnightView::decl(&cfg),
+        CitadelView::decl(&cfg),
         PlayerPublic::decl(&cfg),
         PrivateInfo::decl(&cfg),
         PlayerView::decl(&cfg),
@@ -47,6 +58,8 @@ fn render() -> String {
         SeatRating::decl(&cfg),
         RatingChange::decl(&cfg),
         SeatView::decl(&cfg),
+        HouseRules::decl(&cfg),
+        PublicRoomSummary::decl(&cfg),
         RoomInfo::decl(&cfg),
         LegalActions::decl(&cfg),
         Snapshot::decl(&cfg),

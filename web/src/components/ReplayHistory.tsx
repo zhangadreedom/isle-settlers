@@ -6,7 +6,16 @@ export function ReplayHistory(props: { ready: boolean; onOpen: (json: string) =>
   const entries = localReplayHistory();
   const rows = entries.map(({ savedAt, record }) => {
     const winner = record.players[record.winner!];
-    const sea = record.config.scenario === 'Archipelago' ? '航海 · ' : '';
+    const sea =
+      record.config.scenario === 'Archipelago'
+        ? '航海 · '
+        : record.config.scenario === 'FogIslands'
+          ? '迷雾 · '
+          : record.config.scenario === 'Citadels'
+            ? '城邦 · '
+            : record.config.scenario === 'Fishermen'
+              ? '渔场 · '
+              : '';
     const description = `${sea}${record.players.length} 人 · ${winner.name || `AI ${record.winner! + 1}`}获胜 · #${record.seed}`;
     const date = new Date(savedAt).toLocaleString();
     return { record, description, date };

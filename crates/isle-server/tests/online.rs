@@ -8,7 +8,7 @@ use std::time::Duration;
 use common::*;
 use futures_util::SinkExt;
 use isle_core::{Action, Event, Phase};
-use isle_proto::net::{BotLevel, ChatLine, ClientMsg, SeatView};
+use isle_proto::net::{BotLevel, ChatLine, ClientMsg, HouseRules, SeatView, ServerMsg};
 use isle_server::ServerConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -365,7 +365,9 @@ async fn hard_bots_play_on_the_blocking_pool() {
         name: "Alice".into(),
         ranked: false,
         scenario: Default::default(),
+        rules: Default::default(),
         session: None,
+        is_public: false,
     })
     .await;
     host.until(|c| c.room.is_some()).await;
@@ -495,16 +497,18 @@ async fn archipelago_rooms_play_out_and_restore() {
         ..fast_config()
     };
     let server = Server::start(config.clone()).await;
-    // Seafaring seats at most four.
+    // Every scenario seats at most six.
     let mut too_big = Client::connect(server.addr).await;
     too_big
         .send(&ClientMsg::Create {
-            players: 5,
+            players: 7,
             bots: BotLevel::Normal,
             name: "A".into(),
             ranked: false,
             scenario: isle_core::Scenario::Archipelago,
+            rules: Default::default(),
             session: None,
+            is_public: false,
         })
         .await;
     too_big.until(|c| !c.errors.is_empty()).await;
@@ -517,7 +521,9 @@ async fn archipelago_rooms_play_out_and_restore() {
         name: "Ann".into(),
         ranked: false,
         scenario: isle_core::Scenario::Archipelago,
+        rules: Default::default(),
         session: None,
+        is_public: false,
     })
     .await;
     host.until(|c| c.room.is_some()).await;
@@ -556,4 +562,551 @@ async fn archipelago_rooms_play_out_and_restore() {
     );
     server.stop().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn fog_islands_rooms_play_out_and_reveal_tiles() {
+    let dir = temp_dir("fog-islands");
+    let config = ServerConfig {
+        data_dir: Some(dir.clone()),
+        ..fast_config()
+    };
+    let server = Server::start(config.clone()).await;
+    let mut host = Client::connect(server.addr).await;
+    host.send(&ClientMsg::Create {
+        players: 4,
+        bots: BotLevel::Normal,
+        name: "Captain".into(),
+        ranked: false,
+        scenario: isle_core::Scenario::FogIslands,
+        rules: Default::default(),
+        session: None,
+        is_public: false,
+    })
+    .await;
+    host.until(|c| c.room.is_some()).await;
+    assert_eq!(
+        host.room.as_ref().unwrap().scenario,
+        isle_core::Scenario::FogIslands
+    );
+    host.send(&ClientMsg::Start).await;
+    host.until(|c| c.view.is_some()).await;
+    let initial_fog = host
+        .view
+        .as_ref()
+        .unwrap()
+        .fog
+        .as_ref()
+        .expect("fog view present")
+        .terrain
+        .iter()
+        .filter(|&&t| t == isle_core::Terrain::Fog)
+        .count();
+    assert_eq!(initial_fog, 13);
+
+    let end = timeout(Duration::from_secs(120), async move {
+        let mut c = host;
+        let mut acted_at = None;
+        while !c.game_over() {
+            if let Some(legal) = c.legal.clone()
+                && acted_at != Some(legal.version)
+            {
+                let rank = |a: &Action| match a {
+                    Action::BuildCity(_) => 0,
+                    Action::BuildSettlement(_) => 1,
+                    Action::BuildShip(_) => 2,
+                    Action::BuildRoad(_) => 3,
+                    Action::RollDice => 4,
+                    Action::Discard(_) | Action::ChooseGold(_) | Action::MoveRobber { .. } => 5,
+                    Action::RespondTrade { accept: false } => 6,
+                    Action::EndTurn => 7,
+                    _ => 9,
+                };
+                if let Some(action) = legal.actions.iter().copied().min_by_key(rank) {
+                    acted_at = Some(legal.version);
+                    c.send(&ClientMsg::Act {
+                        version: legal.version,
+                        action,
+                    })
+                    .await;
+                }
+            }
+            c.recv().await;
+        }
+        c
+    })
+    .await
+    .expect("finished");
+    let view = end.view.as_ref().unwrap();
+    assert!(view.winner.is_some());
+    let final_fog = view
+        .fog
+        .as_ref()
+        .unwrap()
+        .terrain
+        .iter()
+        .filter(|&&t| t == isle_core::Terrain::Fog)
+        .count();
+    assert!(final_fog < 13, "expected fog tiles to be uncovered, still {final_fog}");
+    server.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn turn_timer_auto_acts_for_idle_connected_player() {
+    let server = Server::start(fast_config()).await;
+    let mut host = Client::connect(server.addr).await;
+    host.send(&ClientMsg::Create {
+        players: 4,
+        bots: BotLevel::Normal,
+        name: "Idle".into(),
+        ranked: false,
+        scenario: isle_core::Scenario::Classic,
+        rules: HouseRules {
+            victory_points: Some(6),
+            friendly_robber: false,
+            paired_turns: false,
+            event_deck: false,
+            turn_timer_secs: 1,
+            custom_map: None,
+        },
+        session: None,
+        is_public: false,
+    })
+    .await;
+    host.until(|c| c.room.is_some()).await;
+    assert_eq!(host.room.as_ref().unwrap().rules.turn_timer_secs, 1);
+
+    host.send(&ClientMsg::Start).await;
+    let mut snapshot_timer = None;
+    while host.view.is_none() {
+        if let ServerMsg::Snapshot(s) = host.recv().await {
+            snapshot_timer = s.turn_remaining_ms;
+        }
+    }
+    assert!(
+        snapshot_timer.is_some_and(|ms| ms > 0 && ms <= 1000),
+        "expected snapshot timer, got {snapshot_timer:?}"
+    );
+
+    // Connected human sits completely idle: within a few seconds the 1s turn
+    // timer should automatically execute their setup actions and advance play.
+    let mut saw_update_timer = false;
+    timeout(Duration::from_secs(6), async {
+        while host.legal.as_ref().unwrap().version < 4 {
+            if let ServerMsg::Update(u) = host.recv().await
+                && u.turn_remaining_ms.is_some()
+            {
+                saw_update_timer = true;
+            }
+        }
+    })
+    .await
+    .expect("idle human turn did not advance automatically");
+    assert!(saw_update_timer);
+
+    // Keep sitting idle until the game finishes on its own.
+    timeout(Duration::from_secs(60), host.until(|c| c.game_over()))
+        .await
+        .expect("timed game did not finish");
+    assert!(host.view.as_ref().unwrap().winner.is_some());
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn house_rules_and_citadels_and_six_player_seafaring_rooms() {
+    let server = Server::start(fast_config()).await;
+
+    // 1. SetRules validation, permissions, and Paired Turns + Friendly Robber.
+    let mut host = Client::create(server.addr, 5, "Host").await;
+    let mut guest = Client::join(server.addr, &host.room_id, "Guest", None).await;
+    guest
+        .send(&ClientMsg::SetRules {
+            rules: HouseRules::default(),
+        })
+        .await;
+    guest.until(|c| c.errors.contains(&"NotHost".into())).await;
+
+    for bad in [
+        HouseRules {
+            victory_points: Some(5),
+            ..Default::default()
+        },
+        HouseRules {
+            victory_points: Some(17),
+            ..Default::default()
+        },
+        HouseRules {
+            turn_timer_secs: 301,
+            ..Default::default()
+        },
+    ] {
+        let prev = host.errors.len();
+        host.send(&ClientMsg::SetRules { rules: bad }).await;
+        host.until(|c| c.errors.len() > prev).await;
+        assert_eq!(host.errors.last().unwrap(), "BadMessage");
+    }
+
+    let custom = HouseRules {
+        victory_points: Some(7),
+        friendly_robber: true,
+        paired_turns: true,
+        event_deck: true,
+        turn_timer_secs: 60,
+        custom_map: None,
+    };
+    host.send(&ClientMsg::SetRules { rules: custom }).await;
+    host.until(|c| c.room.as_ref().unwrap().rules == custom)
+        .await;
+    guest
+        .until(|c| c.room.as_ref().unwrap().rules == custom)
+        .await;
+
+    host.send(&ClientMsg::Start).await;
+    host.until(|c| c.view.is_some()).await;
+    guest.until(|c| c.view.is_some()).await;
+    let prev = host.errors.len();
+    host.send(&ClientMsg::SetRules {
+        rules: HouseRules::default(),
+    })
+    .await;
+    host.until(|c| c.errors.len() > prev).await;
+    assert_eq!(host.errors.last().unwrap(), "AlreadyStarted");
+
+    let (host, _guest) = tokio::join!(
+        timeout(Duration::from_secs(90), play_to_end(host)),
+        timeout(Duration::from_secs(90), play_to_end(guest))
+    );
+    let host = host.expect("paired-turns game timed out");
+    assert!(host.game_over());
+    assert!(
+        host.events
+            .iter()
+            .any(|e| matches!(e, Event::PairedTurnEnded { .. })),
+        "expected PairedTurnEnded events under paired_turns"
+    );
+
+    // 2. 6-player Scenario::Archipelago room playing to completion.
+    let mut sea_host = Client::connect(server.addr).await;
+    sea_host
+        .send(&ClientMsg::Create {
+            players: 6,
+            bots: BotLevel::Normal,
+            name: "Admiral".into(),
+            ranked: false,
+            scenario: isle_core::Scenario::Archipelago,
+            rules: HouseRules {
+                victory_points: Some(8),
+                friendly_robber: true,
+                paired_turns: false,
+                event_deck: false,
+                turn_timer_secs: 0,
+                custom_map: None,
+            },
+            session: None,
+            is_public: false,
+        })
+        .await;
+    sea_host.until(|c| c.room.is_some()).await;
+    sea_host.send(&ClientMsg::Start).await;
+    sea_host.until(|c| c.view.is_some()).await;
+    let sv = sea_host.view.as_ref().unwrap();
+    assert_eq!(
+        (
+            sv.players.len(),
+            sv.buildings.len(),
+            sv.roads.len(),
+            sv.ships.len(),
+        ),
+        (6, 120, 165, 165)
+    );
+    assert!(sv.pirate.is_some());
+    let sea_host = timeout(Duration::from_secs(120), play_to_end(sea_host))
+        .await
+        .expect("6p archipelago timed out");
+    assert!(sea_host.game_over());
+
+    // 3. Scenario::Citadels room playing to completion.
+    let mut cit_host = Client::connect(server.addr).await;
+    cit_host
+        .send(&ClientMsg::Create {
+            players: 4,
+            bots: BotLevel::Normal,
+            name: "Lord".into(),
+            ranked: false,
+            scenario: isle_core::Scenario::Citadels,
+            rules: HouseRules::default(),
+            session: None,
+            is_public: false,
+        })
+        .await;
+    cit_host.until(|c| c.room.is_some()).await;
+    cit_host.send(&ClientMsg::Start).await;
+    cit_host.until(|c| c.view.is_some()).await;
+    {
+        let cv = cit_host.view.as_ref().unwrap();
+        let cit = cv.citadels.as_ref().expect("citadel view present");
+        assert_eq!(cit.barbarian_steps, isle_core::BARBARIAN_STEPS);
+        assert_eq!(cit.commodity_bank.0, [12, 12, 12]);
+        assert_eq!(cv.me.as_ref().unwrap().commodity_trade_ratio, 4);
+    }
+    let cit_host = timeout(Duration::from_secs(120), play_to_end(cit_host))
+        .await
+        .expect("citadels game timed out");
+    assert!(cit_host.game_over());
+    for e in &cit_host.events {
+        if let Event::CommodityStolen {
+            thief,
+            victim,
+            commodity,
+        } = e
+            && *thief != 0
+            && *victim != 0
+        {
+            assert!(commodity.is_none());
+        }
+    }
+
+    // 4. Scenario::Fishermen + event_deck room playing to completion.
+    let mut fish_host = Client::connect(server.addr).await;
+    fish_host
+        .send(&ClientMsg::Create {
+            players: 4,
+            bots: BotLevel::Normal,
+            name: "Angler".into(),
+            ranked: false,
+            scenario: isle_core::Scenario::Fishermen,
+            rules: HouseRules {
+                victory_points: Some(8),
+                friendly_robber: false,
+                paired_turns: false,
+                event_deck: true,
+                turn_timer_secs: 0,
+                custom_map: None,
+            },
+            session: None,
+            is_public: false,
+        })
+        .await;
+    fish_host.until(|c| c.room.is_some()).await;
+    assert!(fish_host.room.as_ref().unwrap().rules.event_deck);
+    fish_host.send(&ClientMsg::Start).await;
+    fish_host.until(|c| c.view.is_some()).await;
+    assert_eq!(
+        fish_host.view.as_ref().unwrap().dice_deck_left,
+        Some(isle_core::DICE_DECK_SIZE as u8)
+    );
+    let fish_host = timeout(Duration::from_secs(120), play_to_end(fish_host))
+        .await
+        .expect("fishermen game timed out");
+    assert!(fish_host.game_over());
+    assert!(
+        fish_host
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::FishCaught { .. })),
+        "expected FishCaught events in Fishermen room"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn public_rooms_directory_kick_swap_rematch_and_custom_map() {
+    use isle_core::{Board, BoardLayout, CustomMap, Rng, Scenario, Terrain};
+    use isle_proto::net::PublicRoomSummary;
+
+    fn assert_copy<T: Copy>() {}
+    assert_copy::<HouseRules>();
+
+    let server = Server::start(fast_config()).await;
+
+    // Empty initially.
+    let (status, body) = http_get(server.addr, "/api/rooms").await;
+    assert!(status.contains("200"), "{status}");
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert!(list.is_empty());
+
+    // Private room is hidden from `/api/rooms`.
+    let mut priv_host = Client::create(server.addr, 3, "Hidden").await;
+    assert!(!priv_host.room.as_ref().unwrap().is_public);
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    assert!(serde_json::from_str::<Vec<PublicRoomSummary>>(&body)
+        .unwrap()
+        .is_empty());
+
+    // Custom map room created with `is_public: true`.
+    let mut cm = CustomMap::from_board(&Board::generate(&mut Rng::new(77), BoardLayout::Base, true));
+    cm.terrain[0] = Terrain::Desert;
+    cm.numbers[0] = 0;
+    cm.terrain[1] = Terrain::Gold;
+    cm.numbers[1] = 6;
+
+    // Layout mismatch (5 players -> Extended, but `cm` is Base) is rejected on Create.
+    let mut bad_create = Client::connect(server.addr).await;
+    bad_create
+        .send(&ClientMsg::Create {
+            players: 5,
+            bots: BotLevel::Normal,
+            name: "Bad".into(),
+            ranked: false,
+            scenario: Scenario::Classic,
+            rules: HouseRules {
+                custom_map: Some(cm),
+                ..Default::default()
+            },
+            session: None,
+            is_public: true,
+        })
+        .await;
+    bad_create.until(|c| !c.errors.is_empty()).await;
+    assert_eq!(bad_create.errors, ["BadMessage"]);
+
+    let mut host = Client::connect(server.addr).await;
+    host.send(&ClientMsg::Create {
+        players: 4,
+        bots: BotLevel::Normal,
+        name: "Captain".into(),
+        ranked: false,
+        scenario: Scenario::Classic,
+        rules: HouseRules {
+            victory_points: Some(6),
+            friendly_robber: false,
+            paired_turns: false,
+            event_deck: false,
+            turn_timer_secs: 0,
+            custom_map: Some(cm),
+        },
+        session: None,
+        is_public: true,
+    })
+    .await;
+    host.until(|c| c.room.is_some()).await;
+    assert!(host.room.as_ref().unwrap().is_public);
+    assert_eq!(host.room.as_ref().unwrap().rules.custom_map, Some(cm));
+
+    let mut guest = Client::join(server.addr, &host.room_id, "Mate", None).await;
+    assert_eq!(guest.seat, Some(1));
+    host.until(|c| matches!(c.room.as_ref().unwrap().seats[1], SeatView::Human { .. }))
+        .await;
+
+    // Directory shows 1 public room with humans=2, started=false, hasCustomMap=true.
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, host.room_id);
+    assert_eq!(list[0].host_name, "Captain");
+    assert_eq!((list[0].humans, list[0].max_players), (2, 4));
+    assert!(!list[0].started);
+    assert!(list[0].has_custom_map);
+
+    // Non-host cannot SetPublic, SwapSeats, or KickSeat.
+    for msg in [
+        ClientMsg::SetPublic { is_public: false },
+        ClientMsg::SwapSeats { a: 0, b: 1 },
+        ClientMsg::KickSeat { seat: 0 },
+    ] {
+        let prev = guest.errors.len();
+        guest.send(&msg).await;
+        guest.until(|c| c.errors.len() > prev).await;
+        assert_eq!(guest.errors.last().unwrap(), "NotHost");
+    }
+
+    // SwapSeats: host swaps seat 0 (Captain) and seat 2 (Open) -> host moves to seat 2!
+    host.send(&ClientMsg::SwapSeats { a: 0, b: 2 }).await;
+    host.until(|c| c.seat == Some(2) && c.room.as_ref().unwrap().host == 2)
+        .await;
+    guest.until(|c| c.room.as_ref().unwrap().host == 2).await;
+    assert_eq!(host.room.as_ref().unwrap().you, Some(2));
+    assert_eq!(host.room.as_ref().unwrap().seats[0], SeatView::Open);
+
+    // SwapSeats between two humans: seat 2 (Captain) and seat 1 (Mate).
+    host.send(&ClientMsg::SwapSeats { a: 2, b: 1 }).await;
+    host.until(|c| c.seat == Some(1) && c.room.as_ref().unwrap().host == 1)
+        .await;
+    guest
+        .until(|c| c.seat == Some(2) && c.room.as_ref().unwrap().you == Some(2))
+        .await;
+
+    // KickSeat: host (at seat 1) kicks guest (at seat 2) -> guest becomes spectator with `Kicked`.
+    host.send(&ClientMsg::KickSeat { seat: 2 }).await;
+    guest
+        .until(|c| c.seat.is_none() && c.errors.contains(&"Kicked".into()))
+        .await;
+    host.until(|c| {
+        let r = c.room.as_ref().unwrap();
+        r.seats[2] == SeatView::Open && r.spectators == 1
+    })
+    .await;
+    assert!(guest.token.is_none());
+
+    // Toggle private room to public so we can test sorting (`!started` before `started`).
+    priv_host.send(&ClientMsg::SetPublic { is_public: true }).await;
+    priv_host.until(|c| c.room.as_ref().unwrap().is_public).await;
+
+    // Start the custom-map room -> now `priv_host` (!started) sorts before `host` (started).
+    host.send(&ClientMsg::Start).await;
+    host.until(|c| c.view.is_some()).await;
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].id, priv_host.room_id);
+    assert!(!list[0].started);
+    assert_eq!(list[1].id, host.room_id);
+    assert!(list[1].started);
+    assert_eq!(list[1].spectators, 1);
+
+    // SetPublic works in-game too.
+    host.send(&ClientMsg::SetPublic { is_public: false }).await;
+    host.until(|c| !c.room.as_ref().unwrap().is_public).await;
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert_eq!(list.len(), 1);
+    host.send(&ClientMsg::SetPublic { is_public: true }).await;
+    host.until(|c| c.room.as_ref().unwrap().is_public).await;
+
+    // Rematch before game over is rejected with `NotFinished`.
+    let prev = host.errors.len();
+    host.send(&ClientMsg::Rematch { immediate: false }).await;
+    host.until(|c| c.errors.len() > prev).await;
+    assert_eq!(host.errors.last().unwrap(), "NotFinished");
+
+    // Play game 1 to completion; finished room disappears from `/api/rooms`.
+    let mut host = timeout(Duration::from_secs(60), play_to_end(host))
+        .await
+        .expect("custom map game 1 timed out");
+    host.until(|c| c.room.as_ref().unwrap().replay.is_some())
+        .await;
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert!(list.iter().all(|r| r.id != host.room_id));
+
+    // Rematch (immediate: true) starts game 2 right away with fresh snapshot.
+    host.view = None;
+    host.send(&ClientMsg::Rematch { immediate: true }).await;
+    host.until(|c| c.view.as_ref().is_some_and(|v| v.winner.is_none()))
+        .await;
+    assert!(host.room.as_ref().unwrap().started);
+    assert!(host.room.as_ref().unwrap().replay.is_none());
+
+    // Play game 2 to completion, then Rematch (immediate: false) returns to lobby!
+    let mut host = timeout(Duration::from_secs(60), play_to_end(host))
+        .await
+        .expect("custom map game 2 timed out");
+    host.until(|c| c.room.as_ref().unwrap().replay.is_some())
+        .await;
+
+    host.send(&ClientMsg::Rematch { immediate: false }).await;
+    host.until(|c| !c.room.as_ref().unwrap().started).await;
+    let r = host.room.as_ref().unwrap();
+    assert!(r.replay.is_none());
+    assert_eq!(r.seats[0], SeatView::Open);
+    assert!(matches!(r.seats[1], SeatView::Human { .. }));
+
+    // Back in `/api/rooms` as `!started`!
+    let (_, body) = http_get(server.addr, "/api/rooms").await;
+    let list: Vec<PublicRoomSummary> = serde_json::from_str(&body).unwrap();
+    assert!(list.iter().any(|s| s.id == host.room_id && !s.started));
+
+    server.stop().await;
 }

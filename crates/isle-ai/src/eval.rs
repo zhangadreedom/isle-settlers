@@ -3,7 +3,7 @@
 
 use isle_core::board::PIPS;
 use isle_core::topology::{NONE, vertices_in};
-use isle_core::{DevCard, GameState, MAX_PLAYERS, Terrain};
+use isle_core::{BARBARIAN_STEPS, CityTrack, DevCard, GameState, MAX_PLAYERS, Terrain};
 
 /// Tunable weights of the evaluation.
 #[derive(Clone, Copy, Debug)]
@@ -88,10 +88,80 @@ pub fn income(s: &GameState, q: u8) -> [f32; 5] {
     out
 }
 
+/// Expected commodities per dice roll for seat `q` in Citadels mode.
+pub fn commodity_income(s: &GameState, q: u8) -> [f32; 3] {
+    let mut out = [0.0; 3];
+    for v in vertices_in(s.cities[q as usize]) {
+        for &t in &s.topo().vertex_tiles[v as usize] {
+            if t == NONE {
+                break;
+            }
+            if let Some(c) = s.board.terrain[t as usize].commodity() {
+                let pips = PIPS[s.board.numbers[t as usize] as usize] as f32;
+                let robbed = if t == s.robber { 0.35 } else { 1.0 };
+                out[c.index()] += pips / 36.0 * robbed;
+            }
+        }
+    }
+    out
+}
+
+/// Expected fish tokens caught per dice roll for seat `q` in Fishermen mode.
+pub fn fish_income(s: &GameState, q: u8) -> f32 {
+    let topo = s.topo();
+    let mut out = 0.0f32;
+    for fg in s.board.active_fishing_grounds() {
+        let pips = PIPS[fg.number as usize] as f32;
+        for v in topo.edge_vertices[fg.edge as usize] {
+            if s.settlements[q as usize].contains(v) {
+                out += pips / 36.0;
+            } else if s.cities[q as usize].contains(v) {
+                out += 2.0 * pips / 36.0;
+            }
+        }
+    }
+    if s.board.desert != NONE {
+        let lake_pips = if s.robber == s.board.desert { 1.1 } else { 2.0 };
+        let tv = topo.tile_vertex_mask[s.board.desert as usize];
+        let s_cnt = (s.settlements[q as usize] & tv).count_ones() as f32;
+        let c_cnt = (s.cities[q as usize] & tv).count_ones() as f32;
+        out += (s_cnt + 2.0 * c_cnt) * (lake_pips / 36.0);
+    }
+    out
+}
+
 /// Position strength of every seat, in victory-point units.
 pub fn scores(s: &GameState, w: &Weights, out: &mut [f32; MAX_PLAYERS]) {
     let n = s.num_players();
     let scarce = crate::greedy::scarcity(s);
+    let citadels = s.config.scenario.is_citadels();
+    let (cities_total, defense_total, min_vuln_str, max_str, max_count, urgency) = if citadels {
+        let mut c_tot = 0u8;
+        let mut d_tot = 0u8;
+        let mut min_v: Option<u8> = None;
+        let mut max_s = 0u8;
+        let mut max_c = 0usize;
+        for q in 0..n as u8 {
+            let vuln = s.non_metropolis_cities(q).count_ones() as u8;
+            let st = s.active_knight_strength(q);
+            c_tot += vuln;
+            d_tot += st;
+            if vuln > 0 {
+                min_v = Some(min_v.map_or(st, |m| m.min(st)));
+            }
+            if st > max_s {
+                max_s = st;
+                max_c = 1;
+            } else if st == max_s {
+                max_c += 1;
+            }
+        }
+        let urg = 0.4 + 0.6 * (s.barbarian_pos as f32 / BARBARIAN_STEPS as f32);
+        (c_tot, d_tot, min_v, max_s, max_c, urg)
+    } else {
+        (0, 0, None, 0, 0, 0.0)
+    };
+
     for q in 0..n as u8 {
         let ps = &s.players[q as usize];
         let mut score = s.victory_points(q) as f32;
@@ -118,10 +188,10 @@ pub fn scores(s: &GameState, w: &Weights, out: &mut [f32; MAX_PLAYERS]) {
             use isle_core::resources::cost;
             let near = |price| 1.0 / (1.0 + crate::greedy::missing(ps.hand, price) as f32);
             let mut potential = 0.0;
-            if ps.cities_left > 0 && s.settlements[q as usize] != 0 {
+            if ps.cities_left > 0 && !s.settlements[q as usize].is_empty() {
                 potential += near(cost::CITY);
             }
-            if ps.settlements_left > 0 && s.settlement_spots(q, true) != 0 {
+            if ps.settlements_left > 0 && !s.settlement_spots(q, true).is_empty() {
                 potential += near(cost::SETTLEMENT);
             }
             if s.dev_deck_len > 0 {
@@ -130,7 +200,11 @@ pub fn scores(s: &GameState, w: &Weights, out: &mut [f32; MAX_PLAYERS]) {
             score += w.build * potential;
         }
 
-        let cards = ps.hand.total() as f32;
+        let cards = if citadels {
+            ps.total_cards() as f32
+        } else {
+            ps.hand.total() as f32
+        };
         score += w.hand * cards.min(7.0) - w.overflow * (cards - 7.0).max(0.0);
 
         let vp_cards = ps.dev_cards[DevCard::VictoryPoint.index()] as f32;
@@ -144,6 +218,77 @@ pub fn scores(s: &GameState, w: &Weights, out: &mut [f32; MAX_PLAYERS]) {
         if w.sea != 0.0 && s.board.layout.island_bonus() > 0 {
             score += w.sea * crate::sea::island_progress(s, q);
         }
+
+        if s.config.scenario.is_fishermen() {
+            score += w.income * 0.42 * fish_income(s, q);
+            score += 0.09 * ps.fish as f32;
+            if s.old_boot_owner == Some(q) {
+                score -= 0.85;
+            }
+        }
+
+        if citadels {
+            let cinc = commodity_income(s, q);
+            let csum: f32 = cinc.iter().sum();
+            let ckinds = cinc.iter().filter(|&&x| x > 0.0).count() as f32;
+            score += 2.0 * csum + 0.2 * ckinds;
+
+            let has_city = !s.cities[q as usize].is_empty();
+            for track in CityTrack::ALL {
+                let lvl = ps.city_progress[track.index()];
+                score += match lvl {
+                    0 => 0.0,
+                    1 => 0.15,
+                    2 => 0.35,
+                    3 => {
+                        if track == CityTrack::Science {
+                            1.1
+                        } else {
+                            0.85
+                        }
+                    }
+                    4 => 1.05,
+                    _ => 1.25,
+                };
+                if has_city && lvl < 5 {
+                    let next = lvl + 1;
+                    let have = ps.commodities[track.commodity()].min(next) as f32;
+                    let frac = have / next as f32;
+                    let weight = if s.upgrade_claims_metropolis(q, track) {
+                        0.65
+                    } else if next == 3 {
+                        0.4
+                    } else {
+                        0.2
+                    };
+                    score += weight * frac;
+                }
+            }
+
+            let active_str = s.active_knight_strength(q);
+            let inactive_lvl: u8 = vertices_in(s.knights_of(q) & !s.knight_active)
+                .map(|v| s.knight_level[v as usize])
+                .sum();
+            score += 0.18 * active_str.min(6) as f32 + 0.08 * inactive_lvl.min(4) as f32;
+
+            if cities_total > 0 {
+                if defense_total >= cities_total && max_str > 0 && active_str == max_str {
+                    score += if max_count == 1 {
+                        0.6 * urgency
+                    } else {
+                        0.2 * urgency
+                    };
+                }
+                if !s.non_metropolis_cities(q).is_empty() && min_vuln_str == Some(active_str) {
+                    if defense_total < cities_total {
+                        score -= 0.9 * urgency;
+                    } else if active_str == 0 {
+                        score -= 0.25 * urgency;
+                    }
+                }
+            }
+        }
+
         out[q as usize] = score;
     }
 }
@@ -209,5 +354,47 @@ mod tests {
         let mut r = [0.0; MAX_PLAYERS];
         rewards(&g, &Weights::default(), &mut r);
         assert_eq!(r[..4], [0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn citadels_scores_tracks_defense_and_total_card_overflow() {
+        use isle_core::{Commodity, Scenario};
+
+        let mut g = GameState::new(GameConfig::scenario(Scenario::Citadels, 4), 11).unwrap();
+        let mut legal = Vec::new();
+        while g.is_setup() {
+            let p = g.current;
+            g.legal_actions(p, &mut legal);
+            g.apply(p, legal[0]).unwrap();
+        }
+        let w = Weights::default();
+        let mut base = [0.0; MAX_PLAYERS];
+        scores(&g, &w, &mut base);
+
+        // Unlocking Science Lv3 + defending with an active knight boosts seat 0.
+        let mut defended = g;
+        defended.players[0].city_progress[CityTrack::Science.index()] = 3;
+        let kv = vertices_in(defended.knight_recruit_spots(0)).next().unwrap();
+        defended.knight_owner[kv as usize] = 0;
+        defended.knight_level[kv as usize] = 2;
+        defended.players[0].knights_left[1] -= 1;
+        defended.knight_active.insert(kv);
+        defended.barbarian_pos = 6;
+        let mut after = [0.0; MAX_PLAYERS];
+        scores(&defended, &w, &mut after);
+        assert!(after[0] > base[0] + 1.0);
+
+        // Holding 6 resources + 5 commodities = 11 total cards incurs the >7 overflow penalty.
+        let mut safe = g;
+        safe.players[0].city_progress = [5, 5, 5];
+        safe.players[0].commodities[Commodity::Paper] = 1;
+        let mut bloated = safe;
+        bloated.players[0].commodities[Commodity::Paper] = 9;
+        bloated.commodity_bank[Commodity::Paper] -= 8;
+        let (mut s_safe, mut s_bloated) = ([0.0; MAX_PLAYERS], [0.0; MAX_PLAYERS]);
+        scores(&safe, &w, &mut s_safe);
+        scores(&bloated, &w, &mut s_bloated);
+        let hand_cap_gain = w.hand * (7.0 - safe.players[0].total_cards().min(7) as f32);
+        assert!(s_bloated[0] < s_safe[0] + hand_cap_gain);
     }
 }

@@ -22,10 +22,11 @@ const EMBED = process.env.E2E_EMBED === '1';
 const URL = (process.env.E2E_URL || 'http://localhost:4173/') + (EMBED ? '?debug' : '?debug&renderer=webgl');
 const BUILD_ONLY = !!process.env.BUILD_ONLY;
 const PLAYERS = Number(process.env.E2E_PLAYERS || 4);
-// E2E_SCENARIO=archipelago plays the seafaring map: ships (built, moved,
-// chosen over roads on coasts), gold picks and the pirate.
-const SEA = process.env.E2E_SCENARIO === 'archipelago';
-const P = (BUILD_ONLY ? 'b-' : '') + (SEA ? 'sea-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
+const SCENARIO = process.env.E2E_SCENARIO || 'classic';
+// E2E_SCENARIO=archipelago|fog plays a seafaring map: ships, gold picks, pirate and (on fog) discovery.
+const FOG = SCENARIO === 'fog';
+const SEA = SCENARIO === 'archipelago' || FOG;
+const P = (BUILD_ONLY ? 'b-' : '') + (FOG ? 'fog-' : SEA ? 'sea-' : '') + (PLAYERS !== 4 ? `${PLAYERS}p-` : '');
 
 (async () => {
   const browser = await chromium.launch();
@@ -43,7 +44,8 @@ const P = (BUILD_ONLY ? 'b-' : '') + (SEA ? 'sea-' : '') + (PLAYERS !== 4 ? `${P
     throw new Error('embedded lobby exposes online play');
   }
   await page.waitForFunction(() => !document.querySelector('.lobby button.primary')?.disabled);
-  if (SEA) await page.click('.seg >> text=航海 · 群岛');
+  if (FOG) await page.click('.seg >> text=航海 · 迷雾');
+  else if (SEA) await page.click('.seg >> text=航海 · 群岛');
   await page.click(`.seg >> text=${PLAYERS} 人`);
   await page.waitForTimeout(300);
   await page.screenshot({ path: `${OUT}/p1-${P}lobby.png` });
@@ -354,9 +356,11 @@ const P = (BUILD_ONLY ? 'b-' : '') + (SEA ? 'sea-' : '') + (PLAYERS !== 4 ? `${P
   if (SEA) {
     const sea = await page.evaluate(() => {
       const v = window.__isle.game().view();
-      return { ships: v.ships.filter((s) => s !== 255).length, islands: v.players.map((p) => p.islands), pirate: v.pirate };
+      const fogLeft = v.fog ? v.fog.terrain.filter((t) => t === 'Fog').length : null;
+      return { ships: v.ships.filter((s) => s !== 255).length, islands: v.players.map((p) => p.islands), pirate: v.pirate, fogLeft };
     });
     console.log('sea:', JSON.stringify(sea));
+    if (FOG && sea.fogLeft === 13) errors.push('no fog tiles were uncovered during the match');
   }
 
   // ---- replay ----
@@ -388,10 +392,16 @@ const P = (BUILD_ONLY ? 'b-' : '') + (SEA ? 'sea-' : '') + (PLAYERS !== 4 ? `${P
   await page.waitForTimeout(1500);
   const played = await page.evaluate(() => window.__isle.game().replay.position());
   if (played <= mid.pos) errors.push(`replay did not advance (${mid.pos} -> ${played})`);
+  await page.evaluate((n) => window.__isle.game().replay.seek(0), total);
+  if (FOG) {
+    const startFog = await page.evaluate(() => window.__isle.game().view().fog?.terrain.filter((t) => t === 'Fog').length ?? -1);
+    if (startFog !== 13) errors.push(`replay seek(0) expected 13 fog tiles, got ${startFog}`);
+  }
   await page.evaluate((n) => window.__isle.game().replay.seek(n), total);
   await page.waitForTimeout(300);
   const end = await page.evaluate(() => window.__isle.game().view());
   if (end.winner !== final.view.winner || JSON.stringify(end.buildings) !== JSON.stringify(final.view.buildings)) errors.push('replay end state differs from the game');
+  if (FOG && JSON.stringify(end.fog) !== JSON.stringify(final.view.fog)) errors.push('replay end fog state differs from the game');
   console.log('replay:', total, 'actions; seek/perspective/play ok');
 
   // Load the downloaded file from the lobby.

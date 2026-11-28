@@ -1,13 +1,22 @@
 import { For, type JSX } from 'solid-js';
 import type { ResourceSet } from '../generated/proto';
 import { PLAYER_CSS } from '../board/palette';
-import { RESOURCES, RESOURCE_CSS, RESOURCE_NAME, RESOURCE_SHORT } from '../game/text';
+import { COMMODITIES, COMMODITY_CSS, COMMODITY_NAME, COMMODITY_SHORT, RESOURCES, RESOURCE_CSS, RESOURCE_NAME, RESOURCE_SHORT } from '../game/text';
 
 /** A small resource tile, e.g. for costs and trade pickers. */
 export function ResIcon(props: { r: number; size?: 'sm' | 'md' | 'lg' }) {
   return (
     <span class={`res res-${props.size ?? 'sm'}`} style={{ '--c': RESOURCE_CSS[props.r] }} title={RESOURCE_NAME[RESOURCES[props.r]]}>
       {RESOURCE_SHORT[RESOURCES[props.r]]}
+    </span>
+  );
+}
+
+/** A small commodity tile (Paper, Cloth, Coin). */
+export function CommIcon(props: { c: number; size?: 'sm' | 'md' | 'lg' }) {
+  return (
+    <span class={`res res-${props.size ?? 'sm'}`} style={{ '--c': COMMODITY_CSS[props.c] }} title={COMMODITY_NAME[COMMODITIES[props.c]]}>
+      {COMMODITY_SHORT[COMMODITIES[props.c]]}
     </span>
   );
 }

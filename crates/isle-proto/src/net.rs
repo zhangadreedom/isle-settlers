@@ -69,6 +69,63 @@ pub enum SeatView {
     },
 }
 
+/// Optional DIY house rules and per-action turn timer for a room.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct HouseRules {
+    /// Custom victory point target (`None` = scenario default, else `6..=16`).
+    #[serde(default)]
+    pub victory_points: Option<u8>,
+    #[serde(default)]
+    pub friendly_robber: bool,
+    #[serde(default)]
+    pub paired_turns: bool,
+    /// Balanced 36-card dice deck (reshuffled with 5 cards left).
+    #[serde(default)]
+    pub event_deck: bool,
+    /// Per-action turn timer in seconds (`0` = disabled, else `1..=300`).
+    #[serde(default)]
+    pub turn_timer_secs: u16,
+    /// Optional custom map (`IM1:...`), overriding procedural board generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub custom_map: Option<isle_core::CustomMap>,
+}
+
+impl HouseRules {
+    pub fn is_valid(&self) -> bool {
+        self.victory_points.is_none_or(|vp| (6..=16).contains(&vp))
+            && self.turn_timer_secs <= 300
+            && self
+                .custom_map
+                .is_none_or(|cm| isle_core::Board::from_custom(&cm).is_ok())
+    }
+
+    pub fn is_valid_for(&self, scenario: Scenario, players: u8) -> bool {
+        self.is_valid()
+            && self.custom_map.is_none_or(|cm| {
+                cm.layout == isle_core::GameConfig::scenario(scenario, players).layout()
+            })
+    }
+}
+
+/// Summary of an active public room in `/api/rooms`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct PublicRoomSummary {
+    pub id: String,
+    pub host_name: String,
+    pub scenario: Scenario,
+    pub humans: u8,
+    pub max_players: u8,
+    pub spectators: u32,
+    pub ranked: bool,
+    pub started: bool,
+    pub has_custom_map: bool,
+}
+
 /// Room membership and lobby state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -90,6 +147,10 @@ pub struct RoomInfo {
     /// Rating changes once a ranked game is over and rated.
     pub rating: Vec<RatingChange>,
     pub scenario: Scenario,
+    #[serde(default)]
+    pub rules: HouseRules,
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 /// Legal actions for the receiving seat, tagged with the state version they
@@ -110,6 +171,9 @@ pub struct Snapshot {
     pub legal: LegalActions,
     /// Recent events (redacted for this seat), oldest first.
     pub log: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "turnRemainingMs")]
+    pub turn_remaining_ms: Option<u32>,
 }
 
 /// State after an action.
@@ -120,6 +184,9 @@ pub struct Update {
     pub legal: LegalActions,
     /// What happened (redacted for this seat).
     pub events: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "turnRemainingMs")]
+    pub turn_remaining_ms: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,12 +214,18 @@ pub enum ClientMsg {
         /// Ranked room (see [`RoomInfo::ranked`]).
         #[serde(default)]
         ranked: bool,
-        /// Classic or a seafaring map (2–4 seats); absent means classic.
+        /// Classic, a seafaring map or Citadels (2–6 seats); absent means classic.
         #[serde(default)]
         scenario: Scenario,
         #[serde(default)]
+        rules: HouseRules,
+        #[serde(default)]
         #[cfg_attr(feature = "ts", ts(optional = nullable))]
         session: Option<String>,
+        /// Whether this room is listed in the public lobby directory (`/api/rooms`).
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional, as = "Option<bool>"))]
+        is_public: bool,
     },
     /// First message: join a room. With the token from an earlier `Joined`
     /// you get your seat back; otherwise you take a free seat in the lobby
@@ -181,6 +254,27 @@ pub enum ClientMsg {
     SetRanked {
         ranked: bool,
     },
+    /// Host only, before the start: update DIY house rules and turn timer.
+    SetRules {
+        rules: HouseRules,
+    },
+    /// Host only, before start or in-game: show or hide the room in `/api/rooms`.
+    SetPublic {
+        is_public: bool,
+    },
+    /// Host only, before the start: remove a human from `seat`, demoting them to spectator.
+    KickSeat {
+        seat: u8,
+    },
+    /// Host only, before the start: swap seats `a` and `b`.
+    SwapSeats {
+        a: u8,
+        b: u8,
+    },
+    /// Host only, once the game is finished: return to lobby (`!immediate`) or start a new game immediately.
+    Rematch {
+        immediate: bool,
+    },
     /// Host only: start the game. Open seats are filled with bots.
     Start,
     Chat {
@@ -204,10 +298,11 @@ pub enum ServerMsg {
     Update(Update),
     Chat(ChatLine),
     /// `code` is a `RuleError` name or one of: `BadMessage`, `RoomNotFound`,
-    /// `TooManyRooms`, `NotHost`, `AlreadyStarted`, `NotStarted`, `Spectator`,
-    /// `Stale`, `RateLimited`, `InvalidSeat`, `SessionExpired` (the account
-    /// session sent with `Create` / `Join` is unknown, expired or revoked),
-    /// `AccountsDisabled`, `ServerError` (temporary, retry).
+    /// `TooManyRooms`, `NotHost`, `AlreadyStarted`, `NotStarted`, `NotFinished`,
+    /// `Spectator`, `Kicked`, `Stale`, `RateLimited`, `InvalidSeat`,
+    /// `SessionExpired` (the account session sent with `Create` / `Join` is
+    /// unknown, expired or revoked), `AccountsDisabled`, `ServerError`
+    /// (temporary, retry).
     Error {
         code: String,
     },
@@ -267,7 +362,16 @@ mod tests {
                 name: "A".into(),
                 ranked: true,
                 scenario: Scenario::Archipelago,
+                rules: HouseRules {
+                    victory_points: Some(12),
+                    friendly_robber: true,
+                    paired_turns: false,
+                    event_deck: true,
+                    turn_timer_secs: 45,
+                    custom_map: None,
+                },
                 session: Some("ab".repeat(32)),
+                is_public: true,
             },
             ClientMsg::Join {
                 room: "ABCD".into(),
@@ -284,6 +388,20 @@ mod tests {
                 bot: Some(BotLevel::Easy),
             },
             ClientMsg::SetRanked { ranked: false },
+            ClientMsg::SetRules {
+                rules: HouseRules {
+                    victory_points: Some(8),
+                    friendly_robber: false,
+                    paired_turns: true,
+                    event_deck: false,
+                    turn_timer_secs: 60,
+                    custom_map: None,
+                },
+            },
+            ClientMsg::SetPublic { is_public: true },
+            ClientMsg::KickSeat { seat: 1 },
+            ClientMsg::SwapSeats { a: 0, b: 2 },
+            ClientMsg::Rematch { immediate: false },
             ClientMsg::Start,
         ];
         for m in msgs {

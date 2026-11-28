@@ -13,7 +13,39 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CITY_FLAG, EMPTY, type Topology } from '../engine';
-import { BEACH, PLAYER_COLORS, RESOURCE_COLORS, RESOURCE_LABELS, SEA, SKY, TERRAIN_COLORS } from './palette';
+import {
+  BEACH,
+  METROPOLIS_COLORS,
+  PLAYER_COLORS,
+  RESOURCE_COLORS,
+  RESOURCE_LABELS,
+  SEA,
+  SKY,
+  TERRAIN_COLORS,
+  THEME_CONFIGS,
+} from './palette';
+
+export type BoardTheme = 'day' | 'sunset' | 'night';
+
+const THEME_STORAGE_KEY = 'isle.theme';
+
+export function readSavedTheme(): BoardTheme {
+  try {
+    const raw = localStorage.getItem(THEME_STORAGE_KEY);
+    if (raw === 'day' || raw === 'sunset' || raw === 'night') return raw;
+  } catch {
+    // Ignore storage access errors (private browsing / non-browser host).
+  }
+  return 'day';
+}
+
+export function saveTheme(t: BoardTheme): void {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, t);
+  } catch {
+    // Ignore storage access errors.
+  }
+}
 
 /** Static layout as numeric codes (see palette for terrain/harbor codes). */
 export interface BoardData {
@@ -22,6 +54,15 @@ export interface BoardData {
   harbors: number[];
   /** Island per tile: 0 for the sea, 1.. for land. */
   islands: number[];
+  /** Fishermen mode: coastal fishing grounds with edge id and roll number. */
+  fishingGrounds?: { edge: number; number: number }[];
+}
+
+export interface KnightData {
+  vertex: number;
+  owner: number;
+  level: number;
+  active: boolean;
 }
 
 export interface PieceData {
@@ -32,10 +73,25 @@ export interface PieceData {
   robber: number;
   /** Seafaring: the pirate's sea tile. */
   pirate?: number | null;
+  /** Citadels: knights on vertices. */
+  knights?: KnightData[];
+  /** Citadels: metropolis vertex per CityTrack (`null` if unclaimed). */
+  metropolises?: (number | null)[];
+  /** Citadels: barbarian fleet progress (0..barbarianSteps), null/undefined when not in Citadels. */
+  barbarianPos?: number | null;
+  barbarianSteps?: number;
+}
+
+export interface TileHover {
+  tile: number;
+  clientX: number;
+  clientY: number;
 }
 
 /** Terrain code of the sea (see palette). */
 const SEA_TERRAIN = 6;
+/** Terrain code of unexplored fog (see palette). */
+const FOG_TERRAIN = 8;
 /** Height of ships and the pirate above the water plane. */
 const WATER = -0.06;
 
@@ -68,19 +124,18 @@ const PIPS = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
 /** Margin (world units) kept visible around the outermost tile centres: tiles plus harbor labels. */
 const MARGIN_X = 1.74;
 const MARGIN_Z = 1.42;
-/** Instance capacity for per-spot meshes; covers the largest board. */
-const MAX_SPOTS = 128;
+/** Instance capacity for per-spot meshes; covers 5–6 player seafaring boards (165 edges). */
+const MAX_SPOTS = 192;
 /** Beach outline: distance from the outermost tile centres at the top and the foot of the sand. */
 const BEACH_TOP = 1.55;
 const BEACH_FOOT = 1.94;
-/** Seafaring islands get a narrower beach so straits stay open water. */
-const ISLAND_BEACH_TOP = 1.2;
-const ISLAND_BEACH_FOOT = 1.44;
 const CAMERA_DIR = new THREE.Vector3(0, 10.5, 8.5).normalize();
 const DROP_MS = 420;
 const ROBBER_MS = 550;
+const BARBARIAN_PULSE_MS = 2100;
 /** Pick radius (world units) per target kind. */
 const PICK_RADIUS: Record<PickKind, number> = { vertex: 0.38, edge: 0.32, tile: 0.9 };
+const TILE_HOVER_RADIUS = 0.98;
 const ACCENT = 0xf0b429;
 
 const lattice = (x: number, y: number): [number, number] => [x * SQRT3_2, y * 0.5];
@@ -198,6 +253,27 @@ const cityGeometry = mergeGeometries([
   prism(0.25, 0.12, 0.28).translate(-0.12, 0.36, 0),
 ])!;
 
+/** Citadels: armored knight figure on a hexagonal plinth. */
+const knightGeometry = mergeGeometries([
+  new THREE.CylinderGeometry(0.15, 0.17, 0.07, 6).translate(0, 0.035, 0).toNonIndexed(),
+  new THREE.CylinderGeometry(0.085, 0.12, 0.22, 6).translate(0, 0.18, 0).toNonIndexed(),
+  new THREE.SphereGeometry(0.085, 8, 6).translate(0, 0.33, 0).toNonIndexed(),
+  box(0.04, 0.11, 0.14, 0, 0.4, 0),
+])!;
+
+/** Golden banner/halo marking an active knight. */
+const knightBannerGeometry = mergeGeometries([
+  new THREE.RingGeometry(0.18, 0.24, 6, 1, Math.PI / 6).rotateX(-Math.PI / 2).translate(0, 0.015, 0).toNonIndexed(),
+  new THREE.OctahedronGeometry(0.065, 0).translate(0, 0.52, 0).toNonIndexed(),
+])!;
+
+/** Citadels: golden arch spire crowning a Metropolis city. */
+const metropolisGeometry = mergeGeometries([
+  box(0.48, 0.06, 0.32, 0, 0.42, 0),
+  new THREE.ConeGeometry(0.14, 0.32, 6).translate(-0.12, 0.61, 0).toNonIndexed(),
+  new THREE.OctahedronGeometry(0.07, 0).translate(0.11, 0.52, 0).toNonIndexed(),
+])!;
+
 const roadGeometry = new THREE.BoxGeometry(0.64, 0.09, 0.12);
 /** Flat triangle pointing +x (a bow), `length` long, `width` wide, `thickness` high. */
 function bow(width: number, length: number, thickness: number) {
@@ -223,12 +299,46 @@ const pirateHull = mergeGeometries([
   mast(0.013, 0.36, -0.1, 0.3),
 ])!;
 const pirateSails = mergeGeometries([box(0.025, 0.3, 0.28, 0.1, 0.4, 0), box(0.022, 0.2, 0.2, -0.08, 0.32, 0)])!;
+/** Citadels: menacing black-sail barbarian warship approaching from the outer sea. */
+const barbarianHull = mergeGeometries([
+  box(0.74, 0.14, 0.28, 0, 0.07, 0),
+  bow(0.28, 0.22, 0.14).translate(0.37, 0.07, 0),
+  box(0.05, 0.24, 0.05, 0.46, 0.2, 0),
+  box(0.22, 0.13, 0.24, -0.26, 0.2, 0),
+  mast(0.018, 0.62, 0.12, 0.44),
+  mast(0.015, 0.46, -0.14, 0.36),
+  box(0.025, 0.025, 0.38, 0.12, 0.58, 0),
+  box(0.022, 0.022, 0.28, -0.14, 0.46, 0),
+])!;
+const barbarianSails = mergeGeometries([
+  box(0.028, 0.2, 0.36, 0.14, 0.52, 0),
+  box(0.026, 0.16, 0.3, 0.15, 0.35, -0.02),
+  box(0.025, 0.24, 0.26, -0.12, 0.39, 0),
+  box(0.16, 0.045, 0.02, 0.04, 0.74, 0),
+])!;
+const barbarianTrim = mergeGeometries([
+  box(0.46, 0.055, 0.31, 0.02, 0.13, 0),
+  new THREE.OctahedronGeometry(0.065, 0).translate(0.34, 0.22, 0).toNonIndexed(),
+])!;
+const barbarianRingGeometry = new THREE.RingGeometry(0.5, 0.65, 6, 1, Math.PI / 6).rotateX(-Math.PI / 2);
 const seaRingGeometry = new THREE.RingGeometry(0.9, 0.97, 6, 1, Math.PI / 6).rotateX(-Math.PI / 2);
+const fogPadGeometry = new THREE.CylinderGeometry(0.92, 0.96, 0.06, 6);
 const tokenGeometry = new THREE.CylinderGeometry(0.25, 0.25, 0.05, 24);
 const labelGeometry = new THREE.PlaneGeometry(0.5, 0.5).rotateX(-Math.PI / 2);
 const vertexMarkerGeometry = new THREE.CylinderGeometry(0.14, 0.14, 0.05, 20);
 const edgeMarkerGeometry = new THREE.BoxGeometry(0.5, 0.05, 0.14);
 const tileMarkerGeometry = new THREE.RingGeometry(0.72, 0.86, 6, 1, Math.PI / 6).rotateX(-Math.PI / 2);
+const shoalPoolGeometry = new THREE.CircleGeometry(0.35, 20).rotateX(-Math.PI / 2);
+const shoalRippleGeometry = mergeGeometries([
+  new THREE.RingGeometry(0.17, 0.215, 20).rotateX(-Math.PI / 2).toNonIndexed(),
+  new THREE.RingGeometry(0.3, 0.355, 24).rotateX(-Math.PI / 2).toNonIndexed(),
+])!;
+const leapingFishGeometry = mergeGeometries([
+  new THREE.ConeGeometry(0.038, 0.115, 6).rotateZ(-Math.PI / 2).translate(0.055, 0, 0).toNonIndexed(),
+  new THREE.ConeGeometry(0.038, 0.135, 6).rotateZ(Math.PI / 2).translate(-0.065, 0, 0).toNonIndexed(),
+  new THREE.ConeGeometry(0.05, 0.08, 4).scale(1, 1, 0.28).rotateZ(-Math.PI / 2).translate(-0.15, 0.006, 0).toNonIndexed(),
+  new THREE.ConeGeometry(0.024, 0.05, 4).scale(1.2, 1, 0.25).translate(-0.008, 0.045, 0).toNonIndexed(),
+])!;
 
 interface Decoration {
   geometry: THREE.BufferGeometry;
@@ -236,6 +346,8 @@ interface Decoration {
   count: number;
   scale: [number, number];
   squash?: number;
+  y?: number;
+  radius?: [number, number];
   /** Optional cap stacked on each instance (snow on peaks). */
   cap?: { geometry: THREE.BufferGeometry; material: THREE.Material };
 }
@@ -260,10 +372,18 @@ const DECORATIONS: Record<number, Decoration> = {
     scale: [0.8, 1.4],
     squash: 0.75,
   },
+  8: {
+    geometry: new THREE.DodecahedronGeometry(0.26, 1).translate(0, 0.14, 0),
+    material: std(0xdcebf5, { roughness: 0.92, emissive: 0x162b3a }),
+    count: 5,
+    scale: [0.85, 1.35],
+    squash: 0.55,
+    y: -0.05,
+    radius: [0.06, 0.46],
+  },
 };
 
-function canvasTexture(draw: (ctx: CanvasRenderingContext2D, size: number) => void) {
-  const size = 128;
+function canvasTexture(draw: (ctx: CanvasRenderingContext2D, size: number) => void, size = 128) {
   const c = document.createElement('canvas');
   c.width = c.height = size;
   draw(c.getContext('2d')!, size);
@@ -290,25 +410,121 @@ function numberTexture(n: number) {
   });
 }
 
+function roundedPill(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const rad = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rad, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rad);
+  ctx.arcTo(x + w, y + h, x, y + h, rad);
+  ctx.arcTo(x, y + h, x, y, rad);
+  ctx.arcTo(x, y, x + w, y, rad);
+  ctx.closePath();
+}
+
 function harborTexture(code: number) {
   return canvasTexture((ctx, size) => {
+    const c = size / 2;
+    const generic = code < 0 || code >= RESOURCE_COLORS.length;
+    const accent = generic ? '#3d5163' : `#${RESOURCE_COLORS[code].toString(16).padStart(6, '0')}`;
+
+    // High-contrast dark outer medallion rim + vibrant resource/slate ring + ivory face.
     ctx.beginPath();
-    ctx.arc(size / 2, size / 2, 58, 0, Math.PI * 2);
-    ctx.fillStyle = '#f6efdc';
+    ctx.arc(c, c, 122, 0, Math.PI * 2);
+    ctx.fillStyle = '#182028';
     ctx.fill();
-    ctx.lineWidth = 10;
-    ctx.strokeStyle = code === 5 ? '#5b6770' : `#${RESOURCE_COLORS[code].toString(16).padStart(6, '0')}`;
+
+    ctx.beginPath();
+    ctx.arc(c, c, 111, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(c, c, 92, 0, Math.PI * 2);
+    ctx.fillStyle = '#fbf4e2';
+    ctx.fill();
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = '#182028';
     ctx.stroke();
-    ctx.fillStyle = '#2b2b2b';
+
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = 'bold 40px system-ui, sans-serif';
-    ctx.fillText(code === 5 ? '3:1' : '2:1', size / 2, code === 5 ? size / 2 : size / 2 - 14);
-    if (code !== 5) {
-      ctx.font = 'bold 30px system-ui, sans-serif';
-      ctx.fillText(RESOURCE_LABELS[code], size / 2, size / 2 + 24);
+    ctx.fillStyle = '#182028';
+    ctx.font = '900 70px system-ui, -apple-system, sans-serif';
+    ctx.fillText(generic ? '3:1' : '2:1', c, 86);
+
+    if (generic) {
+      // Golden `?` coin motif for 3:1 generic harbors.
+      ctx.beginPath();
+      ctx.arc(c, 166, 33, 0, Math.PI * 2);
+      ctx.fillStyle = '#f2b938';
+      ctx.fill();
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = '#7a4f08';
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(c, 166, 25, 0, Math.PI * 2);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255, 248, 220, 0.8)';
+      ctx.stroke();
+
+      ctx.fillStyle = '#3a2200';
+      ctx.font = '900 44px system-ui, -apple-system, sans-serif';
+      ctx.fillText('?', c, 168);
+    } else {
+      // Vibrant resource-colored pill with high-contrast label (`砖`/`木`/`羊`/`麦`/`矿`).
+      roundedPill(ctx, c - 78, 130, 156, 66, 33);
+      ctx.fillStyle = accent;
+      ctx.fill();
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = '#182028';
+      ctx.stroke();
+
+      const darkInk = code === 2 || code === 3;
+      ctx.fillStyle = darkInk ? '#182028' : '#fffdf8';
+      ctx.font = '900 46px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+      ctx.fillText(RESOURCE_LABELS[code], c, 164);
     }
-  });
+  }, 256);
+}
+
+function fishingTexture(n: number) {
+  return canvasTexture((ctx, size) => {
+    const c = size / 2;
+    const red = n === 6 || n === 8;
+    const rimAccent = red ? '#e0483e' : '#35cfe0';
+    const ink = red ? '#c92a2a' : '#152938';
+
+    // Crisp pill badge with dark outer silhouette, turquoise/crimson accent rim, and ivory face.
+    roundedPill(ctx, 12, 46, size - 24, 164, 82);
+    ctx.fillStyle = '#13222e';
+    ctx.fill();
+
+    roundedPill(ctx, 21, 55, size - 42, 146, 73);
+    ctx.fillStyle = rimAccent;
+    ctx.fill();
+
+    roundedPill(ctx, 31, 65, size - 62, 126, 63);
+    ctx.fillStyle = '#fbf6e8';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#13222e';
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ink;
+    ctx.font = `900 ${red ? 62 : 58}px system-ui, -apple-system, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
+    ctx.fillText(`🐟 ${n}`, c, 118);
+
+    const pips = PIPS[n] ?? 0;
+    ctx.fillStyle = ink;
+    for (let i = 0; i < pips; i++) {
+      ctx.beginPath();
+      ctx.arc(c + (i - (pips - 1) / 2) * 14, 166, 4.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }, 256);
 }
 
 /** One placed piece; `born` drives the drop-in animation. */
@@ -325,24 +541,41 @@ export class BoardRenderer {
   onBackendChange?: (backend: Backend) => void;
   /** Called when a highlighted spot is clicked or tapped. */
   onPick?: (kind: PickKind, id: number) => void;
+  /** Called when the pointer hovers over a board tile (or `null` when leaving tiles / dragging). */
+  onHoverTile?: (hover: TileHover | null) => void;
 
   private _backend: Backend = 'WebGL2';
+  private _theme: BoardTheme = 'day';
   private recovering = false;
   private readonly scene = new THREE.Scene();
+  private readonly bgColor = new THREE.Color(SKY);
+  private readonly fogObj = new THREE.Fog(SKY, 22, 60);
   private readonly camera = new THREE.PerspectiveCamera(38, 1, 0.1, 120);
   private readonly controls: OrbitControls;
   private readonly board = new THREE.Group();
   private readonly roads: THREE.InstancedMesh;
   private readonly ships: THREE.InstancedMesh;
   private readonly pirate = new THREE.Group();
+  private readonly barbarianShip = new THREE.Group();
+  private readonly barbarianSailMat: THREE.MeshStandardMaterial;
+  private readonly barbarianGlowMat: THREE.MeshStandardMaterial;
+  private readonly barbarianRingMat: THREE.MeshBasicMaterial;
+  private readonly barbarianRing: THREE.Mesh;
   private readonly settlements: THREE.InstancedMesh;
   private readonly cities: THREE.InstancedMesh;
+  private readonly knights: THREE.InstancedMesh;
+  private readonly knightBanners: THREE.InstancedMesh;
+  private readonly metropolises: THREE.InstancedMesh;
   private readonly markers: Record<PickKind, THREE.InstancedMesh>;
   private readonly robber = new THREE.Group();
   private readonly resizeObserver: ResizeObserver;
   private readonly beach: THREE.Mesh;
+  private readonly seaMaterial: THREE.MeshStandardMaterial;
+  private readonly hemiLight: THREE.HemisphereLight;
   private readonly sun: THREE.DirectionalLight;
+  private readonly rimLight: THREE.DirectionalLight;
   private topology: Topology | null = null;
+  private singleAllLand = false;
   private tileXZ: [number, number][] = [];
   private vertexXZ: [number, number][] = [];
   private edgeXZ: { x: number; z: number; angle: number }[] = [];
@@ -355,10 +588,15 @@ export class BoardRenderer {
   /** Half extents (world units) of the area that must stay in view. */
   private extent = { x: 5.2, z: 4.42 };
   private readonly numberTextures = new Map<number, THREE.Texture>();
+  private readonly harborTextures = new Map<number, THREE.Texture>();
+  private readonly fishingTextures = new Map<number, THREE.Texture>();
   private readonly raycaster = new THREE.Raycaster();
   private readonly plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -TOP);
+  private readonly pointerNdc = new THREE.Vector2();
+  private readonly hitPoint = new THREE.Vector3();
   private renderQueued = false;
   private disposables: { dispose(): void }[] = [];
+  private readonly sceneDisposables: { dispose(): void }[] = [];
 
   // Pieces keyed by spot so new ones can be animated.
   private roadPieces = new Map<number, Piece>();
@@ -366,7 +604,15 @@ export class BoardRenderer {
   private pirateFrom: [number, number] | null = null;
   private pirateTo: [number, number] | null = null;
   private pirateStart = 0;
+  private barbarianFrom: [number, number] | null = null;
+  private barbarianTo: [number, number] | null = null;
+  private barbarianYaw = -0.6;
+  private barbarianStart = 0;
+  private barbarianWarning = false;
+  private barbarianPulseStart = -1e9;
   private buildingPieces = new Map<number, Piece & { city: boolean }>();
+  private knightPieces = new Map<number, Piece & { level: number; active: boolean }>();
+  private metropolisPieces: { x: number; z: number; angle: number; track: number }[] = [];
   private robberFrom: [number, number] | null = null;
   private robberTo: [number, number] = [0, 0];
   private robberStart = 0;
@@ -376,6 +622,8 @@ export class BoardRenderer {
   private fitDistance = 0;
   private highlights: Highlights | null = null;
   private hovered = -1;
+  private hoveredTile = -1;
+  private dragging = false;
   private pointerDown: { x: number; y: number; t: number } | null = null;
 
   /** `forceWebGL` skips WebGPU (also available as `?renderer=webgl`). */
@@ -391,8 +639,8 @@ export class BoardRenderer {
   ) {
     this.attachRenderer(renderer);
 
-    this.scene.background = new THREE.Color(SKY);
-    this.scene.fog = new THREE.Fog(SKY, 22, 60);
+    this.scene.background = this.bgColor;
+    this.scene.fog = this.fogObj;
 
     // Bound to the container (not the canvas) so a renderer swap keeps input working.
     this.controls = new OrbitControls(this.camera, container);
@@ -402,7 +650,8 @@ export class BoardRenderer {
     this.controls.maxPolarAngle = 1.2;
     this.controls.addEventListener('change', () => this.requestRender());
 
-    this.scene.add(new THREE.HemisphereLight(0xdff3ff, 0x2d4a3a, 1.3));
+    this.hemiLight = new THREE.HemisphereLight(0xdff3ff, 0x2d4a3a, 1.3);
+    this.scene.add(this.hemiLight);
     const sun = new THREE.DirectionalLight(0xfff1d6, 2.4);
     sun.position.set(-6, 12, 5);
     sun.castShadow = true;
@@ -412,21 +661,38 @@ export class BoardRenderer {
     this.scene.add(sun);
     this.sun = sun;
 
-    const sea = new THREE.Mesh(new THREE.PlaneGeometry(120, 120).rotateX(-Math.PI / 2), std(SEA, { roughness: 0.55, flatShading: false }));
+    const rim = new THREE.DirectionalLight(0x5b8cff, 0);
+    rim.position.set(7, 6, -6);
+    rim.castShadow = false;
+    this.scene.add(rim);
+    this.rimLight = rim;
+
+    const seaGeometry = new THREE.PlaneGeometry(120, 120).rotateX(-Math.PI / 2);
+    const seaMaterial = std(SEA, { roughness: 0.55, flatShading: false });
+    this.seaMaterial = seaMaterial;
+    const sea = new THREE.Mesh(seaGeometry, seaMaterial);
     sea.position.y = -0.14;
     sea.receiveShadow = true;
-    this.beach = new THREE.Mesh(new THREE.BufferGeometry(), std(BEACH));
+    const beachMaterial = std(BEACH);
+    this.beach = new THREE.Mesh(new THREE.BufferGeometry(), beachMaterial);
     this.beach.position.y = 0;
     this.beach.receiveShadow = true;
     this.scene.add(sea, this.beach, this.board);
 
+    this.applyTheme(readSavedTheme());
+
     const pieceMaterial = std(0xffffff, { roughness: 0.6 });
+    const goldMaterial = std(0xffcf3a, { metalness: 0.5, roughness: 0.3, emissive: 0x5c3d00 });
+    const metroMaterial = std(0xffffff, { metalness: 0.45, roughness: 0.3, emissive: 0x2b2000 });
     this.roads = this.instanced(roadGeometry, pieceMaterial, MAX_SPOTS, true);
     this.ships = this.instanced(shipGeometry, pieceMaterial, MAX_SPOTS, true);
     this.scene.add(this.ships);
     this.settlements = this.instanced(settlementGeometry, pieceMaterial, MAX_SPOTS, true);
     this.cities = this.instanced(cityGeometry, pieceMaterial, MAX_SPOTS, true);
-    this.scene.add(this.roads, this.settlements, this.cities);
+    this.knights = this.instanced(knightGeometry, pieceMaterial, MAX_SPOTS, true);
+    this.knightBanners = this.instanced(knightBannerGeometry, goldMaterial, MAX_SPOTS);
+    this.metropolises = this.instanced(metropolisGeometry, metroMaterial, 6, true);
+    this.scene.add(this.roads, this.settlements, this.cities, this.knights, this.knightBanners, this.metropolises);
 
     const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false });
     this.markers = {
@@ -447,12 +713,61 @@ export class BoardRenderer {
     this.robber.add(body, head);
     this.scene.add(this.robber);
 
-    const hull = new THREE.Mesh(pirateHull, std(0x24242b, { roughness: 0.6 }));
-    const sails = new THREE.Mesh(pirateSails, std(0x3b3b44, { roughness: 0.8 }));
+    const pirateHullMat = std(0x24242b, { roughness: 0.6 });
+    const pirateSailMat = std(0x3b3b44, { roughness: 0.8 });
+    const hull = new THREE.Mesh(pirateHull, pirateHullMat);
+    const sails = new THREE.Mesh(pirateSails, pirateSailMat);
     hull.castShadow = sails.castShadow = true;
     this.pirate.add(hull, sails);
     this.pirate.visible = false;
     this.scene.add(this.pirate);
+
+    const bHullMat = std(0x18161c, { roughness: 0.62 });
+    this.barbarianSailMat = std(0x221c24, { roughness: 0.78 });
+    this.barbarianGlowMat = std(0xc92a2a, { roughness: 0.35, emissive: 0x7a0c12, emissiveIntensity: 0.35 });
+    this.barbarianRingMat = new THREE.MeshBasicMaterial({
+      color: 0xe53935,
+      transparent: true,
+      opacity: 0.65,
+      depthWrite: false,
+    });
+    const bHull = new THREE.Mesh(barbarianHull, bHullMat);
+    const bSails = new THREE.Mesh(barbarianSails, this.barbarianSailMat);
+    const bTrim = new THREE.Mesh(barbarianTrim, this.barbarianGlowMat);
+    this.barbarianRing = new THREE.Mesh(barbarianRingGeometry, this.barbarianRingMat);
+    this.barbarianRing.position.y = 0.02;
+    this.barbarianRing.visible = false;
+    bHull.castShadow = bSails.castShadow = bTrim.castShadow = true;
+    this.barbarianShip.add(bHull, bSails, bTrim, this.barbarianRing);
+    this.barbarianShip.visible = false;
+    this.scene.add(this.barbarianShip);
+
+    this.sceneDisposables.push(
+      seaGeometry,
+      seaMaterial,
+      beachMaterial,
+      pieceMaterial,
+      goldMaterial,
+      metroMaterial,
+      markerMaterial,
+      robberMaterial,
+      body.geometry,
+      head.geometry,
+      pirateHullMat,
+      pirateSailMat,
+      bHullMat,
+      this.barbarianSailMat,
+      this.barbarianGlowMat,
+      this.barbarianRingMat,
+      this.roads,
+      this.ships,
+      this.settlements,
+      this.cities,
+      this.knights,
+      this.knightBanners,
+      this.metropolises,
+      ...Object.values(this.markers),
+    );
 
     container.addEventListener('pointermove', this.onPointerMove);
     container.addEventListener('pointerdown', this.onPointerDown);
@@ -466,6 +781,43 @@ export class BoardRenderer {
 
   get backend(): Backend {
     return this._backend;
+  }
+
+  get theme(): BoardTheme {
+    return this._theme;
+  }
+
+  /** Switches the 3D board lighting & atmosphere theme, persists preference, and queues one frame. */
+  setTheme(theme: BoardTheme): void {
+    this.applyTheme(theme);
+    saveTheme(theme);
+    this.requestRender();
+  }
+
+  private applyTheme(theme: BoardTheme): void {
+    this._theme = theme;
+    const cfg = THEME_CONFIGS[theme];
+    this.bgColor.setHex(cfg.sky);
+    this.scene.background = this.bgColor;
+    this.fogObj.color.setHex(cfg.fog);
+    this.seaMaterial.color.setHex(cfg.sea);
+    this.hemiLight.color.setHex(cfg.hemiSky);
+    this.hemiLight.groundColor.setHex(cfg.hemiGround);
+    this.hemiLight.intensity = cfg.hemiIntensity;
+    this.sun.color.setHex(cfg.sunColor);
+    this.sun.intensity = cfg.sunIntensity;
+    this.sun.position.set(cfg.sunPos[0], cfg.sunPos[1], cfg.sunPos[2]);
+    this.rimLight.color.setHex(cfg.rimColor);
+    this.rimLight.intensity = cfg.rimIntensity;
+    this.rimLight.position.set(cfg.rimPos[0], cfg.rimPos[1], cfg.rimPos[2]);
+    this.updateFogBounds();
+  }
+
+  private updateFogBounds(): void {
+    const cfg = THEME_CONFIGS[this._theme];
+    const dist = this.fitDistance || 14;
+    this.fogObj.near = Math.max(cfg.fogMinNear, dist * cfg.fogNearFactor);
+    this.fogObj.far = Math.max(cfg.fogMinFar, dist * cfg.fogFarFactor);
   }
 
   /** Island geometry: spot positions, beach, framing and shadow bounds. */
@@ -498,34 +850,52 @@ export class BoardRenderer {
   }
 
   /**
-   * Land-dependent geometry: one beach per island (the classic island is
-   * one), which way each harbor and each coastal ship faces.
+   * Land-dependent geometry: one beach per single convex all-land island, or
+   * per-tile hex banks whenever seafaring, multi-island, or custom coastlines
+   * are present so concave bays and straits never get bridged by convex sand.
    */
   private setLand(terrain: number[], islands: number[]) {
-    const isSea = (t: number | undefined) => t === undefined || terrain[t] === SEA_TERRAIN;
-    const seafaring = terrain.some((t) => t === SEA_TERRAIN);
-    const [top, foot] = seafaring ? [ISLAND_BEACH_TOP, ISLAND_BEACH_FOOT] : [BEACH_TOP, BEACH_FOOT];
-    const ids = [...new Set(islands.filter((i) => i > 0))];
-    const banks = ids.map((id) => {
-      const hull = convexHull(this.tileXZ.filter((_, t) => islands[t] === id));
-      return bankGeometry(offsetPolygon(hull, top), offsetPolygon(hull, foot), 0.24);
-    });
+    const isWater = (t: number | undefined) => t === undefined || terrain[t] === SEA_TERRAIN || terrain[t] === FOG_TERRAIN;
+    const seafaring = terrain.some((t) => t === SEA_TERRAIN || t === FOG_TERRAIN);
+    const islandIds = [...new Set(islands.filter((i) => i > 0))];
+    const singleAllLand = !seafaring && islandIds.length === 1 && islands.length >= 3 && islands.every((id) => id === islandIds[0]);
+    this.singleAllLand = singleAllLand;
+    const banks: THREE.BufferGeometry[] = [];
+    if (!singleAllLand) {
+      const hexRing = (cx: number, cz: number, r: number): [number, number][] =>
+        Array.from({ length: 6 }, (_, k) => {
+          const a = -Math.PI / 2 + (k * Math.PI) / 3;
+          return [cx + Math.cos(a) * r, cz + Math.sin(a) * r];
+        });
+      terrain.forEach((t, i) => {
+        if (!isWater(i) && t >= 0) {
+          const [cx, cz] = this.tileXZ[i];
+          banks.push(bankGeometry(hexRing(cx, cz, 1.12), hexRing(cx, cz, 1.36), 0.24));
+        }
+      });
+    } else {
+      const hull = convexHull(this.tileXZ.filter((_, t) => islands[t] === islandIds[0]));
+      if (hull.length >= 3) {
+        banks.push(bankGeometry(offsetPolygon(hull, BEACH_TOP), offsetPolygon(hull, BEACH_FOOT), 0.24));
+      }
+    }
     this.beach.geometry.dispose();
-    this.beach.geometry = banks.length > 1 ? mergeGeometries(banks) : (banks[0] ?? new THREE.BufferGeometry());
+    this.beach.geometry = banks.length > 1 ? mergeGeometries(banks)! : (banks[0] ?? new THREE.BufferGeometry());
+    if (banks.length > 1) banks.forEach((b) => b.dispose());
 
     // Away from the land tile of an edge, towards the water.
     const outward = (e: number): [number, number] => {
-      const landTile = this.edgeTiles[e].find((t) => !isSea(t));
-      const seaTile = this.edgeTiles[e].find((t) => isSea(t));
+      const landTile = this.edgeTiles[e].find((t) => !isWater(t));
+      const seaTile = this.edgeTiles[e].find((t) => isWater(t));
       const { x, z } = this.edgeXZ[e];
       if (landTile === undefined) return [0, 0];
       const [cx, cz] = this.tileXZ[landTile];
       if (seaTile === undefined && this.edgeTiles[e].length > 1) return [0, 0];
       const len = Math.hypot(x - cx, z - cz);
-      return [(x - cx) / len, (z - cz) / len];
+      return len > 1e-6 ? [(x - cx) / len, (z - cz) / len] : [0, 0];
     };
     this.edgeSeaward = this.edgeXZ.map((_, e) => outward(e));
-    this.harborOut = [...this.topology!.harborEdges].map((e) => this.edgeSeaward[e]);
+    this.harborOut = [...this.topology!.harborEdges].map((e) => this.edgeSeaward[e] ?? [0, 0]);
   }
 
   /** Draw calls in the last frame (for the HUD). */
@@ -534,26 +904,43 @@ export class BoardRenderer {
   }
 
   /** Rebuilds tiles, number tokens, decorations and harbors for a new map. */
-  setBoard({ terrain, numbers, harbors, islands }: BoardData, topology: Topology) {
+  setBoard(data: BoardData, topology: Topology) {
     if (topology !== this.topology) this.setTopology(topology);
-    this.setLand(terrain, islands);
     this.camera.position.copy(CAMERA_DIR).multiplyScalar(this.fitDistance || 14);
     this.controls.update();
-    for (const d of this.disposables) d.dispose();
-    this.disposables = [];
-    this.board.clear();
     this.roadPieces.clear();
     this.shipPieces.clear();
     this.buildingPieces.clear();
+    this.knightPieces.clear();
+    this.metropolisPieces = [];
     this.robberFrom = null;
     this.pirateFrom = this.pirateTo = null;
+    this.barbarianFrom = this.barbarianTo = null;
+    this.barbarianWarning = false;
+    this.barbarianPulseStart = -1e9;
+    this.barbarianShip.visible = false;
+    if (this.hoveredTile !== -1) {
+      this.hoveredTile = -1;
+      this.onHoverTile?.(null);
+    }
+    this.updateBoard(data);
+  }
+
+  /** Refreshes board tiles, fog, beaches and tokens in place without resetting the camera or pieces. */
+  updateBoard({ terrain, numbers, harbors, islands, fishingGrounds }: BoardData) {
+    this.setLand(terrain, islands);
+    for (const d of this.disposables) d.dispose();
+    this.disposables = [];
+    this.board.clear();
 
     // Land tiles are raised hexes; sea tiles inside the map are open water,
-    // marked by a faint ring so the sailing grid reads.
-    const land = [...terrain.keys()].filter((i) => terrain[i] !== SEA_TERRAIN);
+    // marked by a faint ring so the sailing grid reads; fog tiles hold a
+    // soft misty pad topped by clouds.
+    const land = [...terrain.keys()].filter((i) => terrain[i] !== SEA_TERRAIN && terrain[i] !== FOG_TERRAIN);
     const sea = [...terrain.keys()].filter((i) => terrain[i] === SEA_TERRAIN);
+    const fog = [...terrain.keys()].filter((i) => terrain[i] === FOG_TERRAIN);
     const tileMaterial = std(0xffffff);
-    const tiles = this.instanced(hexGeometry, tileMaterial, land.length, true);
+    const tiles = this.instanced(hexGeometry, tileMaterial, Math.max(1, land.length), true);
     tiles.castShadow = false;
     const m = new THREE.Matrix4();
     const color = new THREE.Color();
@@ -574,10 +961,20 @@ export class BoardRenderer {
       this.board.add(rings);
       this.disposables.push(ringMaterial, rings);
     }
+    if (fog.length) {
+      const fogMaterial = std(TERRAIN_COLORS[FOG_TERRAIN], { transparent: true, opacity: 0.55, roughness: 0.9 });
+      const pads = this.instanced(fogPadGeometry, fogMaterial, fog.length);
+      pads.castShadow = false;
+      fog.forEach((t, i) => pads.setMatrixAt(i, m.makeTranslation(this.tileXZ[t][0], -0.09, this.tileXZ[t][1])));
+      this.commit(pads, fog.length);
+      this.board.add(pads);
+      this.disposables.push(fogMaterial, pads);
+    }
 
     this.addDecorations(terrain);
     this.addTokens(numbers);
     this.addHarbors(harbors);
+    if (fishingGrounds?.length) this.addFishingGrounds(fishingGrounds);
     this.requestRender();
   }
 
@@ -586,8 +983,22 @@ export class BoardRenderer {
    * before drop in; a moved robber walks over. Pass `animate: false` for the
    * first sync of a game.
    */
-  setPieces({ buildings, roads, ships, robber, pirate }: PieceData, animate = true) {
+  setPieces({ buildings, roads, ships, robber, pirate, knights, metropolises, barbarianPos, barbarianSteps }: PieceData, animate = true) {
     const now = animate ? performance.now() : -1e9;
+    const nextKnights = new Map<number, Piece & { level: number; active: boolean }>();
+    (knights ?? []).forEach((k) => {
+      const prev = this.knightPieces.get(k.vertex);
+      const [x, z] = this.vertexXZ[k.vertex] ?? [0, 0];
+      const angle = -Math.atan2(z, x);
+      const born = prev && prev.owner === k.owner && prev.level === k.level ? prev.born : now;
+      nextKnights.set(k.vertex, { x, z, angle, owner: k.owner, level: k.level, active: k.active, born });
+    });
+    this.knightPieces = nextKnights;
+    this.metropolisPieces = (metropolises ?? []).flatMap((v, track) => {
+      if (v === null || v === undefined) return [];
+      const [x, z] = this.vertexXZ[v] ?? [0, 0];
+      return [{ x, z, angle: -Math.atan2(z, x), track }];
+    });
     const nextShips = new Map<number, Piece>();
     (ships ?? []).forEach((owner, e) => {
       if (owner === EMPTY) return;
@@ -597,7 +1008,7 @@ export class BoardRenderer {
       const [ox, oz] = this.edgeSeaward[e] ?? [0, 0];
       const coastal = ox !== 0 || oz !== 0;
       const at = { x: x + ox * (coastal ? 0.42 : 0), z: z + oz * (coastal ? 0.42 : 0), angle };
-      nextShips.set(e, prev?.owner === owner ? prev : { ...at, owner, born: now });
+      nextShips.set(e, { ...at, owner, born: prev?.owner === owner ? prev.born : now });
     });
     this.shipPieces = nextShips;
 
@@ -617,6 +1028,33 @@ export class BoardRenderer {
       }
       this.pirateTo = to;
       this.pirate.visible = true;
+    }
+
+    if (barbarianPos === undefined || barbarianPos === null) {
+      this.barbarianShip.visible = false;
+      this.barbarianFrom = this.barbarianTo = null;
+      this.barbarianWarning = false;
+    } else {
+      const steps = barbarianSteps && barbarianSteps > 1 ? barbarianSteps : 7;
+      const wp = this.barbarianWaypoint(barbarianPos, steps);
+      const to: [number, number] = [wp.x, wp.z];
+      const warning = barbarianPos >= steps - 2;
+      const moved =
+        this.barbarianTo !== null && (Math.abs(to[0] - this.barbarianTo[0]) > 1e-3 || Math.abs(to[1] - this.barbarianTo[1]) > 1e-3);
+      if (animate && moved) {
+        this.barbarianFrom = [this.barbarianShip.position.x, this.barbarianShip.position.z];
+        this.barbarianStart = now;
+      } else {
+        this.barbarianFrom = to;
+        this.barbarianStart = -1e9;
+      }
+      if (warning && (!this.barbarianWarning || moved)) {
+        this.barbarianPulseStart = animate ? now : -1e9;
+      }
+      this.barbarianTo = to;
+      this.barbarianYaw = wp.yaw;
+      this.barbarianWarning = warning;
+      this.barbarianShip.visible = true;
     }
     const nextRoads = new Map<number, Piece>();
     roads.forEach((owner, e) => {
@@ -696,24 +1134,48 @@ export class BoardRenderer {
     this.container.removeEventListener('pointerdown', this.onPointerDown);
     this.container.removeEventListener('pointerup', this.onPointerUp);
     this.container.removeEventListener('pointerleave', this.onPointerLeave);
+    this.onPick = undefined;
+    this.onHoverTile = undefined;
     this.resizeObserver.disconnect();
     this.controls.dispose();
+    this.beach.geometry.dispose();
     for (const d of this.disposables) d.dispose();
+    for (const d of this.sceneDisposables) d.dispose();
     for (const t of this.numberTextures.values()) t.dispose();
+    for (const t of this.harborTextures.values()) t.dispose();
+    for (const t of this.fishingTextures.values()) t.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
 
   // ---- input ----
 
-  private spotUnderPointer(ev: PointerEvent): number {
-    const h = this.highlights;
-    if (!h) return -1;
+  private intersectBoard(ev: PointerEvent): THREE.Vector3 | null {
     const rect = this.container.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((ev.clientX - rect.left) / rect.width) * 2 - 1, -((ev.clientY - rect.top) / rect.height) * 2 + 1);
-    this.raycaster.setFromCamera(ndc, this.camera);
-    const hit = this.raycaster.ray.intersectPlane(this.plane, new THREE.Vector3());
+    if (!rect.width || !rect.height) return null;
+    this.pointerNdc.set(((ev.clientX - rect.left) / rect.width) * 2 - 1, -((ev.clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+    return this.raycaster.ray.intersectPlane(this.plane, this.hitPoint);
+  }
+
+  private tileAt(hit: THREE.Vector3 | null): number {
     if (!hit) return -1;
+    let best = -1;
+    let bestDist = TILE_HOVER_RADIUS;
+    for (let t = 0; t < this.tileXZ.length; t++) {
+      const [x, z] = this.tileXZ[t];
+      const d = Math.hypot(hit.x - x, hit.z - z);
+      if (d < bestDist) {
+        bestDist = d;
+        best = t;
+      }
+    }
+    return best;
+  }
+
+  private spotAt(hit: THREE.Vector3 | null): number {
+    const h = this.highlights;
+    if (!h || !hit) return -1;
     let best = -1;
     let bestDist = PICK_RADIUS[h.kind];
     for (const id of h.ids) {
@@ -728,8 +1190,30 @@ export class BoardRenderer {
   }
 
   private onPointerMove = (ev: PointerEvent) => {
-    if (!this.highlights || ev.pointerType === 'touch') return;
-    const id = this.spotUnderPointer(ev);
+    if (ev.pointerType === 'touch') return;
+    if (this.pointerDown && !this.dragging && Math.hypot(ev.clientX - this.pointerDown.x, ev.clientY - this.pointerDown.y) > 6) {
+      this.dragging = true;
+    }
+    if (this.dragging || (ev.buttons !== 0 && !this.pointerDown)) {
+      if (this.hoveredTile !== -1) {
+        this.hoveredTile = -1;
+        this.onHoverTile?.(null);
+      }
+      return;
+    }
+    const hit = this.highlights || this.onHoverTile ? this.intersectBoard(ev) : null;
+    if (this.onHoverTile) {
+      const tile = this.tileAt(hit);
+      if (tile >= 0) {
+        this.hoveredTile = tile;
+        this.onHoverTile({ tile, clientX: ev.clientX, clientY: ev.clientY });
+      } else if (this.hoveredTile !== -1) {
+        this.hoveredTile = -1;
+        this.onHoverTile(null);
+      }
+    }
+    if (!this.highlights) return;
+    const id = this.spotAt(hit);
     if (id !== this.hovered) {
       this.hovered = id;
       this.container.style.cursor = id >= 0 ? 'pointer' : '';
@@ -740,19 +1224,26 @@ export class BoardRenderer {
 
   private onPointerDown = (ev: PointerEvent) => {
     this.pointerDown = { x: ev.clientX, y: ev.clientY, t: performance.now() };
+    this.dragging = false;
   };
 
   private onPointerUp = (ev: PointerEvent) => {
     const down = this.pointerDown;
     this.pointerDown = null;
+    this.dragging = false;
     if (!down || !this.highlights) return;
     // A drag rotates the camera; only short, still presses count as clicks.
     if (Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > 8 || performance.now() - down.t > 600) return;
-    const id = this.spotUnderPointer(ev);
+    const id = this.spotAt(this.intersectBoard(ev));
     if (id >= 0) this.onPick?.(this.highlights.kind, id);
   };
 
   private onPointerLeave = () => {
+    this.dragging = false;
+    if (this.hoveredTile !== -1) {
+      this.hoveredTile = -1;
+      this.onHoverTile?.(null);
+    }
     if (this.hovered !== -1) {
       this.hovered = -1;
       this.container.style.cursor = '';
@@ -837,6 +1328,39 @@ export class BoardRenderer {
       this.pirate.rotation.y = 0.6;
       if (tp < 1) animating = true;
     }
+    if (this.barbarianTo) {
+      const tb = Math.min(1, (now - this.barbarianStart) / ROBBER_MS);
+      const from = this.barbarianFrom ?? this.barbarianTo;
+      const eb = easeInOut(tb);
+      this.barbarianShip.position.set(
+        from[0] + (this.barbarianTo[0] - from[0]) * eb,
+        WATER + Math.sin(Math.PI * tb) * 0.18,
+        from[1] + (this.barbarianTo[1] - from[1]) * eb,
+      );
+      this.barbarianShip.rotation.y = this.barbarianYaw;
+      if (tb < 1) animating = true;
+
+      if (this.barbarianWarning) {
+        const elapsed = now - this.barbarianPulseStart;
+        const pulsing = elapsed >= 0 && elapsed < BARBARIAN_PULSE_MS;
+        if (pulsing) animating = true;
+        const wave = pulsing ? 0.5 + 0.5 * Math.sin((elapsed / BARBARIAN_PULSE_MS) * Math.PI * 6 - Math.PI / 2) : 0.75;
+        this.barbarianSailMat.color.setHex(0x3b1218);
+        this.barbarianSailMat.emissive.setHex(0x8f141c);
+        this.barbarianSailMat.emissiveIntensity = 0.45 + 0.55 * wave;
+        this.barbarianGlowMat.emissiveIntensity = 0.8 + 0.7 * wave;
+        this.barbarianRing.visible = true;
+        const rs = 0.94 + 0.22 * wave;
+        this.barbarianRing.scale.set(rs, 1, rs);
+        this.barbarianRingMat.opacity = 0.38 + 0.44 * wave;
+      } else {
+        this.barbarianSailMat.color.setHex(0x221c24);
+        this.barbarianSailMat.emissive.setHex(0x000000);
+        this.barbarianSailMat.emissiveIntensity = 0;
+        this.barbarianGlowMat.emissiveIntensity = 0.35;
+        this.barbarianRing.visible = false;
+      }
+    }
     let ns = 0;
     let nc = 0;
     for (const piece of this.buildingPieces.values()) {
@@ -845,6 +1369,37 @@ export class BoardRenderer {
     }
     this.commit(this.settlements, ns);
     this.commit(this.cities, nc);
+
+    let nk = 0;
+    let nb = 0;
+    for (const k of this.knightPieces.values()) {
+      const tk = Math.min(1, (now - k.born) / DROP_MS);
+      if (tk < 1) animating = true;
+      const rankScale = 0.88 + 0.16 * k.level;
+      const sc = Math.max(0.001, easeOutBack(tk)) * rankScale;
+      q.setFromAxisAngle(up, k.angle);
+      s.set(sc, sc, sc);
+      p.set(k.x, TOP + (1 - Math.min(1, tk * 1.4)) * 1.1, k.z);
+      this.knights.setMatrixAt(nk, m.compose(p, q, s));
+      this.knights.setColorAt(nk, color.setHex(PLAYER_COLORS[k.owner]));
+      nk++;
+      if (k.active) {
+        this.knightBanners.setMatrixAt(nb++, m.compose(p, q, s));
+      }
+    }
+    this.commit(this.knights, nk);
+    this.commit(this.knightBanners, nb);
+
+    let nm = 0;
+    for (const metro of this.metropolisPieces) {
+      q.setFromAxisAngle(up, metro.angle);
+      s.set(1, 1, 1);
+      p.set(metro.x, TOP, metro.z);
+      this.metropolises.setMatrixAt(nm, m.compose(p, q, s));
+      this.metropolises.setColorAt(nm, color.setHex(METROPOLIS_COLORS[metro.track] ?? 0xffca3a));
+      nm++;
+    }
+    this.commit(this.metropolises, nm);
 
     const t = Math.min(1, (now - this.robberStart) / ROBBER_MS);
     const from = this.robberFrom ?? this.robberTo;
@@ -931,13 +1486,15 @@ export class BoardRenderer {
         const rand = prng(t * 7919 + Number(code) * 104729);
         const [cx, cz] = this.tileXZ[t];
         const offset = rand() * Math.PI * 2;
+        const [rLo, rHi] = deco.radius ?? [0.42, 0.64];
+        const baseY = deco.y ?? TOP;
         for (let k = 0; k < deco.count; k++) {
           const angle = offset + (k / deco.count) * Math.PI * 2 + (rand() - 0.5) * 0.6;
-          const r = 0.42 + rand() * 0.22;
+          const r = k === 0 && deco.radius ? rLo * 0.5 : rLo + rand() * (rHi - rLo);
           const sc = deco.scale[0] + rand() * (deco.scale[1] - deco.scale[0]);
           q.setFromAxisAngle(up, rand() * Math.PI * 2);
           s.set(sc, sc * (deco.squash ?? 1), sc);
-          m.compose(p.set(cx + Math.cos(angle) * r, TOP, cz + Math.sin(angle) * r), q, s);
+          m.compose(p.set(cx + Math.cos(angle) * r, baseY, cz + Math.sin(angle) * r), q, s);
           mesh.setMatrixAt(n, m);
           cap?.setMatrixAt(n, m);
           n++;
@@ -973,46 +1530,170 @@ export class BoardRenderer {
     });
   }
 
+  /** Sea approach waypoint from the northwest horizon (`pos = 0`) to right off the shore (`pos = steps - 1`). */
+  private barbarianWaypoint(pos: number, steps: number): { x: number; z: number; yaw: number } {
+    const u = Math.min(1, Math.max(0, pos) / Math.max(1, steps - 1));
+    const dirNear = [-0.84, -0.5426] as const;
+    const dirFar = [-0.8, -0.6] as const;
+    const coastProj = this.tileXZ.reduce((mx, [tx, tz]) => Math.max(mx, tx * dirNear[0] + tz * dirNear[1]), 2.8);
+    const farX = dirFar[0] * (coastProj + 4.15);
+    const farZ = dirFar[1] * (coastProj + 4.15);
+    const nearX = dirNear[0] * (coastProj + 2.22);
+    const nearZ = dirNear[1] * (coastProj + 2.22);
+    const x = farX + (nearX - farX) * u;
+    const z = farZ + (nearZ - farZ) * u;
+    return { x, z, yaw: -Math.atan2(-z, -x) };
+  }
+
   private addHarbors(harbors: number[]) {
+    if (!harbors.length || !this.topology) return;
     const plankMaterial = std(0x8a5a35);
-    const planks = this.instanced(new THREE.BoxGeometry(1, 0.05, 0.09), plankMaterial, harbors.length * 2);
-    const docks = this.instanced(new THREE.BoxGeometry(0.34, 0.08, 0.34), plankMaterial, harbors.length);
+    const planks = this.instanced(new THREE.BoxGeometry(1, 0.055, 0.11), plankMaterial, Math.max(1, harbors.length * 2));
+    const docks = this.instanced(new THREE.BoxGeometry(0.38, 0.09, 0.38), plankMaterial, Math.max(1, harbors.length));
     this.disposables.push(plankMaterial, planks, docks, planks.geometry, docks.geometry);
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const s = new THREE.Vector3();
     const p = new THREE.Vector3();
     const up = new THREE.Vector3(0, 1, 0);
-    const topology = this.topology!;
+    const topology = this.topology;
     const ev = topology.edgeVertices;
 
+    let nDocks = 0;
+    let nPlanks = 0;
     harbors.forEach((code, slot) => {
+      if (slot >= topology.harborEdges.length) return;
       const e = topology.harborEdges[slot];
+      if (2 * e + 1 >= ev.length) return;
+      const [ox, oz] = this.harborOut[slot] ?? [0, 0];
+      if (ox === 0 && oz === 0) return;
       const a = this.vertexXZ[ev[2 * e]];
       const b = this.vertexXZ[ev[2 * e + 1]];
+      if (!a || !b) return;
       const mx = (a[0] + b[0]) / 2;
       const mz = (a[1] + b[1]) / 2;
-      const [ox, oz] = this.harborOut[slot];
-      const dock: [number, number] = [mx + ox * 0.5, mz + oz * 0.5];
-      docks.setMatrixAt(slot, m.makeTranslation(dock[0], -0.02, dock[1]));
-      [a, b].forEach((v, k) => {
+      const dock: [number, number] = [mx + ox * 0.52, mz + oz * 0.52];
+      docks.setMatrixAt(nDocks++, m.makeTranslation(dock[0], -0.015, dock[1]));
+      for (const v of [a, b]) {
         const dx = dock[0] - v[0];
         const dz = dock[1] - v[1];
         q.setFromAxisAngle(up, -Math.atan2(dz, dx));
         s.set(Math.hypot(dx, dz), 1, 1);
-        planks.setMatrixAt(slot * 2 + k, m.compose(p.set((v[0] + dock[0]) / 2, 0.02, (v[1] + dock[1]) / 2), q, s));
-      });
-      const tex = harborTexture(code);
-      const mat = new THREE.SpriteMaterial({ map: tex });
+        planks.setMatrixAt(nPlanks++, m.compose(p.set((v[0] + dock[0]) / 2, 0.025, (v[1] + dock[1]) / 2), q, s));
+      }
+      let tex = this.harborTextures.get(code);
+      if (!tex) this.harborTextures.set(code, (tex = harborTexture(code)));
+      const mat = new THREE.SpriteMaterial({ map: tex, depthTest: true });
       const label = new THREE.Sprite(mat);
-      label.scale.set(0.55, 0.55, 1);
-      label.position.set(dock[0], 0.45, dock[1]);
+      label.scale.set(0.68, 0.68, 1);
+      label.position.set(dock[0], 0.48, dock[1]);
       this.board.add(label);
-      this.disposables.push(tex, mat);
+      this.disposables.push(mat);
     });
-    this.commit(planks, harbors.length * 2);
-    this.commit(docks, harbors.length);
+    this.commit(planks, nPlanks);
+    this.commit(docks, nDocks);
     this.board.add(planks, docks);
+  }
+
+  /** Renders 3D coastal fishing shoals (shimmering ripples, leaping silver fish & `🐟 N` badge). */
+  private addFishingGrounds(fishingGrounds: { edge: number; number: number }[]) {
+    const valid = fishingGrounds.filter((fg) => fg.edge >= 0 && fg.edge < this.edgeXZ.length);
+    if (!valid.length) return;
+
+    const poolMaterial = new THREE.MeshStandardMaterial({
+      color: 0x1fc4d6,
+      emissive: 0x0a4b58,
+      roughness: 0.25,
+      metalness: 0.2,
+      transparent: true,
+      opacity: 0.7,
+      depthWrite: false,
+    });
+    const rippleMaterial = new THREE.MeshStandardMaterial({
+      color: 0xc2f9ff,
+      emissive: 0x3baec2,
+      roughness: 0.2,
+      metalness: 0.55,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    });
+    const fishMaterial = std(0xdbe9f5, {
+      metalness: 0.65,
+      roughness: 0.22,
+      emissive: 0x1e384a,
+    });
+
+    const pools = this.instanced(shoalPoolGeometry, poolMaterial, valid.length);
+    const ripples = this.instanced(shoalRippleGeometry, rippleMaterial, valid.length);
+    const fishes = this.instanced(leapingFishGeometry, fishMaterial, valid.length * 2);
+    pools.castShadow = pools.receiveShadow = false;
+    ripples.castShadow = ripples.receiveShadow = false;
+
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+    const s = new THREE.Vector3();
+    const p = new THREE.Vector3();
+
+    // On convex all-land boards, the coastal sand shelf sits at y = 0 out to 1.55;
+    // on seafaring / per-hex bank boards, 0.62 seaward sits over open water at y = -0.14.
+    const surfaceY = this.singleAllLand ? 0.014 : -0.115;
+    let nShoals = 0;
+    let nFish = 0;
+
+    for (const fg of valid) {
+      const spot = this.edgeXZ[fg.edge];
+      if (!spot) continue;
+      let [ox, oz] = this.edgeSeaward[fg.edge] ?? [0, 0];
+      if (ox === 0 && oz === 0) {
+        const d = Math.hypot(spot.x, spot.z);
+        if (d > 1e-6) {
+          ox = spot.x / d;
+          oz = spot.z / d;
+        }
+      }
+
+      const sx = spot.x + ox * 0.62;
+      const sz = spot.z + oz * 0.62;
+
+      pools.setMatrixAt(nShoals, m.makeTranslation(sx, surfaceY, sz));
+      ripples.setMatrixAt(nShoals, m.makeTranslation(sx, surfaceY + 0.006, sz));
+      nShoals++;
+
+      // Tangent direction along the coastal edge so the two silver fish arc gracefully across the shoal.
+      const tx = Math.cos(spot.angle);
+      const tz = -Math.sin(spot.angle);
+
+      // Fish 1: cresting forward arc.
+      euler.set(0, spot.angle + 0.28, -0.34);
+      q.setFromEuler(euler);
+      s.set(1, 1, 1);
+      p.set(sx - tx * 0.1 + ox * 0.04, surfaceY + 0.11, sz - tz * 0.1 + oz * 0.04);
+      fishes.setMatrixAt(nFish++, m.compose(p, q, s));
+
+      // Fish 2: companion fish arcing counter-parallel slightly further out.
+      euler.set(0, spot.angle + Math.PI - 0.24, -0.42);
+      q.setFromEuler(euler);
+      s.set(0.86, 0.86, 0.86);
+      p.set(sx + tx * 0.11 - ox * 0.05, surfaceY + 0.085, sz + tz * 0.11 - oz * 0.05);
+      fishes.setMatrixAt(nFish++, m.compose(p, q, s));
+
+      let tex = this.fishingTextures.get(fg.number);
+      if (!tex) this.fishingTextures.set(fg.number, (tex = fishingTexture(fg.number)));
+      const badgeMat = new THREE.SpriteMaterial({ map: tex, depthTest: true });
+      const badge = new THREE.Sprite(badgeMat);
+      badge.scale.set(0.68, 0.68, 1);
+      badge.position.set(sx, surfaceY + 0.44, sz);
+      this.board.add(badge);
+      this.disposables.push(badgeMat);
+    }
+
+    this.commit(pools, nShoals);
+    this.commit(ripples, nShoals);
+    this.commit(fishes, nFish);
+    this.board.add(pools, ripples, fishes);
+    this.disposables.push(poolMaterial, rippleMaterial, fishMaterial, pools, ripples, fishes);
   }
 
   private resize() {
@@ -1039,9 +1720,7 @@ export class BoardRenderer {
     this.camera.position.copy(dir).multiplyScalar(distance * zoom);
     this.controls.minDistance = distance * 0.45;
     this.controls.maxDistance = distance * 1.6;
-    const fog = this.scene.fog as THREE.Fog;
-    fog.near = Math.max(22, distance * 1.6);
-    fog.far = Math.max(60, distance * 4);
+    this.updateFogBounds();
     this.camera.updateProjectionMatrix();
     this.controls.update();
     this.requestRender();

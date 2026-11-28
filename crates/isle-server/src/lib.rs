@@ -70,6 +70,8 @@ pub struct ServerConfig {
     pub client_ip_header: Option<String>,
     /// Ranked games before a player gets a tier and a leaderboard rank.
     pub placement_games: u32,
+    /// Default per-action turn timer in seconds for newly created rooms (`0` = off).
+    pub default_turn_timer_secs: u16,
 }
 
 impl Default for ServerConfig {
@@ -90,6 +92,7 @@ impl Default for ServerConfig {
             auth_refill: Duration::from_secs(6),
             client_ip_header: None,
             placement_games: isle_proto::ranking::PLACEMENT_GAMES,
+            default_turn_timer_secs: 0,
         }
     }
 }
@@ -123,6 +126,7 @@ pub fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/api/ws", get(ws::upgrade))
         .route("/api/health", get(health))
+        .route("/api/rooms", get(rooms))
         .route("/api/replays/{id}", get(replay))
         .merge(auth::routes())
         .with_state(state.clone());
@@ -163,6 +167,18 @@ async fn replay(
             .into_response(),
         None => axum::http::StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn rooms(
+    State(state): State<AppState>,
+) -> (
+    [(header::HeaderName, HeaderValue); 1],
+    axum::Json<Vec<isle_proto::net::PublicRoomSummary>>,
+) {
+    (
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        axum::Json(state.registry.public_rooms()),
+    )
 }
 
 async fn health(State(state): State<AppState>) -> axum::Json<serde_json::Value> {

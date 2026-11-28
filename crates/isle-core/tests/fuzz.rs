@@ -5,8 +5,8 @@
 //! * rejected actions leave the state untouched.
 
 use isle_core::{
-    Action, Event, GameConfig, GameState, Phase, Resource, ResourceSet, Rng, Scenario,
-    TradeResponse,
+    Action, CityTrack, Commodity, CommoditySet, Event, GameConfig, GameState, Phase, Resource,
+    ResourceSet, Rng, Scenario, TradeGood, TradeResponse,
 };
 
 fn random_set(rng: &mut Rng, max_total: u32) -> ResourceSet {
@@ -18,30 +18,81 @@ fn random_set(rng: &mut Rng, max_total: u32) -> ResourceSet {
     s
 }
 
+fn random_cset(rng: &mut Rng, max_total: u32) -> CommoditySet {
+    let mut s = CommoditySet::EMPTY;
+    let n = rng.below(max_total + 1);
+    for _ in 0..n {
+        s.0[rng.below(3) as usize] += 1;
+    }
+    s
+}
+
 fn random_resource(rng: &mut Rng) -> Resource {
     Resource::from_index(rng.below(5) as usize).unwrap()
 }
 
+fn random_good(rng: &mut Rng) -> TradeGood {
+    TradeGood::from_code(rng.below(8) as u8).unwrap()
+}
+
 /// Arbitrary (often illegal) action, excluding open-ended trade proposals.
 fn random_action(rng: &mut Rng) -> Action {
-    match rng.below(20) {
-        17 => Action::BuildShip(rng.below(125) as u8),
+    match rng.below(34) {
+        17 => Action::BuildShip(rng.below(170) as u8),
         18 => Action::MoveShip {
-            from: rng.below(125) as u8,
-            to: rng.below(125) as u8,
+            from: rng.below(170) as u8,
+            to: rng.below(170) as u8,
         },
         19 => Action::ChooseGold(random_set(rng, 3)),
+        20 => Action::DiscardCitadel {
+            resources: random_set(rng, 6),
+            commodities: random_cset(rng, 4),
+        },
+        21 => Action::MaritimeTradeGood {
+            give: random_good(rng),
+            get: random_good(rng),
+        },
+        22 => Action::UpgradeCity {
+            track: CityTrack::from_index(rng.below(3) as usize).unwrap(),
+            metropolis: if rng.below(2) == 0 {
+                None
+            } else {
+                Some(rng.below(90) as u8)
+            },
+        },
+        23 => Action::RecruitKnight(rng.below(90) as u8),
+        24 => Action::ActivateKnight(rng.below(90) as u8),
+        25 => Action::PromoteKnight(rng.below(90) as u8),
+        26 => Action::MoveKnight {
+            from: rng.below(90) as u8,
+            to: rng.below(90) as u8,
+        },
+        27 => Action::ChaseRobber {
+            vertex: rng.below(90) as u8,
+            tile: rng.below(48) as u8,
+            victim: if rng.below(3) == 0 {
+                None
+            } else {
+                Some(rng.below(7) as u8)
+            },
+        },
+        28 => Action::PassOldBoot(rng.below(7) as u8),
+        29 => Action::FishDriveOffRobber,
+        30 => Action::FishSteal(rng.below(7) as u8),
+        31 => Action::FishTakeResource(random_resource(rng)),
+        32 => Action::FishBuildRoad(rng.below(170) as u8),
+        33 => Action::FishBuyDevCard,
         0 => Action::RollDice,
-        1 => Action::BuildRoad(rng.below(115) as u8),
-        2 => Action::BuildSettlement(rng.below(85) as u8),
-        3 => Action::BuildCity(rng.below(85) as u8),
+        1 => Action::BuildRoad(rng.below(170) as u8),
+        2 => Action::BuildSettlement(rng.below(125) as u8),
+        3 => Action::BuildCity(rng.below(125) as u8),
         4 => Action::BuyDevCard,
         5 => Action::PlayKnight,
         6 => Action::PlayRoadBuilding,
         7 => Action::PlayYearOfPlenty(random_set(rng, 3)),
         8 => Action::PlayMonopoly(random_resource(rng)),
         9 => Action::MoveRobber {
-            tile: rng.below(32) as u8,
+            tile: rng.below(48) as u8,
             victim: if rng.below(3) == 0 {
                 None
             } else {
@@ -66,10 +117,24 @@ fn random_action(rng: &mut Rng) -> Action {
 
 fn weight(a: &Action) -> u32 {
     match a {
-        Action::BuildCity(_) | Action::BuildSettlement(_) => 1000,
-        Action::BuyDevCard => 100,
-        Action::BuildRoad(_) | Action::BuildShip(_) => 20,
-        Action::MoveShip { .. } => 3,
+        Action::BuildCity(_)
+        | Action::BuildSettlement(_)
+        | Action::UpgradeCity { .. }
+        | Action::PassOldBoot(_) => 1000,
+        Action::BuyDevCard
+        | Action::FishBuyDevCard
+        | Action::RecruitKnight(_)
+        | Action::PromoteKnight(_) => 100,
+        Action::ActivateKnight(_) => 150,
+        Action::BuildRoad(_)
+        | Action::BuildShip(_)
+        | Action::FishBuildRoad(_)
+        | Action::FishTakeResource(_) => 20,
+        Action::MoveShip { .. }
+        | Action::MoveKnight { .. }
+        | Action::ChaseRobber { .. }
+        | Action::FishSteal(_)
+        | Action::FishDriveOffRobber => 3,
         Action::EndTurn => 5,
         _ => 1,
     }
@@ -249,14 +314,14 @@ fn archipelago_games_finish_and_use_the_sea() {
             assert!(g.victory_points(w) >= g.config.victory_points);
         }
         let n = g.num_players();
-        ships += (0..n).filter(|&p| g.ships[p] != 0).count();
+        ships += (0..n).filter(|&p| !g.ships[p].is_empty()).count();
         islands += (0..n).filter(|&p| g.players[p].islands != 0).count();
         gold += (0..n)
             .filter(|&p| {
                 let tiles = g.board.tiles();
                 (0..tiles.len()).any(|t| {
                     tiles[t] == isle_core::Terrain::Gold
-                        && g.buildings_of(p as u8) & g.topo().tile_vertex_mask[t] != 0
+                        && !(g.buildings_of(p as u8) & g.topo().tile_vertex_mask[t]).is_empty()
                 })
             })
             .count();
@@ -271,4 +336,268 @@ fn archipelago_games_finish_and_use_the_sea() {
         ships > 300 && islands > 50 && gold > 20,
         "ships {ships} islands {islands} gold {gold}"
     );
+}
+
+#[test]
+fn fog_games_with_cross_checking() {
+    for seed in 0..60 {
+        play_scenario(Scenario::FogIslands, seed, 2 + (seed % 3) as u8, true);
+    }
+}
+
+#[test]
+fn fog_games_finish_and_uncover_the_mist() {
+    let (mut finished, mut ships, mut revealed, mut islands) = (0, 0, 0, 0);
+    for seed in 900..1100 {
+        let (g, _) = play_scenario(Scenario::FogIslands, seed, 3 + (seed % 2) as u8, false);
+        if let Some(w) = g.winner {
+            finished += 1;
+            assert!(g.victory_points(w) >= g.config.victory_points);
+        }
+        let n = g.num_players();
+        ships += (0..n).filter(|&p| !g.ships[p].is_empty()).count();
+        islands += (0..n).filter(|&p| g.players[p].islands != 0).count();
+        revealed += 13 - g.fog_terrain_len as usize;
+        let (again, _) = play_scenario(Scenario::FogIslands, seed, 3 + (seed % 2) as u8, false);
+        assert_eq!(g, again);
+    }
+    assert!(finished > 140, "only {finished}/200 fog games finished");
+    assert!(
+        ships > 300 && revealed > 500 && islands > 30,
+        "ships {ships} revealed {revealed} islands {islands}"
+    );
+}
+
+fn play_config(config: GameConfig, seed: u64, cross_check: bool) -> GameState {
+    let players = config.num_players;
+    let mut g = GameState::new(config, seed).unwrap();
+    let mut rng = Rng::new(seed ^ 0xCAFE_BABE);
+    let mut legal = Vec::new();
+    let mut events = Vec::new();
+    while g.phase != Phase::GameOver && g.turn < 600 {
+        g.check_invariants()
+            .unwrap_or_else(|e| panic!("seed {seed}: {e}\n{g:#?}"));
+        if cross_check {
+            for p in 0..players {
+                g.legal_actions(p, &mut legal);
+                for &a in &legal {
+                    assert_eq!(g.check(p, a), Ok(()), "seed {seed}: {a:?}");
+                }
+                for _ in 0..24 {
+                    let a = random_action(&mut rng);
+                    assert_eq!(
+                        g.check(p, a).is_ok(),
+                        legal.contains(&a),
+                        "seed {seed}: check/legal disagree on {a:?} for {p} in {:?}",
+                        g.phase
+                    );
+                }
+            }
+        }
+        let p = g.to_move().unwrap();
+        g.legal_actions(p, &mut legal);
+        let a = pick(&mut rng, &legal);
+        assert_round_trip(a);
+        events.clear();
+        g.apply_with(p, a, &mut events).unwrap();
+        assert!(!events.is_empty());
+    }
+    g.check_invariants().unwrap();
+    g
+}
+
+#[test]
+fn citadels_and_extended_seafaring_and_variants_cross_check() {
+    for seed in 0..25 {
+        let _ = Commodity::Paper;
+        play_config(
+            GameConfig {
+                friendly_robber: seed % 2 == 0,
+                paired_turns: seed % 3 == 0,
+                ..GameConfig::scenario(Scenario::Citadels, 2 + (seed % 5) as u8)
+            },
+            seed + 2000,
+            true,
+        );
+    }
+    for seed in 0..15 {
+        play_config(
+            GameConfig {
+                friendly_robber: true,
+                paired_turns: seed % 2 == 0,
+                ..GameConfig::scenario(Scenario::Archipelago, 5 + (seed % 2) as u8)
+            },
+            seed + 3000,
+            true,
+        );
+        play_config(
+            GameConfig {
+                friendly_robber: seed % 2 == 0,
+                paired_turns: true,
+                ..GameConfig::scenario(Scenario::FogIslands, 5 + (seed % 2) as u8)
+            },
+            seed + 4000,
+            true,
+        );
+    }
+}
+
+#[test]
+fn custom_maps_self_play_preserve_invariants_across_all_scenarios() {
+    fn assert_copy<T: Copy>() {}
+    assert_copy::<GameState>();
+    assert_copy::<isle_core::Board>();
+    assert_copy::<GameConfig>();
+    assert_copy::<isle_core::CustomMap>();
+
+    // 1. Custom Classic (Gold-rich board with 10 tiles sharing token 8).
+    let mut cm_classic = isle_core::CustomMap::from_board(&isle_core::Board::generate(
+        &mut Rng::new(101),
+        isle_core::BoardLayout::Base,
+        true,
+    ));
+    cm_classic.terrain[0] = isle_core::Terrain::Desert;
+    cm_classic.numbers[0] = 0;
+    for t in 1..11 {
+        cm_classic.terrain[t] = if t % 2 == 0 {
+            isle_core::Terrain::Gold
+        } else {
+            isle_core::Terrain::Forest
+        };
+        cm_classic.numbers[t] = 8;
+    }
+    for seed in 0..6 {
+        play_config(
+            GameConfig {
+                custom_map: Some(cm_classic),
+                ..GameConfig::scenario(Scenario::Classic, 4)
+            },
+            5000 + seed,
+            true,
+        );
+    }
+
+    // 2. Custom Archipelago with split home island (setup_vertices = land_vertices).
+    let mut cm_arch = isle_core::CustomMap::from_board(&isle_core::Board::generate(
+        &mut Rng::new(202),
+        isle_core::BoardLayout::Archipelago,
+        true,
+    ));
+    for t in [13, 14, 15] {
+        cm_arch.terrain[t] = isle_core::Terrain::Sea;
+        cm_arch.numbers[t] = 0;
+    }
+    cm_arch.terrain[0] = isle_core::Terrain::Desert;
+    cm_arch.numbers[0] = 0;
+    for seed in 0..6 {
+        play_config(
+            GameConfig {
+                custom_map: Some(cm_arch),
+                friendly_robber: seed % 2 == 0,
+                ..GameConfig::scenario(Scenario::Archipelago, 4)
+            },
+            6000 + seed,
+            true,
+        );
+    }
+
+    // 3. Custom Extended FogIslands with >18 fog tiles (cycling fog pools up to 20).
+    let mut cm_fog = isle_core::CustomMap::from_board(&isle_core::Board::generate(
+        &mut Rng::new(303),
+        isle_core::BoardLayout::FogIslandsExtended,
+        true,
+    ));
+    // Widen the channel on the top two rows so sea tile 3 + pirate start 23 can become fog.
+    for t in [2, 9] {
+        if cm_fog.terrain[t] != isle_core::Terrain::Desert {
+            cm_fog.terrain[t] = isle_core::Terrain::Sea;
+            cm_fog.numbers[t] = 0;
+        }
+    }
+    let topo = isle_core::BoardLayout::FogIslandsExtended.topology();
+    let mut land_verts = isle_core::BitSet::EMPTY;
+    for t in 0..topo.num_tiles {
+        if cm_fog.terrain[t].is_land() {
+            land_verts |= topo.tile_vertex_mask[t];
+        }
+    }
+    let mut extra = 0;
+    for t in 0..topo.num_tiles {
+        if cm_fog.terrain[t] == isle_core::Terrain::Sea
+            && (topo.tile_vertex_mask[t] & land_verts).is_empty()
+            && extra < 3
+        {
+            cm_fog.terrain[t] = isle_core::Terrain::Fog;
+            cm_fog.numbers[t] = 0;
+            extra += 1;
+        }
+    }
+    let fog_total = cm_fog.terrain[..topo.num_tiles]
+        .iter()
+        .filter(|&&t| t == isle_core::Terrain::Fog)
+        .count();
+    assert!(fog_total >= 20, "expected >=20 fog tiles, got {fog_total}");
+    for seed in 0..6 {
+        play_config(
+            GameConfig {
+                custom_map: Some(cm_fog),
+                paired_turns: seed % 2 == 0,
+                ..GameConfig::scenario(Scenario::FogIslands, 5)
+            },
+            7000 + seed,
+            true,
+        );
+    }
+
+    // 4. Custom Citadels (commodity-heavy board).
+    let mut cm_cit = isle_core::CustomMap::from_board(&isle_core::Board::generate(
+        &mut Rng::new(404),
+        isle_core::BoardLayout::Base,
+        true,
+    ));
+    cm_cit.terrain[0] = isle_core::Terrain::Desert;
+    cm_cit.numbers[0] = 0;
+    let cycle = [
+        isle_core::Terrain::Forest,
+        isle_core::Terrain::Pasture,
+        isle_core::Terrain::Mountains,
+        isle_core::Terrain::Fields,
+        isle_core::Terrain::Hills,
+    ];
+    for t in 1..19 {
+        cm_cit.terrain[t] = cycle[t % cycle.len()];
+        cm_cit.numbers[t] = [4, 5, 6, 8, 9, 10][t % 6];
+    }
+    for seed in 0..6 {
+        play_config(
+            GameConfig {
+                custom_map: Some(cm_cit),
+                ..GameConfig::scenario(Scenario::Citadels, 4)
+            },
+            8000 + seed,
+            true,
+        );
+    }
+
+    // 5. Fishermen + balanced 36-card event_deck across 2–6 players (including Paired Turns & CustomMap).
+    let mut finished = 0;
+    for seed in 0..30 {
+        let players = 2 + (seed % 5) as u8;
+        let g = play_config(
+            GameConfig {
+                friendly_robber: seed % 2 == 0,
+                paired_turns: players > 4 && seed % 2 == 1,
+                event_deck: seed % 3 != 0,
+                custom_map: (players <= 4 && seed % 5 == 0).then_some(cm_cit),
+                ..GameConfig::scenario(Scenario::Fishermen, players)
+            },
+            9000 + seed,
+            true,
+        );
+        if let Some(w) = g.winner {
+            finished += 1;
+            assert!(g.victory_points(w) >= g.target_victory_points(w));
+        }
+    }
+    assert!(finished >= 20, "only {finished}/30 fishermen fuzz games finished");
 }
