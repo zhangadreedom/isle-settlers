@@ -856,3 +856,36 @@ export function FishMarketModal(props: { game: Game; onClose: () => void }) {
   );
 }
 
+/** Caravans & Rivers: spend 2 gold coins to buy any 1 resource from the bank. */
+export function CoinMarketModal(props: { game: Game; onClose: () => void }) {
+  const g = props.game;
+  const coins = () => (g.me !== null ? g.view().players[g.me]?.coins ?? 0 : 0);
+  const avail = () =>
+    g.legal().actions.flatMap((a) => (a.type === 'SpendCoinsResource' ? [a.value] : []));
+
+  return (
+    <Modal title={`绿洲钱庄（持有 ${coins()} 枚金币）`} onClose={props.onClose}>
+      <p class="muted small">
+        每花费 <b>2 枚金币</b> 可从银行直接购入任意 1 张资源；独居首富（≥4 币）拥有【富甲一方】+2 分，留神别花光至 0 币！
+      </p>
+      <div class="choices row">
+        <For each={RESOURCES}>
+          {(res, idx) => (
+            <button
+              class="choice primary"
+              disabled={!avail().includes(res)}
+              onClick={() => {
+                g.act((a) => a.type === 'SpendCoinsResource' && a.value === res);
+                if (coins() < 4) props.onClose();
+              }}
+            >
+              <ResIcon r={idx()} /> 购入{RESOURCE_NAME[res]}（−2 币）
+            </button>
+          )}
+        </For>
+      </div>
+    </Modal>
+  );
+}
+
+

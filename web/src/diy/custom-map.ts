@@ -200,6 +200,7 @@ export function layoutFor(scenario: Scenario, players: number): BoardLayout {
     case 'Classic':
     case 'Citadels':
     case 'Fishermen':
+    case 'Caravans':
       return ext ? 'Extended' : 'Base';
   }
 }

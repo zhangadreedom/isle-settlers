@@ -41,7 +41,8 @@ pub use resources::{CityTrack, Commodity, CommoditySet, HarborKind, Resource, Re
 pub use rng::Rng;
 pub use state::{
     BARBARIAN_STEPS, CANONICAL_DICE_DECK, ConfigError, DICE_DECK_RESHUFFLE_AT, DICE_DECK_SIZE,
-    DevCard, GameConfig, GameState, MAX_FISH_HAND, MAX_KNIGHTS_PER_LEVEL, MAX_PLAYERS, MAX_SHIPS,
-    Phase, PlayerState, Scenario, TradeOffer, TradeResponse,
+    DevCard, GameConfig, GameState, MAX_BRIDGES, MAX_CAMELS, MAX_COINS, MAX_FISH_HAND,
+    MAX_KNIGHTS_PER_LEVEL, MAX_PLAYERS, MAX_SHIPS, Phase, PlayerState, Scenario, TradeOffer,
+    TradeResponse, WEALTHIEST_MIN_COINS,
 };
 pub use topology::{BoardLayout, Topology};

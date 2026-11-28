@@ -345,7 +345,7 @@ async fn valid_session(state: &AppState, headers: &HeaderMap) -> Result<Session,
 }
 
 /// The token of an `Authorization: Bearer <token>` header.
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
     let token = token.trim();

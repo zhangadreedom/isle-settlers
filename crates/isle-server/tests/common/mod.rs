@@ -199,13 +199,14 @@ impl Client {
 /// Simple progress-making policy over the legal actions.
 pub fn choose(legal: &[Action]) -> Option<Action> {
     let rank = |a: &Action| match a {
-        Action::BuildCity(_) => 0,
-        Action::BuildSettlement(_) => 1,
-        Action::BuildRoad(_) => 2,
-        Action::RollDice => 3,
-        Action::Discard(_) | Action::MoveRobber { .. } => 4,
-        Action::RespondTrade { accept: false } => 5,
-        Action::EndTurn => 6,
+        Action::PlaceCamel(_) => 0,
+        Action::BuildCity(_) => 1,
+        Action::BuildSettlement(_) => 2,
+        Action::BuildBridge(_) | Action::BuildRoad(_) => 3,
+        Action::RollDice => 4,
+        Action::Discard(_) | Action::MoveRobber { .. } => 5,
+        Action::RespondTrade { accept: false } => 6,
+        Action::EndTurn => 7,
         _ => 9,
     };
     legal.iter().copied().min_by_key(rank)

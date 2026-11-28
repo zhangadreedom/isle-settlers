@@ -18,6 +18,33 @@ pub use greedy::GreedyBot;
 use isle_core::{Action, GameState, Rng};
 pub use mcts::{MctsBot, MctsConfig, SearchStats};
 
+/// Strategic personality bias for [`GreedyBot`] and [`MctsBot`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BotPersona {
+    #[default]
+    Balanced,
+    RoadBuilder,
+    CityBaron,
+    Warlord,
+    Merchant,
+}
+
+impl BotPersona {
+    /// Parses a short `@persona` suffix (case-insensitive).
+    pub fn parse(raw: &str) -> Option<BotPersona> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "balanced" | "default" => Some(BotPersona::Balanced),
+            "road" | "roadbuilder" | "road_builder" | "road-builder" => {
+                Some(BotPersona::RoadBuilder)
+            }
+            "city" | "citybaron" | "city_baron" | "city-baron" => Some(BotPersona::CityBaron),
+            "warlord" | "knight" | "army" => Some(BotPersona::Warlord),
+            "merchant" | "trader" | "trade" => Some(BotPersona::Merchant),
+            _ => None,
+        }
+    }
+}
+
 /// A computer player.
 pub trait Bot {
     fn name(&self) -> &'static str;
@@ -72,8 +99,10 @@ impl WeightedRandomBot {
         match action {
             Action::BuildCity(_) => 10_000,
             Action::PassOldBoot(_) => 5_000,
-            Action::BuildSettlement(_) => 1_000,
+            Action::BuildSettlement(_) | Action::PlaceCamel(_) => 1_000,
+            Action::BuildBridge(_) => 250,
             Action::BuyDevCard | Action::FishBuyDevCard => 100,
+            Action::SpendCoinsResource(_) => 25,
             Action::FishBuildRoad(_) => 15,
             Action::BuildRoad(_) | Action::BuildShip(_) | Action::FishTakeResource(_) => 10,
             _ => 1,
@@ -104,30 +133,42 @@ impl Bot for WeightedRandomBot {
 pub const BOT_NAMES: [&str; 4] = ["random", "weighted", "greedy", "mcts"];
 
 /// Creates a bot from its name: `random`, `weighted`, `greedy`, `greedy:trade`
-/// or `mcts`. The search bot takes options: `mcts:N` sets the iterations per
-/// decision, and `mcts:N/key=value/...` overrides settings (see [`MctsConfig::set`]).
+/// or `mcts`, optionally suffixed with `@persona` (`@road`, `@city`,
+/// `@warlord`, `@merchant`, `@balanced`). The search bot takes options:
+/// `mcts:N` sets the iterations per decision, and `mcts:N/key=value/...`
+/// overrides settings (see [`MctsConfig::set`]).
 pub fn bot_by_name(name: &str, seed: u64) -> Option<Box<dyn Bot + Send>> {
-    Some(match name {
+    let (base, persona) = match name.rsplit_once('@') {
+        Some((b, p)) => (b, BotPersona::parse(p)?),
+        None => (name, BotPersona::Balanced),
+    };
+    Some(match base {
         "random" => Box::new(RandomBot::new(seed)),
         "weighted" => Box::new(WeightedRandomBot::new(seed)),
-        "greedy" => Box::new(GreedyBot::new(seed)),
+        "greedy" if persona == BotPersona::Balanced => Box::new(GreedyBot::new(seed)),
+        "greedy" => Box::new(GreedyBot::with_persona(seed, persona)),
         "greedy:trade" => {
-            let mut bot = GreedyBot::new(seed);
+            let mut bot = GreedyBot::with_persona(seed, persona);
             bot.set_propose_trades(true);
             Box::new(bot)
         }
-        "mcts" => Box::new(MctsBot::new(seed)),
+        "mcts" if persona == BotPersona::Balanced => Box::new(MctsBot::new(seed)),
+        "mcts" => Box::new(MctsBot::with_persona(seed, persona)),
         _ => {
-            let mut parts = name.strip_prefix("mcts:")?.split('/');
+            let mut parts = base.strip_prefix("mcts:")?.split('/');
             let mut config = MctsConfig {
                 iterations: parts.next()?.parse().ok().filter(|&n| n > 0)?,
-                ..MctsConfig::default()
+                ..MctsConfig::for_persona(persona)
             };
             for kv in parts {
                 let (key, value) = kv.split_once('=')?;
                 config.set(key, value.parse().ok()?)?;
             }
-            Box::new(MctsBot::with_config(seed, config))
+            let mut bot = MctsBot::with_config(seed, config);
+            if persona == BotPersona::Merchant {
+                bot.set_propose_trades(true);
+            }
+            Box::new(bot)
         }
     })
 }
@@ -526,5 +567,97 @@ mod tests {
             }
         }
         assert!(finished >= 18, "only {finished}/20 fishermen greedy games finished");
+    }
+
+    #[test]
+    fn bot_personas_and_caravans_ai_play_strategically() {
+        use isle_core::topology::edges_in;
+        use isle_core::{Phase, Resource, ResourceSet, Scenario};
+
+        // 1. `@persona` suffixes parse across greedy and mcts variants.
+        for spec in [
+            "greedy@road",
+            "greedy@city",
+            "greedy@warlord",
+            "greedy@merchant",
+            "mcts@road",
+            "mcts:60@city",
+            "mcts:60/c=0.4@warlord",
+            "mcts:60@merchant",
+        ] {
+            assert!(bot_by_name(spec, 7).is_some(), "failed to parse {spec}");
+        }
+        assert!(bot_by_name("greedy@unknown", 7).is_none());
+
+        // 2. Tactical Caravans check: GreedyBot spends 2 coins for 1 missing City Ore, builds City,
+        // and places the camel onto its own building rather than an opponent's building!
+        let mut g = GameState::new(GameConfig::scenario(Scenario::Caravans, 3), 19).unwrap();
+        g.setup_step = 6;
+        g.phase = Phase::Main;
+        g.dice = Some((2, 6));
+        let oasis_edges: Vec<u8> = edges_in(g.camel_spots()).collect();
+        let e_own = oasis_edges[0];
+        let [v_own, _] = g.topo().edge_vertices[e_own as usize];
+        // Find an oasis edge whose endpoints are disjoint from `v_own` and its neighbours for opponent.
+        let e_opp = *oasis_edges
+            .iter()
+            .find(|&&e| {
+                e != e_own
+                    && g.topo().edge_vertices[e as usize].iter().all(|&v| {
+                        v != v_own && !g.topo().vertex_adj_mask[v_own as usize].contains(v)
+                    })
+            })
+            .unwrap();
+        let v_opp = g.topo().edge_vertices[e_opp as usize]
+            .into_iter()
+            .find(|&v| v != v_own && !g.topo().vertex_adj_mask[v_own as usize].contains(v))
+            .unwrap();
+        g.settlements[0].insert(v_own);
+        g.players[0].settlements_left -= 1;
+        g.settlements[1].insert(v_opp);
+        g.players[1].settlements_left -= 1;
+
+        g.players[0].coins = 2;
+        let almost_city = ResourceSet::new(0, 0, 0, 2, 2);
+        g.bank -= almost_city;
+        g.players[0].hand = almost_city;
+
+        let mut bot = GreedyBot::with_persona(3, BotPersona::Merchant);
+        let mut legal = Vec::new();
+        g.legal_actions(0, &mut legal);
+        assert_eq!(
+            bot.choose(&g, 0, &legal),
+            Action::SpendCoinsResource(Resource::Ore)
+        );
+        g.apply(0, Action::SpendCoinsResource(Resource::Ore)).unwrap();
+
+        g.legal_actions(0, &mut legal);
+        assert_eq!(bot.choose(&g, 0, &legal), Action::BuildCity(v_own));
+        g.apply(0, Action::BuildCity(v_own)).unwrap();
+        assert_eq!(g.phase, Phase::PlaceCamel);
+
+        g.legal_actions(0, &mut legal);
+        let camel_act = bot.choose(&g, 0, &legal);
+        let Action::PlaceCamel(chosen_e) = camel_act else {
+            panic!("expected PlaceCamel, got {camel_act:?}");
+        };
+        assert!(
+            g.topo().edge_vertices[chosen_e as usize].contains(&v_own),
+            "expected camel adjacent to own city {v_own}, got edge {chosen_e}"
+        );
+        g.apply(0, camel_act).unwrap();
+        assert_eq!(g.public_victory_points(0), 3);
+        g.check_invariants().unwrap();
+
+        // 3. Mixed-persona Caravans games (including MctsBot@city) complete cleanly.
+        let mut m = bot_by_name("mcts:60@city", 101).unwrap();
+        let mut r = bot_by_name("greedy@road", 102).unwrap();
+        let mut w = bot_by_name("greedy@warlord", 103).unwrap();
+        let mut mr = bot_by_name("greedy@merchant", 104).unwrap();
+        let mut cg = GameState::new(GameConfig::scenario(Scenario::Caravans, 4), 88).unwrap();
+        let mut bots: Vec<&mut dyn Bot> =
+            vec![m.as_mut(), r.as_mut(), w.as_mut(), mr.as_mut()];
+        let out = play_game(&mut cg, &mut bots, 1000, true);
+        assert!(out.winner.is_some());
     }
 }

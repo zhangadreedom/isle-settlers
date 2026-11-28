@@ -139,6 +139,12 @@ pub enum Action {
     FishBuildRoad(u8),
     /// Fishermen (7 fish): draw one development card.
     FishBuyDevCard,
+    /// Caravans: place a camel caravan segment on `edge`.
+    PlaceCamel(u8),
+    /// Caravans: build a stone bridge across a golden river `edge`.
+    BuildBridge(u8),
+    /// Caravans (2 coins): buy one resource card of choice from the bank.
+    SpendCoinsResource(Resource),
 }
 
 impl Action {
@@ -207,6 +213,9 @@ impl Action {
             Action::FishTakeResource(r) => out.extend([31, resource(r)]),
             Action::FishBuildRoad(e) => out.extend([32, e]),
             Action::FishBuyDevCard => out.push(33),
+            Action::PlaceCamel(e) => out.extend([34, e]),
+            Action::BuildBridge(e) => out.extend([35, e]),
+            Action::SpendCoinsResource(r) => out.extend([36, resource(r)]),
         }
     }
 
@@ -326,6 +335,9 @@ impl Action {
             31 => (Action::FishTakeResource(resource(0)?), 1),
             32 => (Action::FishBuildRoad(arg(0)?), 1),
             33 => (Action::FishBuyDevCard, 0),
+            34 => (Action::PlaceCamel(arg(0)?), 1),
+            35 => (Action::BuildBridge(arg(0)?), 1),
+            36 => (Action::SpendCoinsResource(resource(0)?), 1),
             _ => return None,
         };
         Some((action, 1 + operands))
@@ -545,6 +557,23 @@ pub enum Event {
     },
     FishResourceTaken {
         player: u8,
+        resource: Resource,
+    },
+    CamelPlaced {
+        player: u8,
+        edge: u8,
+    },
+    BridgeBuilt {
+        player: u8,
+        edge: u8,
+    },
+    CoinsGained {
+        player: u8,
+        amount: u8,
+    },
+    CoinsSpent {
+        player: u8,
+        cost: u8,
         resource: Resource,
     },
     GameWon {

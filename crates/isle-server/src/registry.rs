@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::ServerConfig;
 use crate::auth::Accounts;
+use crate::daily::DailyArchive;
 use crate::ids;
 use crate::room::{Attached, Outbox, Room, RoomCmd, RoomOptions};
 use crate::store::{ReplayArchive, SeatAccount, Store};
@@ -24,6 +25,7 @@ pub struct Registry {
     accounts: Option<Arc<Accounts>>,
     store: Option<Store>,
     replays: Arc<ReplayArchive>,
+    daily: Arc<DailyArchive>,
     rooms: Mutex<HashMap<String, RoomEntry>>,
     me: Weak<Registry>,
 }
@@ -33,11 +35,13 @@ impl Registry {
     pub fn new(config: ServerConfig, accounts: Option<Arc<Accounts>>) -> Arc<Registry> {
         let store = config.data_dir.as_ref().map(|d| Store::open(d.clone()));
         let replays = Arc::new(ReplayArchive::new(config.data_dir.as_deref()));
+        let daily = Arc::new(DailyArchive::new(config.data_dir.as_deref()));
         let registry = Arc::new_cyclic(|me| Registry {
             config,
             accounts,
             store,
             replays,
+            daily,
             rooms: Mutex::new(HashMap::new()),
             me: me.clone(),
         });
@@ -74,6 +78,10 @@ impl Registry {
 
     pub fn replays(&self) -> &Arc<ReplayArchive> {
         &self.replays
+    }
+
+    pub fn daily(&self) -> &Arc<DailyArchive> {
+        &self.daily
     }
 
     pub fn room_count(&self) -> usize {

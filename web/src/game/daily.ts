@@ -34,6 +34,7 @@ const DAILY_SCENARIO_ROTATION: readonly Scenario[] = [
   'FogIslands',
   'Citadels',
   'Fishermen',
+  'Caravans',
 ];
 
 interface ScenarioMeta {
@@ -71,6 +72,11 @@ const SCENARIO_META: Record<string, ScenarioMeta> = {
     name: '丰饶渔港',
     defaultVp: 10,
     tagline: '经营沿岸渔场与内陆湖泊，巧用鲜鱼奇策',
+  },
+  Caravans: {
+    name: '绿洲驼商',
+    defaultVp: 12,
+    tagline: '引导绿洲骆驼商队穿村加分，跨黄金河造桥积累金币',
   },
 };
 

@@ -5,6 +5,8 @@ use isle_core::board::PIPS;
 use isle_core::topology::{NONE, vertices_in};
 use isle_core::{BARBARIAN_STEPS, CityTrack, DevCard, GameState, MAX_PLAYERS, Terrain};
 
+use crate::BotPersona;
+
 /// Tunable weights of the evaluation.
 #[derive(Clone, Copy, Debug)]
 pub struct Weights {
@@ -33,6 +35,8 @@ pub struct Weights {
     pub sea: f32,
     /// Sharpness of the win-probability estimate (per point of lead).
     pub temperature: f32,
+    /// Optional AI personality bias (`Balanced` keeps canonical weights).
+    pub persona: BotPersona,
 }
 
 impl Default for Weights {
@@ -50,7 +54,37 @@ impl Default for Weights {
             build: 0.0,
             sea: 0.8,
             temperature: 1.3,
+            persona: BotPersona::Balanced,
         }
+    }
+}
+
+impl Weights {
+    /// Evaluation weights biased for `persona`.
+    pub fn for_persona(persona: BotPersona) -> Self {
+        let mut w = Weights {
+            persona,
+            ..Weights::default()
+        };
+        match persona {
+            BotPersona::Balanced => {}
+            BotPersona::RoadBuilder => {
+                w.road *= 1.35;
+                w.sea *= 1.35;
+                w.spots *= 1.35;
+            }
+            BotPersona::CityBaron => {
+                w.income *= 1.15;
+            }
+            BotPersona::Warlord => {
+                w.dev_card *= 1.35;
+                w.knight *= 1.35;
+            }
+            BotPersona::Merchant => {
+                w.harbor *= 1.35;
+            }
+        }
+        w
     }
 }
 
@@ -128,6 +162,34 @@ pub fn fish_income(s: &GameState, q: u8) -> f32 {
         out += (s_cnt + 2.0 * c_cnt) * (lake_pips / 36.0);
     }
     out
+}
+
+/// Expected gold coins gained per dice roll for seat `q` in Caravans mode.
+pub fn coin_income(s: &GameState, q: u8) -> f32 {
+    let topo = s.topo();
+    let buildings = s.buildings_of(q);
+    let mut out = 0.0f32;
+    for v in vertices_in(buildings) {
+        for &t in &topo.vertex_tiles[v as usize] {
+            if t == NONE {
+                break;
+            }
+            let terrain = s.board.terrain[t as usize];
+            let gives_coin = matches!(terrain, Terrain::Gold | Terrain::Mountains)
+                || !(topo.tile_edge_mask(t) & s.board.river_edges).is_empty();
+            if gives_coin && terrain.produces() {
+                let pips = PIPS[s.board.numbers[t as usize] as usize] as f32;
+                let robbed = if t == s.robber { 0.35 } else { 1.0 };
+                out += pips / 36.0 * robbed;
+            }
+        }
+    }
+    out
+}
+
+/// Evaluates every seat's position strength with `persona` biases applied.
+pub fn evaluate(s: &GameState, persona: BotPersona, out: &mut [f32; MAX_PLAYERS]) {
+    scores(s, &Weights::for_persona(persona), out);
 }
 
 /// Position strength of every seat, in victory-point units.
@@ -220,10 +282,74 @@ pub fn scores(s: &GameState, w: &Weights, out: &mut [f32; MAX_PLAYERS]) {
         }
 
         if s.config.scenario.is_fishermen() {
-            score += w.income * 0.42 * fish_income(s, q);
-            score += 0.09 * ps.fish as f32;
+            let f_mult = if w.persona == BotPersona::Merchant {
+                1.35
+            } else {
+                1.0
+            };
+            score += (w.income * 0.42 * fish_income(s, q) + 0.09 * ps.fish as f32) * f_mult;
             if s.old_boot_owner == Some(q) {
                 score -= 0.85;
+            }
+        }
+
+        if s.config.scenario.is_caravans() {
+            let c_mult = if w.persona == BotPersona::Merchant {
+                1.35
+            } else {
+                1.0
+            };
+            score += 0.55 * c_mult * coin_income(s, q);
+            score += 0.18 * c_mult * ps.coins.min(8) as f32;
+            if ps.coins >= 1 {
+                score += 0.25 * c_mult;
+            }
+        }
+
+        match w.persona {
+            BotPersona::Balanced => {}
+            BotPersona::RoadBuilder => {
+                if s.longest_road_owner == Some(q) {
+                    score += 0.7;
+                }
+                if s.config.scenario.is_caravans() {
+                    let camel_roads =
+                        ((s.roads[q as usize] | s.bridges[q as usize]) & s.camels).count_ones()
+                            as f32;
+                    score +=
+                        0.28 * camel_roads + 0.22 * s.bridges[q as usize].count_ones() as f32;
+                }
+            }
+            BotPersona::CityBaron => {
+                score += 0.35 * w.income * (inc[3] * scarce[3] + inc[4] * scarce[4]);
+                score += 0.7 * s.cities[q as usize].count_ones() as f32;
+                if citadels {
+                    let metros = s
+                        .metropolis_owners
+                        .iter()
+                        .filter(|&&o| o == Some(q))
+                        .count() as f32;
+                    let prog: u8 = ps.city_progress.iter().sum();
+                    score += 0.7 * metros + 0.15 * prog as f32;
+                }
+            }
+            BotPersona::Warlord => {
+                if s.largest_army_owner == Some(q) {
+                    score += 0.7;
+                }
+                if citadels {
+                    score += 0.35 * ps.defender_points as f32
+                        + 0.08 * s.active_knight_strength(q) as f32;
+                }
+            }
+            BotPersona::Merchant => {
+                if s.wealthiest_owner == Some(q) {
+                    score += 0.7;
+                }
+                if citadels {
+                    let csum: f32 = commodity_income(s, q).iter().sum();
+                    score += 0.7 * csum + 0.25 * ps.city_progress[CityTrack::Trade.index()] as f32;
+                }
             }
         }
 

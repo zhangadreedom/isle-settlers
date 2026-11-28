@@ -14,6 +14,7 @@
 pub mod account_store;
 pub mod accounts;
 mod auth;
+pub mod daily;
 pub mod ranking;
 pub mod rating;
 mod registry;
@@ -34,6 +35,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 pub use auth::Accounts;
+pub use daily::DailyArchive;
 pub use registry::Registry;
 pub use store::ReplayArchive;
 
@@ -129,6 +131,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/rooms", get(rooms))
         .route("/api/replays/{id}", get(replay))
         .merge(auth::routes())
+        .merge(daily::routes())
         .with_state(state.clone());
     if let Some(dir) = &state.registry.config().static_dir {
         // Hashed assets never change; everything else is revalidated.

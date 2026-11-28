@@ -55,6 +55,7 @@ const SCENARIO_ITEMS: { id: Scenario; label: string }[] = [
   { id: 'FogIslands', label: '迷雾群岛' },
   { id: 'Citadels', label: '城邦与铁卫' },
   { id: 'Fishermen', label: '渔场与丰年' },
+  { id: 'Caravans', label: '骆驼商队' },
 ];
 
 const TERRAIN_BRUSHES: { id: Terrain; label: string; color: string; hint: string }[] = [

@@ -290,6 +290,14 @@ export function describe(e: Event, name: (seat: number) => string): string | nul
       return `${name(e.value.player)} 消耗 ${e.value.cost} 条海鱼兑换奇策`;
     case 'FishResourceTaken':
       return `${name(e.value.player)} 用海鱼从银行选取 1 ${RESOURCE_SHORT[e.value.resource]}`;
+    case 'CamelPlaced':
+      return `${name(e.value.player)} 引导骆驼商队延伸至新商道`;
+    case 'BridgeBuilt':
+      return `${name(e.value.player)} 在黄金河上建成石拱桥（+2 金币）`;
+    case 'CoinsGained':
+      return `${name(e.value.player)} 获得 ${e.value.amount} 枚金币`;
+    case 'CoinsSpent':
+      return `${name(e.value.player)} 花费 ${e.value.cost} 枚金币购入 1 ${RESOURCE_SHORT[e.value.resource]}`;
     case 'TurnEnded':
     case 'SpecialBuildPassed':
     case 'PairedTurnEnded':

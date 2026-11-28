@@ -1,5 +1,6 @@
-import { For, type JSX } from 'solid-js';
+import { createSignal, For, onCleanup, type JSX } from 'solid-js';
 import type { ResourceSet } from '../generated/proto';
+import { isColorblindMode, onColorblindChange, SEAT_SYMBOLS } from '../board/a11y';
 import { PLAYER_CSS } from '../board/palette';
 import { COMMODITIES, COMMODITY_CSS, COMMODITY_NAME, COMMODITY_SHORT, RESOURCES, RESOURCE_CSS, RESOURCE_NAME, RESOURCE_SHORT } from '../game/text';
 
@@ -38,7 +39,13 @@ export function SetView(props: { set: ResourceSet }) {
 }
 
 export function SeatDot(props: { seat: number }) {
-  return <span class="dot" style={{ background: PLAYER_CSS[props.seat] }} />;
+  const [cb, setCb] = createSignal(isColorblindMode());
+  onCleanup(onColorblindChange(setCb));
+  return (
+    <span class="dot" classList={{ cb: cb() }} style={{ background: PLAYER_CSS[props.seat] }}>
+      {cb() ? SEAT_SYMBOLS[props.seat] ?? '' : ''}
+    </span>
+  );
 }
 
 /** − n + control. */

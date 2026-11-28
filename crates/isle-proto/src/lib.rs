@@ -21,10 +21,12 @@ pub use isle_core::{
 };
 
 pub mod account;
+pub mod daily;
 pub mod net;
 pub mod ranking;
 pub mod replay;
 
+pub use daily::{DailyLeaderboard, DailyScoreEntry, DailySubmitRequest};
 pub use replay::{ReplayError, ReplayPlayer, ReplayRecord};
 
 /// Owner value meaning "nobody" in per-spot arrays.
@@ -51,6 +53,9 @@ pub struct BoardInfo {
     /// Fishermen mode: coastal fishing grounds (`edge` + `number` token).
     #[serde(default)]
     pub fishing_grounds: Vec<FishingGround>,
+    /// Caravans mode: golden river edges flowing from the oasis to the coast.
+    #[serde(default)]
+    pub river_edges: Vec<u8>,
 }
 
 /// Public information about a seat.
@@ -82,6 +87,12 @@ pub struct PlayerPublic {
     /// Fishermen mode: fish tokens currently held (`0..=7`).
     #[serde(default)]
     pub fish_count: u8,
+    /// Caravans mode: gold coins currently held (`0..=99`).
+    #[serde(default)]
+    pub coins: u8,
+    /// Caravans mode: stone bridges remaining (`0..=3`).
+    #[serde(default)]
+    pub bridges_left: u8,
 }
 
 /// The viewer's own private information.
@@ -167,6 +178,12 @@ pub struct PlayerView {
     pub roads: Vec<u8>,
     /// Per edge: `EMPTY` or the owner of a ship there.
     pub ships: Vec<u8>,
+    /// Per edge: `EMPTY` or the owner of a stone bridge there (Caravans mode).
+    #[serde(default)]
+    pub bridges: Vec<u8>,
+    /// Edges holding a camel caravan segment (Caravans mode).
+    #[serde(default)]
+    pub camels: Vec<u8>,
     pub players: Vec<PlayerPublic>,
     pub me: Option<PrivateInfo>,
     /// Cards each seat still has to discard after a 7.
@@ -179,6 +196,9 @@ pub struct PlayerView {
     /// Fishermen mode: seat currently holding the Old Boot (`+1` VP needed to win).
     #[serde(default)]
     pub old_boot_owner: Option<u8>,
+    /// Caravans mode: seat currently holding Wealthiest Settler (`+2` VP; 0-coin seats lose 1 VP).
+    #[serde(default)]
+    pub wealthiest_owner: Option<u8>,
     /// Balanced dice deck house rule: cards remaining before New Year reshuffle.
     #[serde(default)]
     pub dice_deck_left: Option<u8>,
@@ -202,6 +222,7 @@ pub fn board_info(state: &GameState) -> BoardInfo {
         harbors: state.board.harbor_kinds().to_vec(),
         islands: state.board.tile_island[..state.topo().num_tiles].to_vec(),
         fishing_grounds: state.board.active_fishing_grounds().to_vec(),
+        river_edges: edges_in(state.board.river_edges).collect(),
     }
 }
 
@@ -212,6 +233,7 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
     let mut buildings = vec![EMPTY; topo.num_vertices];
     let mut roads = vec![EMPTY; topo.num_edges];
     let mut ships = vec![EMPTY; topo.num_edges];
+    let mut bridges = vec![EMPTY; topo.num_edges];
     for p in 0..n {
         for v in vertices_in(state.settlements[p]) {
             buildings[v as usize] = p as u8;
@@ -224,6 +246,9 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
         }
         for e in edges_in(state.ships[p]) {
             ships[e as usize] = p as u8;
+        }
+        for e in edges_in(state.bridges[p]) {
+            bridges[e as usize] = p as u8;
         }
     }
     let players = (0..n as u8)
@@ -247,6 +272,8 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
                 knights_left: ps.knights_left,
                 defender_points: ps.defender_points,
                 fish_count: ps.fish,
+                coins: ps.coins,
+                bridges_left: ps.bridges_left,
             }
         })
         .collect();
@@ -279,6 +306,8 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
         buildings,
         roads,
         ships,
+        bridges,
+        camels: edges_in(state.camels).collect(),
         players,
         me,
         pending_discard: state.pending_discard[..n].to_vec(),
@@ -287,6 +316,7 @@ pub fn player_view(state: &GameState, viewer: Option<u8>) -> PlayerView {
         longest_road_owner: state.longest_road_owner,
         largest_army_owner: state.largest_army_owner,
         old_boot_owner: state.old_boot_owner,
+        wealthiest_owner: state.wealthiest_owner,
         dice_deck_left: state.config.event_deck.then_some(state.dice_deck_len),
         winner: state.winner,
         final_points: state
@@ -338,6 +368,7 @@ mod tests {
             (isle_core::Scenario::FogIslands, false, 20..35u64),
             (isle_core::Scenario::Citadels, false, 35..50u64),
             (isle_core::Scenario::Fishermen, true, 50..62u64),
+            (isle_core::Scenario::Caravans, false, 62..74u64),
         ] {
             for seed in seeds {
                 let config = GameConfig {

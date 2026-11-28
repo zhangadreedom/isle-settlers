@@ -95,6 +95,9 @@ impl Store {
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
+            if path.file_name().is_some_and(|n| n == "daily.json") {
+                continue;
+            }
             match std::fs::read(&path)
                 .map_err(|e| e.to_string())
                 .and_then(|bytes| {

@@ -25,6 +25,14 @@ pub const MAX_KNIGHTS_PER_LEVEL: u8 = 2;
 pub const BARBARIAN_STEPS: u8 = 7;
 /// Maximum fish tokens held by a player in Fishermen mode.
 pub const MAX_FISH_HAND: u8 = 7;
+/// Stone bridges per player in Caravans mode.
+pub const MAX_BRIDGES: u8 = 3;
+/// Total camel caravan segments in the supply in Caravans mode.
+pub const MAX_CAMELS: u8 = 22;
+/// Maximum gold coins a player can hold in Caravans mode.
+pub const MAX_COINS: u8 = 99;
+/// Minimum gold coins required to claim Wealthiest Settler in Caravans mode.
+pub const WEALTHIEST_MIN_COINS: u8 = 4;
 /// Size of the balanced 36-card dice deck.
 pub const DICE_DECK_SIZE: usize = 36;
 /// Cards remaining in the dice deck that trigger the New Year reshuffle.
@@ -127,7 +135,7 @@ impl BoardLayout {
     }
 }
 
-/// What is played: the classic island, a seafaring map, Citadels, or Fishermen.
+/// What is played: the classic island, a seafaring map, Citadels, Fishermen, or Caravans.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -142,13 +150,15 @@ pub enum Scenario {
     Citadels,
     /// Fishermen of Catan: coastal fishing grounds, trout lake, fish tokens and the Old Boot, 2–6 players.
     Fishermen,
+    /// Caravans & Golden River: oasis, golden river, bridges, camel caravans and gold coins, 2–6 players.
+    Caravans,
 }
 
 impl Scenario {
     pub const fn victory_points(self) -> u8 {
         match self {
             Scenario::Classic | Scenario::Fishermen => 10,
-            Scenario::Archipelago | Scenario::FogIslands => 12,
+            Scenario::Archipelago | Scenario::FogIslands | Scenario::Caravans => 12,
             Scenario::Citadels => 13,
         }
     }
@@ -166,6 +176,11 @@ impl Scenario {
     #[inline]
     pub const fn is_fishermen(self) -> bool {
         matches!(self, Scenario::Fishermen)
+    }
+
+    #[inline]
+    pub const fn is_caravans(self) -> bool {
+        matches!(self, Scenario::Caravans)
     }
 }
 
@@ -224,9 +239,10 @@ impl GameConfig {
     pub fn layout(&self) -> BoardLayout {
         let ext = self.num_players > 4;
         match self.scenario {
-            Scenario::Classic | Scenario::Citadels | Scenario::Fishermen => {
-                BoardLayout::for_players(self.num_players)
-            }
+            Scenario::Classic
+            | Scenario::Citadels
+            | Scenario::Fishermen
+            | Scenario::Caravans => BoardLayout::for_players(self.num_players),
             Scenario::Archipelago if ext => BoardLayout::ArchipelagoExtended,
             Scenario::Archipelago => BoardLayout::Archipelago,
             Scenario::FogIslands if ext => BoardLayout::FogIslandsExtended,
@@ -299,6 +315,8 @@ pub enum Phase {
     PairedTurn {
         partner: u8,
     },
+    /// Caravans: after building a settlement or city, place one camel segment.
+    PlaceCamel,
     GameOver,
 }
 
@@ -354,6 +372,10 @@ pub struct PlayerState {
     pub harbors: u8,
     /// Fishermen: fish tokens held (`0..=MAX_FISH_HAND`).
     pub fish: u8,
+    /// Caravans: gold coins held (`0..=MAX_COINS`).
+    pub coins: u8,
+    /// Caravans: stone bridges remaining (`0..=MAX_BRIDGES`).
+    pub bridges_left: u8,
 }
 
 impl PlayerState {
@@ -376,6 +398,8 @@ impl PlayerState {
             longest_road: 0,
             harbors: 0,
             fish: 0,
+            coins: 0,
+            bridges_left: MAX_BRIDGES,
         }
     }
 
@@ -415,6 +439,10 @@ pub struct GameState {
     pub roads: [BitSet; MAX_PLAYERS],
     /// Seafaring: ships, on edges along the sea.
     pub ships: [BitSet; MAX_PLAYERS],
+    /// Caravans: stone bridges across `board.river_edges`.
+    pub bridges: [BitSet; MAX_PLAYERS],
+    /// Caravans: neutral camel caravan segments on land edges.
+    pub camels: BitSet,
     pub bank: ResourceSet,
     /// Citadels: commodity supply in the bank.
     pub commodity_bank: CommoditySet,
@@ -433,6 +461,8 @@ pub struct GameState {
     pub phase: Phase,
     /// Phase resumed once every pending gold choice is made.
     pub after_gold: Phase,
+    /// Phase resumed once `Phase::PlaceCamel` resolves.
+    pub after_camel: Phase,
     /// Partner seat when inside a Paired Players secondary turn (including interrupts).
     pub in_paired_turn: Option<u8>,
     pub current: u8,
@@ -474,6 +504,8 @@ pub struct GameState {
     pub dice_deck_len: u8,
     /// Fishermen: seat holding the Old Boot (`+1` VP required to win).
     pub old_boot_owner: Option<u8>,
+    /// Caravans: seat holding Wealthiest Settler (`+2` VP; 0-coin seats lose 1 VP).
+    pub wealthiest_owner: Option<u8>,
     pub winner: Option<u8>,
     pub rng: Rng,
 }
@@ -517,6 +549,9 @@ impl GameState {
         }
         if config.scenario.is_fishermen() {
             board.init_fishing_grounds();
+        }
+        if config.scenario.is_caravans() {
+            board.init_river_edges();
         }
         let mut rng = Rng::new(seed);
         let mut dev_deck = [DevCard::Knight; MAX_DEV_DECK];
@@ -588,6 +623,8 @@ impl GameState {
             cities: [BitSet::EMPTY; MAX_PLAYERS],
             roads: [BitSet::EMPTY; MAX_PLAYERS],
             ships: [BitSet::EMPTY; MAX_PLAYERS],
+            bridges: [BitSet::EMPTY; MAX_PLAYERS],
+            camels: BitSet::EMPTY,
             bank: ResourceSet([layout.bank_per_resource(); 5]),
             commodity_bank,
             dev_deck,
@@ -600,6 +637,7 @@ impl GameState {
             pirate: board.pirate_start,
             phase: Phase::SetupSettlement,
             after_gold: Phase::Main,
+            after_camel: Phase::Main,
             in_paired_turn: None,
             current: 0,
             setup_step: 0,
@@ -624,6 +662,7 @@ impl GameState {
             dice_deck,
             dice_deck_len,
             old_boot_owner: None,
+            wealthiest_owner: None,
             winner: None,
             rng,
         })
@@ -651,6 +690,11 @@ impl GameState {
         match self.phase {
             Phase::SpecialBuild { builder } => builder,
             Phase::PairedTurn { partner } => partner,
+            Phase::PlaceCamel => match self.after_camel {
+                Phase::SpecialBuild { builder } => builder,
+                Phase::PairedTurn { partner } => partner,
+                _ => self.current,
+            },
             _ => self.current,
         }
     }
@@ -750,10 +794,12 @@ impl GameState {
             .sum()
     }
 
-    /// Edges holding a road or a ship.
+    /// Edges holding a road, a ship or a bridge.
     #[inline]
     pub fn occupied_edges(&self) -> BitSet {
-        (0..self.num_players()).fold(BitSet::EMPTY, |m, p| m | self.roads[p] | self.ships[p])
+        (0..self.num_players()).fold(BitSet::EMPTY, |m, p| {
+            m | self.roads[p] | self.ships[p] | self.bridges[p]
+        })
     }
 
     pub fn vertex_owner(&self, v: u8) -> Option<u8> {
@@ -773,6 +819,12 @@ impl GameState {
         (0..self.num_players() as u8).find(|&p| !(self.ships[p as usize] & bit).is_empty())
     }
 
+    /// Owner of the stone bridge on `e`.
+    pub fn bridge_owner(&self, e: u8) -> Option<u8> {
+        let bit = BitSet::bit(e);
+        (0..self.num_players() as u8).find(|&p| !(self.bridges[p as usize] & bit).is_empty())
+    }
+
     /// Points visible to everyone (buildings, metropolises, defender honours and special cards).
     pub fn public_victory_points(&self, p: u8) -> u8 {
         let i = p as usize;
@@ -789,7 +841,24 @@ impl GameState {
             .filter(|&&o| o == Some(p))
             .count() as u8;
         vp += 2 * metros + self.players[i].defender_points;
-        vp + self.board.layout.island_bonus() * self.players[i].islands.count_ones() as u8
+        vp += self.board.layout.island_bonus() * self.players[i].islands.count_ones() as u8;
+        if self.wealthiest_owner == Some(p) {
+            vp += 2;
+        }
+        if self.config.scenario == Scenario::Caravans {
+            if !self.camels.is_empty() {
+                let topo = self.topo();
+                for v in vertices_in(self.buildings_of(p)) {
+                    if !(topo.vertex_edge_mask[v as usize] & self.camels).is_empty() {
+                        vp += 1;
+                    }
+                }
+            }
+            if self.wealthiest_owner.is_some() && self.players[i].coins == 0 {
+                vp = vp.saturating_sub(1);
+            }
+        }
+        vp
     }
 
     /// Total points including hidden victory point cards.
@@ -864,7 +933,9 @@ impl GameState {
         let occ = self.occupied_vertices();
         let free = self.board.land_vertices & !(occ | topo.neighbors_of(occ) | self.all_knights());
         if require_road {
-            free & topo.endpoints_of(self.roads[p as usize] | self.ships[p as usize])
+            free & topo.endpoints_of(
+                self.roads[p as usize] | self.ships[p as usize] | self.bridges[p as usize],
+            )
         } else {
             free
         }
@@ -981,13 +1052,47 @@ impl GameState {
 
     /// Edges where `p` may place a road connected to their network. A road
     /// cannot continue through an intersection occupied by an opponent or
-    /// opponent knight, nor directly from a ship.
+    /// opponent knight, directly from a ship, or onto a golden river edge.
     pub fn road_spots(&self, p: u8) -> BitSet {
         let topo = self.topo();
         let own = self.buildings_of(p);
         let opponents = (self.occupied_vertices() & !own) | self.opponent_knights(p);
-        let reach = own | (topo.endpoints_of(self.roads[p as usize]) & !opponents);
-        topo.edges_touching(reach) & self.board.land_edges & !self.occupied_edges()
+        let reach = own
+            | (topo.endpoints_of(self.roads[p as usize] | self.bridges[p as usize]) & !opponents);
+        topo.edges_touching(reach)
+            & self.board.land_edges
+            & !self.board.river_edges
+            & !self.occupied_edges()
+    }
+
+    /// Caravans: golden river edges where `p` may build a stone bridge.
+    pub fn bridge_spots(&self, p: u8) -> BitSet {
+        if self.config.scenario != Scenario::Caravans {
+            return BitSet::EMPTY;
+        }
+        let topo = self.topo();
+        let own = self.buildings_of(p);
+        let opponents = (self.occupied_vertices() & !own) | self.opponent_knights(p);
+        let reach = own
+            | (topo.endpoints_of(self.roads[p as usize] | self.bridges[p as usize]) & !opponents);
+        topo.edges_touching(reach) & self.board.river_edges & !self.occupied_edges()
+    }
+
+    /// Caravans: land edges where the next camel caravan segment may be placed.
+    pub fn camel_spots(&self) -> BitSet {
+        if self.config.scenario != Scenario::Caravans
+            || self.camels.count_ones() >= MAX_CAMELS as u32
+        {
+            return BitSet::EMPTY;
+        }
+        let topo = self.topo();
+        let oasis = if self.board.desert != NONE {
+            topo.tile_vertex_mask[self.board.desert as usize]
+        } else {
+            BitSet::EMPTY
+        };
+        let starts = oasis | topo.endpoints_of(self.camels);
+        topo.edges_touching(starts) & self.board.land_edges & !self.camels
     }
 
     /// Edges of the tile the pirate is on (no ship may be built or moved
@@ -1111,17 +1216,26 @@ impl GameState {
     /// seafaring maps ships. Opponent buildings and opponent knights split
     /// routes; a route turns from road to ship only at `p`'s own building.
     pub fn compute_longest_road(&self, p: u8) -> u8 {
-        let (roads, ships) = (self.roads[p as usize], self.ships[p as usize]);
+        let (roads, ships) = (
+            self.roads[p as usize] | self.bridges[p as usize],
+            self.ships[p as usize],
+        );
         if (roads | ships).is_empty() {
             return 0;
         }
         let topo = self.topo();
         let own = self.buildings_of(p);
         let blocked = (self.occupied_vertices() & !own) | self.opponent_knights(p);
+        let camels = if self.config.scenario == Scenario::Caravans {
+            self.camels
+        } else {
+            BitSet::EMPTY
+        };
         let route = Route {
             topo,
             roads,
             ships,
+            camels,
             own,
             blocked,
         };
@@ -1187,10 +1301,12 @@ impl GameState {
                 ));
             }
             let b = self.settlements[p] | self.cities[p];
-            let pieces = self.roads[p] | self.ships[p];
+            let pieces = self.roads[p] | self.ships[p] | self.bridges[p];
             if !(b & seen_v).is_empty()
                 || !(pieces & seen_e).is_empty()
                 || !(self.roads[p] & self.ships[p]).is_empty()
+                || !(self.roads[p] & self.bridges[p]).is_empty()
+                || !(self.ships[p] & self.bridges[p]).is_empty()
                 || !(b & all_k).is_empty()
             {
                 return Err("two pieces share a spot".into());
@@ -1201,6 +1317,7 @@ impl GameState {
                 || self.cities[p].count_ones() as u8 + ps.cities_left != MAX_CITIES
                 || self.roads[p].count_ones() as u8 + ps.roads_left != MAX_ROADS
                 || self.ships[p].count_ones() as u8 + ps.ships_left != MAX_SHIPS
+                || self.bridges[p].count_ones() as u8 + ps.bridges_left != MAX_BRIDGES
             {
                 return Err(format!("player {p} piece counts inconsistent"));
             }
@@ -1214,8 +1331,11 @@ impl GameState {
             }
             if !(b & !self.board.land_vertices).is_empty()
                 || !(self.roads[p] & !self.board.land_edges).is_empty()
+                || !(self.roads[p] & self.board.river_edges).is_empty()
                 || !(self.ships[p] & !self.board.sea_edges).is_empty()
                 || (!self.ships[p].is_empty() && !layout.has_ships())
+                || !(self.bridges[p] & !self.board.river_edges).is_empty()
+                || (!self.bridges[p].is_empty() && !self.config.scenario.is_caravans())
             {
                 return Err(format!("player {p} has a piece on the wrong ground"));
             }
@@ -1244,6 +1364,46 @@ impl GameState {
             }
             if !self.config.scenario.is_fishermen() && ps.fish != 0 {
                 return Err(format!("player {p} holds fish outside fishermen scenario"));
+            }
+            if ps.coins > MAX_COINS {
+                return Err(format!("player {p} coins {} exceeds max", ps.coins));
+            }
+            if !self.config.scenario.is_caravans() && ps.coins != 0 {
+                return Err(format!("player {p} holds coins outside caravans scenario"));
+            }
+        }
+        if self.config.scenario.is_caravans() {
+            if !(self.board.river_edges & !self.board.land_edges).is_empty() {
+                return Err("river edges off land".into());
+            }
+            if !(self.camels & !self.board.land_edges).is_empty() {
+                return Err("camels off land".into());
+            }
+            if self.camels.count_ones() > MAX_CAMELS as u32 {
+                return Err("too many camels".into());
+            }
+        } else {
+            if !self.board.river_edges.is_empty() {
+                return Err("river edges on non-caravans board".into());
+            }
+            if !self.camels.is_empty() {
+                return Err("camels on non-caravans board".into());
+            }
+        }
+        if let Some(h) = self.wealthiest_owner {
+            if !self.config.scenario.is_caravans() || h as usize >= n {
+                return Err("invalid wealthiest_owner".into());
+            }
+            let c = self.players[h as usize].coins;
+            if c < WEALTHIEST_MIN_COINS || (0..n).any(|q| self.players[q].coins > c) {
+                return Err("wealthiest owner is not the wealthiest".into());
+            }
+        } else if self.config.scenario.is_caravans() {
+            let max_c = (0..n).map(|q| self.players[q].coins).max().unwrap_or(0);
+            if max_c >= WEALTHIEST_MIN_COINS
+                && (0..n).filter(|&q| self.players[q].coins == max_c).count() == 1
+            {
+                return Err("unassigned wealthiest_owner".into());
             }
         }
         if let Some(owner) = self.old_boot_owner
@@ -1419,6 +1579,7 @@ struct Route<'a> {
     topo: &'a Topology,
     roads: BitSet,
     ships: BitSet,
+    camels: BitSet,
     /// The player's own buildings, where roads and ships join.
     own: BitSet,
     /// Intersections occupied by opponents or opponent knights.
@@ -1446,11 +1607,16 @@ impl Route<'_> {
             if arrived_by_ship.is_some_and(|s| s != ship) && !self.own.contains(v) {
                 continue;
             }
+            let step = if !self.camels.is_empty() && self.camels.contains(e) {
+                2
+            } else {
+                1
+            };
             let u = topo.vertex_vertices[v as usize][k];
             let len = if self.blocked.contains(u) {
-                1
+                step
             } else {
-                1 + self.longest_from(u, Some(ship), used | bit)
+                step + self.longest_from(u, Some(ship), used | bit)
             };
             best = best.max(len);
         }

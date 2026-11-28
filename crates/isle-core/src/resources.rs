@@ -425,6 +425,8 @@ pub mod cost {
     pub const KNIGHT: ResourceSet = ResourceSet::new(0, 0, 1, 0, 1);
     /// Citadels: activating a knight with grain rations.
     pub const ACTIVATE_KNIGHT: ResourceSet = ResourceSet::new(0, 0, 0, 1, 0);
+    /// Caravans: building a stone bridge across the golden river.
+    pub const BRIDGE: ResourceSet = ResourceSet::new(2, 1, 0, 0, 0);
 }
 
 #[cfg(test)]

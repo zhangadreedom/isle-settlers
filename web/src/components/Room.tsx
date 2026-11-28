@@ -8,6 +8,7 @@ import { inviteLink, savedName, saveName, type Connection } from '../net/connect
 import { AccountPanel, Verified } from './Account';
 import { SoundToggle, ThemeToggle } from './Hud';
 import { TierBadge } from './Ranking';
+import { LangToggle } from './ShortcutsModal';
 
 /** Name prompt shown when opening an invite link for the first time. */
 export function JoinPrompt(props: { room: string; onJoin: (name: string) => void; onCancel: () => void }) {
@@ -150,6 +151,7 @@ export function RoomLobby(props: {
                   <button class="ghost small" onClick={props.onOpenRules}>
                     规则
                   </button>
+                  <LangToggle class="ghost small" />
                   <ThemeToggle renderer={props.renderer} class="ghost small" />
                   <SoundToggle class="ghost small" />
                 </div>
@@ -220,6 +222,11 @@ export function RoomLobby(props: {
                 <Show when={room().scenario === 'Fishermen'}>
                   <span class="mode-tag sea" title="沿海渔场与荒漠内陆湖产鱼，兑换奇策与转交破旧皮靴">
                     渔场与丰年
+                  </span>
+                </Show>
+                <Show when={room().scenario === 'Caravans'}>
+                  <span class="mode-tag ranked" title="绿洲骆驼商队穿村加分与黄金河架桥积攒金币">
+                    骆驼商队
                   </span>
                 </Show>
                 <Show when={room().rules.victoryPoints !== null}>

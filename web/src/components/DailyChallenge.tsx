@@ -14,7 +14,38 @@ import {
   scenarioDisplayName,
   type DailyChallengeSpec,
 } from '../game/daily';
+import { account } from '../net/account';
+import {
+  fetchDailyLeaderboard,
+  onDailyLeaderboardUpdate,
+  type DailyLeaderboard,
+  type DailyScoreEntry,
+} from '../net/daily-api';
+import { Verified } from './Account';
 import { Modal } from './bits';
+
+const SCENARIO_BADGES: Record<string, { icon: string; fallbackName: string }> = {
+  Classic: { icon: '🏝️', fallbackName: '经典本岛' },
+  Archipelago: { icon: '⛵', fallbackName: '蔚蓝群岛' },
+  FogIslands: { icon: '🌫️', fallbackName: '迷雾群岛' },
+  Citadels: { icon: '🏰', fallbackName: '铁卫城邦' },
+  Fishermen: { icon: '🐟', fallbackName: '丰饶渔港' },
+  Caravans: { icon: '🐪', fallbackName: '骆驼商队' },
+};
+
+function formatScenarioBadge(scenario: string): string {
+  const display = scenarioDisplayName(scenario);
+  const meta = SCENARIO_BADGES[scenario];
+  const label = display !== scenario ? display : (meta?.fallbackName ?? display);
+  return meta ? `${meta.icon} 剧本 · ${label}` : `剧本 · ${label}`;
+}
+
+function formatRankMedal(rank: number): string {
+  if (rank === 1) return '🥇 #1';
+  if (rank === 2) return '🥈 #2';
+  if (rank === 3) return '🥉 #3';
+  return `#${rank}`;
+}
 
 function copyTextSafe(text: string): Promise<boolean> {
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
@@ -52,9 +83,47 @@ export function DailyChallengeModal(props: {
   const spec = createMemo(() => getDailyChallenge());
   const record = createMemo(() => getDailyRecord(spec().dateKey));
   const [copied, setCopied] = createSignal(false);
+  const [leaderboard, setLeaderboard] = createSignal<DailyLeaderboard | null>(null);
+  const [loadingBoard, setLoadingBoard] = createSignal(false);
+  const [offlineBoard, setOfflineBoard] = createSignal(false);
   let copyTimer: number | undefined;
+  let fetchSeq = 0;
+
+  const loadLeaderboard = async (dateKey: string) => {
+    if (props.embedded) return;
+    const seq = ++fetchSeq;
+    setLoadingBoard(true);
+    const board = await fetchDailyLeaderboard(dateKey);
+    if (seq !== fetchSeq) return;
+    setLoadingBoard(false);
+    if (board === null) {
+      setLeaderboard(null);
+      setOfflineBoard(true);
+    } else {
+      setLeaderboard(board);
+      setOfflineBoard(false);
+    }
+  };
+
+  createEffect(() => {
+    const key = spec().dateKey;
+    if (!props.embedded) {
+      void loadLeaderboard(key);
+    }
+  });
+
+  onCleanup(
+    onDailyLeaderboardUpdate((board) => {
+      if (!props.embedded && board.dateKey === spec().dateKey) {
+        setLeaderboard(board);
+        setOfflineBoard(false);
+        setLoadingBoard(false);
+      }
+    }),
+  );
 
   onCleanup(() => {
+    fetchSeq++;
     window.clearTimeout(copyTimer);
   });
 
@@ -70,8 +139,13 @@ export function DailyChallengeModal(props: {
     });
   };
 
+  const isSignedInEntry = (entry: DailyScoreEntry): boolean => {
+    const me = account()?.username;
+    return Boolean(me && entry.registered && entry.playerName === me);
+  };
+
   return (
-    <Modal title="每日同图挑战赛" onClose={props.onClose}>
+    <Modal title="每日同图挑战赛" onClose={props.onClose} wide={!props.embedded}>
       <div
         style={{
           display: 'flex',
@@ -102,7 +176,7 @@ export function DailyChallengeModal(props: {
         </div>
 
         <div class="row" style={{ gap: '6px', 'margin-top': '2px' }}>
-          <span class="badge">剧本 · {scenarioDisplayName(spec().scenario)}</span>
+          <span class="badge">{formatScenarioBadge(spec().scenario)}</span>
           <span class="badge">{spec().players} 人同图</span>
           <span class="badge">
             AI · {spec().bot === 'mcts' ? '困难 MCTS' : '普通贪心'}
@@ -121,7 +195,7 @@ export function DailyChallengeModal(props: {
             <div style={{ 'font-weight': 600 }}>今日战绩 · 尚未出征</div>
             <p class="muted small">
               所有玩家在今日共享完全相同的岛屿地形、数字圆片与起始港口。
-              {props.embedded ? '本局记录在当前会话内即时可分享。' : '通关后将自动记录最佳回合数！'}
+              {props.embedded ? '本局记录在当前会话内即时可分享。' : '通关后将自动记录最佳回合数并上传全服验算榜！'}
             </p>
           </div>
         }
@@ -167,6 +241,253 @@ export function DailyChallengeModal(props: {
             </pre>
           </div>
         )}
+      </Show>
+
+      <Show when={!props.embedded}>
+        <div
+          class="profile-card"
+          style={{
+            gap: '8px',
+            border: '1px solid rgba(255, 255, 255, 0.1)',
+          }}
+        >
+          <div class="row" style={{ 'justify-content': 'space-between', 'align-items': 'center' }}>
+            <div class="row" style={{ gap: '6px', 'align-items': 'center' }}>
+              <span style={{ 'font-weight': 700, 'font-size': '14px' }}>🏁 全服竞速排行榜</span>
+              <span class="badge" style={{ 'font-size': '10.5px' }}>
+                录像防作弊验算
+              </span>
+            </div>
+            <button
+              type="button"
+              class="small"
+              disabled={loadingBoard()}
+              onClick={() => void loadLeaderboard(spec().dateKey)}
+            >
+              刷新
+            </button>
+          </div>
+
+          <Show
+            when={!offlineBoard()}
+            fallback={
+              <div
+                style={{
+                  padding: '10px 12px',
+                  'border-radius': '8px',
+                  background: 'rgba(0, 0, 0, 0.2)',
+                  border: '1px dashed rgba(255, 255, 255, 0.14)',
+                  'text-align': 'center',
+                }}
+              >
+                <div style={{ 'font-weight': 600, 'font-size': '13px', color: 'var(--muted)' }}>
+                  离线单机模式
+                </div>
+                <p class="muted small" style={{ 'margin-top': '2px' }}>
+                  当前未连接全服服务器，本机每日战绩与分享卡仍可正常使用。
+                </p>
+              </div>
+            }
+          >
+            <Show
+              when={leaderboard()}
+              fallback={
+                <p class="muted small" style={{ padding: '8px 0', 'text-align': 'center' }}>
+                  加载全服榜单中…
+                </p>
+              }
+            >
+              {(board) => (
+                <Show
+                  when={board().entries.length > 0}
+                  fallback={
+                    <div
+                      style={{
+                        padding: '12px',
+                        'border-radius': '8px',
+                        background: 'rgba(0, 0, 0, 0.2)',
+                        border: '1px dashed rgba(240, 180, 41, 0.26)',
+                        'text-align': 'center',
+                      }}
+                    >
+                      <span class="muted small">暂无上榜记录，抢先拿今日首胜！</span>
+                    </div>
+                  }
+                >
+                  <div
+                    style={{
+                      'max-height': '210px',
+                      'overflow-y': 'auto',
+                      'border-radius': '8px',
+                      border: '1px solid rgba(255, 255, 255, 0.07)',
+                      background: 'rgba(0, 0, 0, 0.18)',
+                    }}
+                  >
+                    <table
+                      style={{
+                        width: '100%',
+                        'border-collapse': 'collapse',
+                        'font-size': '12.5px',
+                      }}
+                    >
+                      <thead>
+                        <tr
+                          style={{
+                            position: 'sticky',
+                            top: 0,
+                            background: 'var(--panel-solid)',
+                            'z-index': 1,
+                          }}
+                        >
+                          <th
+                            style={{
+                              'text-align': 'left',
+                              'font-weight': 600,
+                              color: 'var(--muted)',
+                              padding: '5px 8px',
+                              'white-space': 'nowrap',
+                            }}
+                          >
+                            名次
+                          </th>
+                          <th
+                            style={{
+                              'text-align': 'left',
+                              'font-weight': 600,
+                              color: 'var(--muted)',
+                              padding: '5px 8px',
+                            }}
+                          >
+                            玩家
+                          </th>
+                          <th
+                            style={{
+                              'text-align': 'center',
+                              'font-weight': 600,
+                              color: 'var(--muted)',
+                              padding: '5px 6px',
+                              'white-space': 'nowrap',
+                            }}
+                          >
+                            结果
+                          </th>
+                          <th
+                            style={{
+                              'text-align': 'right',
+                              'font-weight': 600,
+                              color: 'var(--muted)',
+                              padding: '5px 8px',
+                              'white-space': 'nowrap',
+                            }}
+                          >
+                            回合数
+                          </th>
+                          <th
+                            style={{
+                              'text-align': 'right',
+                              'font-weight': 600,
+                              color: 'var(--muted)',
+                              padding: '5px 8px',
+                              'white-space': 'nowrap',
+                            }}
+                          >
+                            得分
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <For each={board().entries}>
+                          {(entry) => (
+                            <tr
+                              style={{
+                                background: isSignedInEntry(entry)
+                                  ? 'rgba(240, 180, 41, 0.1)'
+                                  : 'transparent',
+                              }}
+                            >
+                              <td
+                                style={{
+                                  padding: '5px 8px',
+                                  'border-top': '1px solid rgba(255, 255, 255, 0.06)',
+                                  'font-weight': entry.rank <= 3 ? 700 : 500,
+                                  color: entry.rank === 1 ? 'var(--accent)' : 'var(--text)',
+                                  'white-space': 'nowrap',
+                                  'font-variant-numeric': 'tabular-nums',
+                                }}
+                              >
+                                {formatRankMedal(entry.rank)}
+                              </td>
+                              <td
+                                style={{
+                                  padding: '5px 8px',
+                                  'border-top': '1px solid rgba(255, 255, 255, 0.06)',
+                                  'overflow-wrap': 'anywhere',
+                                }}
+                              >
+                                <span style={{ 'font-weight': 600 }}>{entry.playerName}</span>
+                                <Show when={entry.registered}>
+                                  <Verified />
+                                </Show>
+                              </td>
+                              <td
+                                style={{
+                                  padding: '5px 6px',
+                                  'border-top': '1px solid rgba(255, 255, 255, 0.06)',
+                                  'text-align': 'center',
+                                  'white-space': 'nowrap',
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    display: 'inline-block',
+                                    padding: '1px 7px',
+                                    'border-radius': '999px',
+                                    'font-size': '11.5px',
+                                    'font-weight': 600,
+                                    background: entry.won
+                                      ? 'rgba(70, 167, 88, 0.2)'
+                                      : 'rgba(255, 255, 255, 0.08)',
+                                    color: entry.won ? '#6ee787' : 'var(--muted)',
+                                  }}
+                                >
+                                  {entry.won ? '获胜' : '惜败'}
+                                </span>
+                              </td>
+                              <td
+                                style={{
+                                  padding: '5px 8px',
+                                  'border-top': '1px solid rgba(255, 255, 255, 0.06)',
+                                  'text-align': 'right',
+                                  'white-space': 'nowrap',
+                                  'font-variant-numeric': 'tabular-nums',
+                                }}
+                              >
+                                <b>{entry.turns}</b>
+                                <span class="muted small"> 回合</span>
+                              </td>
+                              <td
+                                style={{
+                                  padding: '5px 8px',
+                                  'border-top': '1px solid rgba(255, 255, 255, 0.06)',
+                                  'text-align': 'right',
+                                  'white-space': 'nowrap',
+                                  'font-variant-numeric': 'tabular-nums',
+                                }}
+                              >
+                                <b>{entry.points}</b>
+                                <span class="muted small"> 分</span>
+                              </td>
+                            </tr>
+                          )}
+                        </For>
+                      </tbody>
+                    </table>
+                  </div>
+                </Show>
+              )}
+            </Show>
+          </Show>
+        </div>
       </Show>
 
       <footer>

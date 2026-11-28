@@ -437,14 +437,15 @@ struct TopologyInfo {
     harbor_edges: Vec<u8>,
 }
 
-/// `Classic`, `Archipelago`, `FogIslands`, `Citadels` or `Fishermen` (the serialized `Scenario`).
+/// `Classic`, `Archipelago`, `FogIslands`, `Citadels`, `Fishermen` or `Caravans` (the serialized `Scenario`).
 fn parse_scenario_str(name: &str) -> Result<Scenario, String> {
     match name {
-        "Classic" | "" => Ok(Scenario::Classic),
-        "Archipelago" => Ok(Scenario::Archipelago),
-        "FogIslands" => Ok(Scenario::FogIslands),
-        "Citadels" => Ok(Scenario::Citadels),
-        "Fishermen" => Ok(Scenario::Fishermen),
+        "Classic" | "classic" | "" => Ok(Scenario::Classic),
+        "Archipelago" | "archipelago" => Ok(Scenario::Archipelago),
+        "FogIslands" | "fog" | "fog-islands" | "fog_islands" => Ok(Scenario::FogIslands),
+        "Citadels" | "citadels" => Ok(Scenario::Citadels),
+        "Fishermen" | "fishermen" => Ok(Scenario::Fishermen),
+        "Caravans" | "caravans" => Ok(Scenario::Caravans),
         _ => Err("UnknownScenario".into()),
     }
 }
@@ -644,5 +645,31 @@ mod tests {
             Replay::from_config_json(&f_cfg_json, &f_rec.seed, &f_rec.actions).unwrap();
         f_rep.seek(f_rep.length());
         assert_eq!(f_rep.state, fm.host.state);
+
+        // createMatch with Scenario::Caravans + @persona bots round-trips through Replay.
+        let mut cm_match = LocalMatch::create_match(
+            4,
+            88,
+            -1,
+            "greedy@road,greedy@city,greedy@warlord,greedy@merchant",
+            "Caravans",
+            0,
+            false,
+            false,
+            true,
+            "",
+        )
+        .unwrap();
+        let c_board: isle_proto::BoardInfo = serde_json::from_str(&cm_match.board().unwrap()).unwrap();
+        assert_eq!(c_board.river_edges.len(), 5);
+        while cm_match.host.step_bot().is_some() {}
+        assert!(cm_match.host.state.winner.is_some());
+        let c_rec = cm_match.host.replay("Caravaneer");
+        assert_eq!(c_rec.config.scenario, Scenario::Caravans);
+        let c_cfg_json = serde_json::to_string(&c_rec.config).unwrap();
+        let mut c_rep =
+            Replay::from_config_json(&c_cfg_json, &c_rec.seed, &c_rec.actions).unwrap();
+        c_rep.seek(c_rep.length());
+        assert_eq!(c_rep.state, cm_match.host.state);
     }
 }
