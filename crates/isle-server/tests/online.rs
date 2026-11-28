@@ -8,7 +8,10 @@ use std::time::Duration;
 use common::*;
 use futures_util::SinkExt;
 use isle_core::{Action, Event, Phase};
-use isle_proto::net::{BotLevel, ChatLine, ClientMsg, HouseRules, SeatView, ServerMsg};
+use isle_proto::net::{
+    BotLevel, BotPersona, ChatLine, ClientMsg, HouseRules, MatchmakeRequest, MatchmakeResponse,
+    QuickEmote, SeatView, ServerMsg,
+};
 use isle_server::ServerConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -30,12 +33,14 @@ async fn two_humans_and_bots_play_a_full_game() {
     host.send(&ClientMsg::SetSeat {
         seat: 3,
         bot: Some(BotLevel::Easy),
+        persona: BotPersona::Balanced,
     })
     .await;
     host.until(|c| {
         c.room.as_ref().unwrap().seats[3]
             == SeatView::Bot {
                 level: BotLevel::Easy,
+                persona: BotPersona::Balanced,
             }
     })
     .await;
@@ -48,7 +53,8 @@ async fn two_humans_and_bots_play_a_full_game() {
     assert_eq!(
         room.seats[2],
         SeatView::Bot {
-            level: BotLevel::Normal
+            level: BotLevel::Normal,
+            persona: BotPersona::Balanced,
         },
         "open seat filled on start"
     );
@@ -224,6 +230,7 @@ async fn permissions_and_errors() {
         .send(&ClientMsg::SetSeat {
             seat: 2,
             bot: Some(BotLevel::Easy),
+            persona: BotPersona::Balanced,
         })
         .await;
     guest.until(|c| c.errors.len() == 2).await;
@@ -231,6 +238,7 @@ async fn permissions_and_errors() {
     host.send(&ClientMsg::SetSeat {
         seat: 1,
         bot: Some(BotLevel::Easy),
+        persona: BotPersona::Balanced,
     })
     .await;
     host.until(|c| c.errors.contains(&"InvalidSeat".into()))
@@ -375,7 +383,8 @@ async fn hard_bots_play_on_the_blocking_pool() {
     host.until(|c| c.view.is_some()).await;
     assert!(host.room.as_ref().unwrap().seats[1..].iter().all(|s| *s
         == SeatView::Bot {
-            level: BotLevel::Hard
+            level: BotLevel::Hard,
+            persona: BotPersona::Balanced,
         }));
     let host = timeout(Duration::from_secs(120), play_to_end(host))
         .await
@@ -1359,6 +1368,202 @@ async fn daily_challenge_anti_cheat_leaderboard_and_caravans_room() {
     let lb_reloaded: DailyLeaderboard = serde_json::from_str(&body2).unwrap();
     assert_eq!(lb_reloaded, lb3);
     server2.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn matchmaking_bot_personas_quick_emotes_and_explorers_room() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!("matchmake-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = ServerConfig {
+        data_dir: Some(dir.clone()),
+        hard_bot: "mcts:32".into(),
+        ..fast_config()
+    };
+    let server = Server::start(config.clone()).await;
+
+    // 1. Player count validation on POST /api/matchmake.
+    for bad_players in [0u8, 1, 7] {
+        let req = MatchmakeRequest {
+            scenario: isle_core::Scenario::Explorers,
+            players: bad_players,
+            ranked: false,
+        };
+        let (status, _, _) = http(
+            server.addr,
+            "POST",
+            "/api/matchmake",
+            &[],
+            Some(&serde_json::to_string(&req).unwrap()),
+        )
+        .await;
+        assert_eq!(status, 400, "players={bad_players}");
+    }
+
+    // 2. Two clients call POST /api/matchmake with identical (scenario, players, ranked):
+    // Client 1 creates the waiting room; Client 2 gets the SAME roomId with `created == false`.
+    let req = MatchmakeRequest {
+        scenario: isle_core::Scenario::Explorers,
+        players: 4,
+        ranked: false,
+    };
+    let req_json = serde_json::to_string(&req).unwrap();
+    let (s1, _, b1) = http(server.addr, "POST", "/api/matchmake", &[], Some(&req_json)).await;
+    assert_eq!(s1, 200);
+    let m1: MatchmakeResponse = serde_json::from_str(&b1).unwrap();
+    assert!(m1.created);
+
+    let (s2, _, b2) = http(server.addr, "POST", "/api/matchmake", &[], Some(&req_json)).await;
+    assert_eq!(s2, 200);
+    let m2: MatchmakeResponse = serde_json::from_str(&b2).unwrap();
+    assert!(!m2.created);
+    assert_eq!(m1.room_id, m2.room_id);
+
+    // Different queue key (ranked: true) gets a distinct waiting room.
+    let ranked_req = MatchmakeRequest {
+        scenario: isle_core::Scenario::Explorers,
+        players: 4,
+        ranked: true,
+    };
+    let (sr, _, br) = http(
+        server.addr,
+        "POST",
+        "/api/matchmake",
+        &[],
+        Some(&serde_json::to_string(&ranked_req).unwrap()),
+    )
+    .await;
+    assert_eq!(sr, 200);
+    let mr: MatchmakeResponse = serde_json::from_str(&br).unwrap();
+    assert!(mr.created);
+    assert_ne!(mr.room_id, m1.room_id);
+
+    // Client 1 joins first -> becomes host on seat 0! Client 2 joins -> takes seat 1!
+    let mut c1 = Client::join(server.addr, &m1.room_id, "Drake", None).await;
+    assert_eq!(c1.seat, Some(0));
+    assert_eq!(c1.room.as_ref().unwrap().host, 0);
+
+    let mut c2 = Client::join(server.addr, &m2.room_id, "Magellan", None).await;
+    assert_eq!(c2.seat, Some(1));
+    assert_eq!(c2.room.as_ref().unwrap().host, 0);
+    c1.until(|c| matches!(c.room.as_ref().unwrap().seats[1], SeatView::Human { .. }))
+        .await;
+
+    // 3. Per-seat BotPersona via SetSeat (and filling all remaining Open seats so matchmaking opens a new room).
+    c1.send(&ClientMsg::SetSeat {
+        seat: 2,
+        bot: Some(BotLevel::Normal),
+        persona: BotPersona::Merchant,
+    })
+    .await;
+    c1.send(&ClientMsg::SetSeat {
+        seat: 3,
+        bot: Some(BotLevel::Hard),
+        persona: BotPersona::Warlord,
+    })
+    .await;
+    c1.until(|c| {
+        let r = c.room.as_ref().unwrap();
+        r.seats[2]
+            == SeatView::Bot {
+                level: BotLevel::Normal,
+                persona: BotPersona::Merchant,
+            }
+            && r.seats[3]
+                == SeatView::Bot {
+                    level: BotLevel::Hard,
+                    persona: BotPersona::Warlord,
+                }
+    })
+    .await;
+
+    // Now room `m1.room_id` has 0 Open seats -> next matchmake creates a new room!
+    let (s3, _, b3) = http(server.addr, "POST", "/api/matchmake", &[], Some(&req_json)).await;
+    assert_eq!(s3, 200);
+    let m3: MatchmakeResponse = serde_json::from_str(&b3).unwrap();
+    assert!(m3.created);
+    assert_ne!(m3.room_id, m1.room_id);
+
+    // 4. QuickChat broadcast and rate-limit guard.
+    c1.send(&ClientMsg::QuickChat {
+        emote: QuickEmote::OpenToTrade,
+    })
+    .await;
+    c1.send(&ClientMsg::QuickChat {
+        emote: QuickEmote::WellPlayed,
+    })
+    .await;
+    c2.until(|c| !c.quick_chats.is_empty()).await;
+    assert_eq!(
+        c2.quick_chats[0],
+        (Some(0), "Drake".into(), QuickEmote::OpenToTrade)
+    );
+    c1.until(|c| c.errors.contains(&"RateLimited".into())).await;
+
+    // Lower VP to 10 for fast online completion, start Explorers game, verify BoardInfo sites!
+    c1.send(&ClientMsg::SetRules {
+        rules: HouseRules {
+            victory_points: Some(10),
+            friendly_robber: false,
+            paired_turns: false,
+            event_deck: true,
+            turn_timer_secs: 0,
+            custom_map: None,
+        },
+    })
+    .await;
+    c1.until(|c| c.room.as_ref().unwrap().rules.victory_points == Some(10))
+        .await;
+
+    c1.send(&ClientMsg::Start).await;
+    let mut c1_board = None;
+    while c1.view.is_none() {
+        if let ServerMsg::Snapshot(snap) = c1.recv().await {
+            c1_board = Some(snap.board);
+        }
+    }
+    c2.until(|c| c.view.is_some()).await;
+    let bi = c1_board.expect("snapshot board");
+    assert_eq!(bi.pirate_lairs.len(), 3);
+    assert_eq!(bi.deep_shoals.len(), 3);
+    assert!(bi.spice_islands.len() >= 3);
+
+    // Verify BotPersona survives server restart persistence!
+    let (saved_room, t1, t2) = (c1.room_id.clone(), c1.token.clone(), c2.token.clone());
+    drop(c1);
+    drop(c2);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    server.stop().await;
+
+    let server = Server::start(config).await;
+    let mut c1 = Client::join(server.addr, &saved_room, "x", t1).await;
+    let mut c2 = Client::join(server.addr, &saved_room, "y", t2).await;
+    c1.until(|c| c.view.is_some()).await;
+    c2.until(|c| c.view.is_some()).await;
+    assert_eq!(
+        c1.room.as_ref().unwrap().seats[2],
+        SeatView::Bot {
+            level: BotLevel::Normal,
+            persona: BotPersona::Merchant,
+        }
+    );
+    assert_eq!(
+        c1.room.as_ref().unwrap().seats[3],
+        SeatView::Bot {
+            level: BotLevel::Hard,
+            persona: BotPersona::Warlord,
+        }
+    );
+
+    let (c1, c2) = tokio::join!(
+        timeout(Duration::from_secs(120), play_to_end(c1)),
+        timeout(Duration::from_secs(120), play_to_end(c2))
+    );
+    let (c1, c2) = (c1.expect("c1 timed out"), c2.expect("c2 timed out"));
+    assert!(c1.game_over() && c2.game_over());
+    server.stop().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
 

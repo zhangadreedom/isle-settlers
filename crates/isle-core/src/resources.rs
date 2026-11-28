@@ -427,6 +427,12 @@ pub mod cost {
     pub const ACTIVATE_KNIGHT: ResourceSet = ResourceSet::new(0, 0, 0, 1, 0);
     /// Caravans: building a stone bridge across the golden river.
     pub const BRIDGE: ResourceSet = ResourceSet::new(2, 1, 0, 0, 0);
+    /// Explorers: raiding a pirate lair (1 Wool + 1 Ore).
+    pub const PIRATE_LAIR: ResourceSet = ResourceSet::new(0, 0, 1, 0, 1);
+    /// Explorers: hauling fish from a deep shoal (1 Lumber + 1 Grain).
+    pub const FISH_SHOAL: ResourceSet = ResourceSet::new(0, 1, 0, 1, 0);
+    /// Explorers: trading at a spice island (1 Wool + 1 Grain).
+    pub const SPICE_TRADE: ResourceSet = ResourceSet::new(0, 0, 1, 1, 0);
 }
 
 #[cfg(test)]

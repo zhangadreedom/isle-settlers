@@ -326,6 +326,12 @@ pub struct Board {
     pub fishing_ground_count: u8,
     /// Caravans scenario: golden river edges flowing from the oasis (`desert`) to the coast.
     pub river_edges: BitSet,
+    /// Explorers scenario: sea tiles holding pirate lairs.
+    pub pirate_lairs: BitSet,
+    /// Explorers scenario: sea tiles holding deep fish shoals.
+    pub deep_shoals: BitSet,
+    /// Explorers scenario: land tiles holding spice villages.
+    pub spice_islands: BitSet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -853,6 +859,9 @@ impl Board {
             }; MAX_FISHING_GROUNDS],
             fishing_ground_count: 0,
             river_edges: BitSet::EMPTY,
+            pirate_lairs: BitSet::EMPTY,
+            deep_shoals: BitSet::EMPTY,
+            spice_islands: BitSet::EMPTY,
         };
         board.terrain[..nt].copy_from_slice(terrain);
         board.numbers[..nt].copy_from_slice(numbers);
@@ -1087,6 +1096,9 @@ impl Board {
             }; MAX_FISHING_GROUNDS],
             fishing_ground_count: 0,
             river_edges: BitSet::EMPTY,
+            pirate_lairs: BitSet::EMPTY,
+            deep_shoals: BitSet::EMPTY,
+            spice_islands: BitSet::EMPTY,
         };
         board.terrain[..nt].copy_from_slice(terrain);
         board.numbers[..nt].copy_from_slice(numbers);
@@ -1268,6 +1280,81 @@ impl Board {
                 if search.best_score.is_some() {
                     self.river_edges = search.best_edges;
                     return;
+                }
+            }
+        }
+    }
+
+    /// Deterministically marks pirate lairs, deep fish shoals and spice
+    /// islands on an `Explorers` board, consuming zero RNG.
+    pub fn init_explorer_sites(&mut self) {
+        self.pirate_lairs = BitSet::EMPTY;
+        self.deep_shoals = BitSet::EMPTY;
+        self.spice_islands = BitSet::EMPTY;
+        let topo = self.topo();
+        let nt = topo.num_tiles;
+        let target_n = if self.layout.is_extended() { 4usize } else { 3usize };
+
+        let mut sea_tiles: Vec<u8> = (0..nt as u8)
+            .filter(|&t| self.terrain[t as usize] == Terrain::Sea && t != self.pirate_start)
+            .collect();
+        if sea_tiles.len() < 2 * target_n
+            && self.pirate_start != NONE
+            && (self.pirate_start as usize) < nt
+            && self.terrain[self.pirate_start as usize] == Terrain::Sea
+        {
+            sea_tiles.push(self.pirate_start);
+        }
+
+        let lair_count = if sea_tiles.len() >= 2 * target_n {
+            target_n
+        } else {
+            target_n.min(sea_tiles.len().div_ceil(2))
+        };
+        for i in 0..lair_count {
+            self.pirate_lairs
+                .insert(sea_tiles[i * sea_tiles.len() / lair_count]);
+        }
+        let rem: Vec<u8> = sea_tiles
+            .into_iter()
+            .filter(|&t| !self.pirate_lairs.contains(t))
+            .collect();
+        let shoal_count = target_n.min(rem.len());
+        for i in 0..shoal_count {
+            self.deep_shoals.insert(rem[i * rem.len() / shoal_count]);
+        }
+
+        for t in 0..nt as u8 {
+            if self.tile_island[t as usize] >= 2 && self.terrain[t as usize].is_land() {
+                self.spice_islands.insert(t);
+            }
+        }
+        if self.spice_islands.count_ones() < 3 && nt > 0 {
+            let (x0, y0) = topo.tile_pos[0];
+            let dist_sq = |t: u8| -> i32 {
+                let (tx, ty) = topo.tile_pos[t as usize];
+                let (dx, dy) = (tx as i32 - x0 as i32, ty as i32 - y0 as i32);
+                dx * dx + dy * dy
+            };
+            for coastal_only in [true, false] {
+                if self.spice_islands.count_ones() >= 3 {
+                    break;
+                }
+                let mut cands: Vec<(i32, u8)> = (0..nt as u8)
+                    .filter(|&t| {
+                        self.terrain[t as usize].is_land()
+                            && !self.spice_islands.contains(t)
+                            && (!coastal_only
+                                || !(topo.tile_edge_mask(t) & self.sea_edges).is_empty())
+                    })
+                    .map(|t| (dist_sq(t), t))
+                    .collect();
+                cands.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                for (_, t) in cands {
+                    if self.spice_islands.count_ones() >= 3 {
+                        break;
+                    }
+                    self.spice_islands.insert(t);
                 }
             }
         }

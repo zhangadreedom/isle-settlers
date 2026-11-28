@@ -2,10 +2,11 @@
 // online server) into Solid signals, log lines, highlights and animations.
 
 import { batch, createSignal } from 'solid-js';
-import { playForEvents, playTimerTick, playYourTurn } from '../audio/sound';
+import { playForEvents, playTimerTick, playTradeOffer, playYourTurn } from '../audio/sound';
 import type { BoardRenderer, BoardData, Highlights, PickKind, TileHover } from '../board/BoardRenderer';
+import { emoteText, type ActiveBubble, type QuickEmoteKey } from '../components/QuickChatBar';
 import { topology as topologyOf } from '../engine';
-import type { Action, BoardInfo, ChatLine, CommoditySet, Event, LegalActions, PlayerView, ResourceSet, Terrain } from '../generated/proto';
+import type { Action, BoardInfo, ChatLine, CommoditySet, Event, LegalActions, PlayerView, QuickEmote, ResourceSet, Terrain } from '../generated/proto';
 import type { GameSource, SourceState } from './source';
 import { RESOURCES, describe, errorText } from './text';
 
@@ -23,6 +24,9 @@ export type BuildMode =
   | 'chase'
   | 'fishRoad'
   | 'bridge'
+  | 'raidLair'
+  | 'haulFish'
+  | 'tradeSpice'
   | null;
 
 export interface LogEntry {
@@ -64,6 +68,9 @@ export function boardData(info: BoardInfo): BoardData {
     islands: info.islands ?? info.terrain.map(() => 1),
     fishingGrounds: info.fishingGrounds,
     riverEdges: info.riverEdges,
+    pirateLairs: info.pirateLairs,
+    deepShoals: info.deepShoals,
+    spiceIslands: info.spiceIslands,
   };
 }
 
@@ -93,6 +100,9 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
   const [tileHover, setTileHover] = createSignal<TileHoverInfo | null>(null);
   /** Unread chat messages since log drawer was last viewed. */
   const [unreadChat, setUnreadChat] = createSignal(0);
+  /** Active tabletop emote bubbles displayed beside seats. */
+  const [bubbles, setBubbles] = createSignal<ActiveBubble[]>([]);
+  let bubbleId = 0;
   /** Online turn timer: seconds remaining until autopilot acts. */
   const [turnSecondsLeft, setTurnSecondsLeft] = createSignal<number | null>(null);
   let deadlineAt: number | null = null;
@@ -119,6 +129,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
   const citadels = source.board.config.scenario === 'Citadels';
   const fishermen = source.board.config.scenario === 'Fishermen';
   const caravans = source.board.config.scenario === 'Caravans';
+  const explorers = source.board.config.scenario === 'Explorers';
 
   let logId = 0;
   let flightId = 0;
@@ -238,6 +249,9 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     chase: 'ChaseRobber',
     fishRoad: 'FishBuildRoad',
     bridge: 'BuildBridge',
+    raidLair: 'RaidPirateLair',
+    haulFish: 'HaulFishShoal',
+    tradeSpice: 'TradeSpice',
   };
 
   function modeAvailable(m: BuildMode, list: Action[]) {
@@ -259,7 +273,10 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
         | 'PromoteKnight'
         | 'FishBuildRoad'
         | 'PlaceCamel'
-        | 'BuildBridge',
+        | 'BuildBridge'
+        | 'RaidPirateLair'
+        | 'HaulFishShoal'
+        | 'TradeSpice',
     ) => list.flatMap((a) => (a.type === type ? [a.value] : []));
     switch (v.phase.type) {
       case 'SetupSettlement':
@@ -278,6 +295,9 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
         if (mode() === 'road') return { kind: 'edge', ids: ids('BuildRoad') };
         if (mode() === 'fishRoad') return { kind: 'edge', ids: ids('FishBuildRoad') };
         if (mode() === 'bridge') return { kind: 'edge', ids: ids('BuildBridge') };
+        if (mode() === 'raidLair') return { kind: 'tile', ids: ids('RaidPirateLair') };
+        if (mode() === 'haulFish') return { kind: 'tile', ids: ids('HaulFishShoal') };
+        if (mode() === 'tradeSpice') return { kind: 'tile', ids: ids('TradeSpice') };
         if (mode() === 'settlement') return { kind: 'vertex', ids: ids('BuildSettlement') };
         if (mode() === 'city') return { kind: 'vertex', ids: ids('BuildCity') };
         if (mode() === 'ship') return { kind: 'edge', ids: ids('BuildShip') };
@@ -331,6 +351,18 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     const v = view();
     if (!v) return;
     if (kind === 'tile') {
+      if (mode() === 'raidLair') {
+        act((a) => a.type === 'RaidPirateLair' && a.value === id);
+        return;
+      }
+      if (mode() === 'haulFish') {
+        act((a) => a.type === 'HaulFishShoal' && a.value === id);
+        return;
+      }
+      if (mode() === 'tradeSpice') {
+        act((a) => a.type === 'TradeSpice' && a.value === id);
+        return;
+      }
       if (mode() === 'chase' && knightFrom() !== null) {
         const kv = knightFrom()!;
         const options = actions().flatMap((a) =>
@@ -463,6 +495,18 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     if (line.seat !== me()) setUnreadChat((n) => n + 1);
   }
 
+  function onQuickChat(q: { seat: number | null; name: string; emote: QuickEmote }) {
+    const who = q.seat === me() && me() !== null ? '你' : q.name;
+    const key = q.emote as QuickEmoteKey;
+    const text = emoteText(key);
+    setLog((old) => [...old, { id: ++logId, text, seat: q.seat, chat: { name: who } }].slice(-100));
+    if (q.seat !== me()) setUnreadChat((n) => n + 1);
+    playTradeOffer();
+    const item: ActiveBubble = { id: ++bubbleId, seat: q.seat, name: who, emote: key };
+    setBubbles((prev) => [...prev.filter((b) => b.seat !== q.seat), item]);
+    window.setTimeout(() => setBubbles((prev) => prev.filter((b) => b.id !== item.id)), 3200);
+  }
+
   function tilesAround(vertex: number): number[] {
     const out: number[] = [];
     for (let t = 0; t < board.terrain.length; t++) {
@@ -517,6 +561,7 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     state: onState,
     error: (code) => showToast(errorText(code)),
     chat: onChat,
+    quickChat: onQuickChat,
   });
 
   return {
@@ -535,6 +580,8 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     fishermen,
     /** Oasis camel caravans, golden river bridges and gold coins are in play. */
     caravans,
+    /** Pirate lairs, deep fish shoals and spice islands mission tracks are in play. */
+    explorers,
     /** Playback controls when watching a replay. */
     replay: source.replay,
     /** The finished game as a replay record (local games and online rooms). */
@@ -560,6 +607,8 @@ export function createGame(source: GameSource, renderer: BoardRenderer) {
     tileHover,
     unreadChat,
     clearUnreadChat: () => setUnreadChat(0),
+    bubbles,
+    quickChat: source.quickChat ? (emote: QuickEmote) => source.quickChat!(emote) : undefined,
     name,
     has,
     act,

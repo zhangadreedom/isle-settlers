@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use isle_core::{Action, Event};
 use isle_proto::PlayerView;
-use isle_proto::net::{BotLevel, ChatLine, ClientMsg, LegalActions, RoomInfo, ServerMsg};
+use isle_proto::net::{BotLevel, ChatLine, ClientMsg, LegalActions, QuickEmote, RoomInfo, ServerMsg};
 use isle_server::{AppState, ServerConfig, app};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -62,6 +62,7 @@ pub struct Client {
     pub events: Vec<Event>,
     pub errors: Vec<String>,
     pub chats: Vec<ChatLine>,
+    pub quick_chats: Vec<(Option<u8>, String, QuickEmote)>,
 }
 
 impl Client {
@@ -80,6 +81,7 @@ impl Client {
             events: Vec::new(),
             errors: Vec::new(),
             chats: Vec::new(),
+            quick_chats: Vec::new(),
         }
     }
 
@@ -179,6 +181,9 @@ impl Client {
                     self.events.extend(u.events.iter().copied());
                 }
                 ServerMsg::Chat(c) => self.chats.push(c.clone()),
+                ServerMsg::QuickChat { seat, name, emote } => {
+                    self.quick_chats.push((*seat, name.clone(), *emote));
+                }
                 ServerMsg::Error { code } => self.errors.push(code.clone()),
             }
             return msg;
@@ -202,9 +207,10 @@ pub fn choose(legal: &[Action]) -> Option<Action> {
         Action::PlaceCamel(_) => 0,
         Action::BuildCity(_) => 1,
         Action::BuildSettlement(_) => 2,
-        Action::BuildBridge(_) | Action::BuildRoad(_) => 3,
+        Action::RaidPirateLair(_) | Action::HaulFishShoal(_) | Action::TradeSpice(_) => 2,
+        Action::BuildBridge(_) | Action::BuildRoad(_) | Action::BuildShip(_) => 3,
         Action::RollDice => 4,
-        Action::Discard(_) | Action::MoveRobber { .. } => 5,
+        Action::Discard(_) | Action::ChooseGold(_) | Action::MoveRobber { .. } => 5,
         Action::RespondTrade { accept: false } => 6,
         Action::EndTurn => 7,
         _ => 9,

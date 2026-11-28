@@ -10,8 +10,8 @@ use std::time::Duration;
 use isle_ai::{Bot, bot_by_name};
 use isle_core::{Action, Event, GameConfig, GameState, Phase, Scenario, TradeResponse};
 use isle_proto::net::{
-    BotLevel, ChatLine, ClientMsg, HouseRules, LegalActions, PublicRoomSummary, RoomInfo, SeatView,
-    ServerMsg, Snapshot, Update, clean_chat, clean_name,
+    BotLevel, BotPersona, ChatLine, ClientMsg, HouseRules, LegalActions, PublicRoomSummary,
+    RoomInfo, SeatView, ServerMsg, Snapshot, Update, clean_chat, clean_name,
 };
 use isle_proto::ranking::RatingChange;
 use isle_proto::{ReplayPlayer, ReplayRecord, board_info, player_view};
@@ -95,6 +95,17 @@ const CHAT_INTERVAL: Duration = Duration::from_millis(600);
 /// Saves are coalesced: at most one write per this interval.
 const SAVE_DELAY: Duration = Duration::from_millis(250);
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RoomMatchMeta {
+    pub is_public: bool,
+    pub started: bool,
+    pub finished: bool,
+    pub scenario: Scenario,
+    pub max_players: u8,
+    pub open_seats: u8,
+    pub ranked: bool,
+}
+
 #[derive(Clone, Debug)]
 enum SeatKind {
     Open,
@@ -103,7 +114,7 @@ enum SeatKind {
         token: String,
         account: Option<SeatAccount>,
     },
-    Bot(BotLevel),
+    Bot(BotLevel, BotPersona),
 }
 
 /// Display name: the username for accounts, else the cleaned-up nickname.
@@ -142,17 +153,18 @@ impl Game {
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let name = match s.kind {
-                    SeatKind::Bot(BotLevel::Hard) => config.hard_bot.as_str(),
-                    SeatKind::Bot(level) => level.bot_name(),
+                let name: std::borrow::Cow<'_, str> = match s.kind {
+                    SeatKind::Bot(level, persona) => {
+                        level.bot_name_with_persona(persona, &config.hard_bot).into()
+                    }
                     // Autopilot for disconnected players.
-                    _ => "greedy",
+                    _ => "greedy".into(),
                 };
                 let seed = seed.rotate_left(i as u32 * 8) ^ i as u64;
-                let mut bot = bot_by_name(name, seed)
+                let mut bot = bot_by_name(&name, seed)
                     .or_else(|| bot_by_name("greedy", seed))
                     .expect("known bot");
-                if matches!(s.kind, SeatKind::Bot(_)) {
+                if matches!(s.kind, SeatKind::Bot(..)) {
                     bot.set_propose_trades(true);
                 }
                 Some(bot)
@@ -193,6 +205,7 @@ pub struct Room {
     scenario: Scenario,
     rules: HouseRules,
     summary_tx: watch::Sender<Option<PublicRoomSummary>>,
+    meta_tx: watch::Sender<RoomMatchMeta>,
     /// Rating changes of the finished ranked game.
     rating: Vec<RatingChange>,
     /// When to (re)read or compute the ratings of a finished ranked game.
@@ -248,6 +261,15 @@ impl Room {
             account,
         };
         let (summary_tx, _) = watch::channel(None);
+        let (meta_tx, _) = watch::channel(RoomMatchMeta {
+            is_public,
+            started: false,
+            finished: false,
+            scenario,
+            max_players: players,
+            open_seats: players.saturating_sub(1),
+            ranked,
+        });
         let room = Room {
             id,
             config: registry.config().clone(),
@@ -260,6 +282,7 @@ impl Room {
             scenario,
             rules,
             summary_tx,
+            meta_tx,
             rating: Vec::new(),
             rate_due: None,
             seed: ids::seed(),
@@ -277,6 +300,70 @@ impl Room {
         };
         room.refresh_summary();
         (room, token)
+    }
+
+    /// An idle public waiting room with all `0..players` seats `Open` (`host = 0`,
+    /// assigned to the first human who attaches).
+    pub fn new_waiting(id: String, options: RoomOptions, registry: &Registry) -> Room {
+        let RoomOptions {
+            players,
+            bots,
+            ranked,
+            scenario,
+            mut rules,
+            is_public,
+        } = options;
+        if rules.turn_timer_secs == 0 && registry.config().default_turn_timer_secs > 0 {
+            rules.turn_timer_secs = registry.config().default_turn_timer_secs;
+        }
+        let now = Instant::now();
+        let seats: Vec<Seat> = (0..players)
+            .map(|_| Seat {
+                kind: SeatKind::Open,
+                connections: 0,
+                disconnected_at: None,
+            })
+            .collect();
+        let (summary_tx, _) = watch::channel(None);
+        let (meta_tx, _) = watch::channel(RoomMatchMeta {
+            is_public,
+            started: false,
+            finished: false,
+            scenario,
+            max_players: players,
+            open_seats: players,
+            ranked,
+        });
+        let room = Room {
+            id,
+            config: registry.config().clone(),
+            store: registry.store().cloned(),
+            replays: registry.replays().clone(),
+            replay_id: None,
+            accounts: registry.accounts().cloned(),
+            ranked,
+            is_public,
+            scenario,
+            rules,
+            summary_tx,
+            meta_tx,
+            rating: Vec::new(),
+            rate_due: None,
+            seed: ids::seed(),
+            bot_level: bots,
+            host: 0,
+            autopilot_shown: vec![false; seats.len()],
+            seats,
+            game: None,
+            conns: HashMap::new(),
+            next_conn: 1,
+            bot_due: None,
+            turn_deadline: None,
+            save_due: Some(now),
+            idle_since: Some(now),
+        };
+        room.refresh_summary();
+        room
     }
 
     /// Rebuilds a room from its record by replaying the action log.
@@ -297,7 +384,7 @@ impl Room {
                         token: token.clone(),
                         account: account.clone(),
                     },
-                    SeatRecord::Bot { level } => SeatKind::Bot(*level),
+                    SeatRecord::Bot { level, persona } => SeatKind::Bot(*level, *persona),
                 };
                 let disconnected_at = matches!(kind, SeatKind::Human { .. }).then_some(now);
                 Seat {
@@ -329,6 +416,18 @@ impl Room {
             None
         };
         let (summary_tx, _) = watch::channel(None);
+        let (meta_tx, _) = watch::channel(RoomMatchMeta {
+            is_public: record.is_public,
+            started: record.started,
+            finished: record.replay.is_some(),
+            scenario: record.scenario,
+            max_players: seats.len() as u8,
+            open_seats: seats
+                .iter()
+                .filter(|s| matches!(s.kind, SeatKind::Open))
+                .count() as u8,
+            ranked: record.ranked,
+        });
         let mut room = Room {
             id: record.id,
             config: registry.config().clone(),
@@ -341,6 +440,7 @@ impl Room {
             scenario: record.scenario,
             rules: record.rules,
             summary_tx,
+            meta_tx,
             rating: Vec::new(),
             rate_due: None,
             seed: record.seed,
@@ -543,7 +643,7 @@ impl Room {
 
     fn is_machine(&self, seat: u8, now: Instant) -> bool {
         match self.seats[seat as usize].kind {
-            SeatKind::Bot(_) | SeatKind::Open => true,
+            SeatKind::Bot(..) | SeatKind::Open => true,
             SeatKind::Human { .. } => self.on_autopilot(seat, now),
         }
     }
@@ -705,6 +805,14 @@ impl Room {
             s.connections += 1;
             s.disconnected_at = None;
         }
+        if self.game.is_none()
+            && let Some(s) = seat
+            && (!matches!(self.seats[self.host as usize].kind, SeatKind::Human { .. })
+                || self.seats[self.host as usize].connections == 0)
+        {
+            self.host = s;
+            self.mark_dirty(now);
+        }
         if !was_online && self.humans_online() {
             self.refresh_turn_deadline(now);
         }
@@ -778,7 +886,11 @@ impl Room {
                 Ok(())
             }
 
-            ClientMsg::SetSeat { seat: target, bot } => {
+            ClientMsg::SetSeat {
+                seat: target,
+                bot,
+                persona,
+            } => {
                 if seat != Some(self.host) {
                     return Err("NotHost".into());
                 }
@@ -792,7 +904,8 @@ impl Room {
                 {
                     return Err("InvalidSeat".into());
                 }
-                self.seats[t].kind = bot.map_or(SeatKind::Open, SeatKind::Bot);
+                self.seats[t].kind =
+                    bot.map_or(SeatKind::Open, |lvl| SeatKind::Bot(lvl, persona));
                 self.mark_dirty(now);
                 self.broadcast_room(now);
                 Ok(())
@@ -944,7 +1057,7 @@ impl Room {
                             s.kind = SeatKind::Open;
                             s.disconnected_at = None;
                         }
-                        SeatKind::Bot(_) if !immediate => {
+                        SeatKind::Bot(..) if !immediate => {
                             s.kind = SeatKind::Open;
                         }
                         _ => {}
@@ -953,7 +1066,7 @@ impl Room {
                 if immediate {
                     for s in &mut self.seats {
                         if matches!(s.kind, SeatKind::Open) {
-                            s.kind = SeatKind::Bot(self.bot_level);
+                            s.kind = SeatKind::Bot(self.bot_level, BotPersona::Balanced);
                         }
                     }
                     let config =
@@ -988,7 +1101,7 @@ impl Room {
                 }
                 for s in &mut self.seats {
                     if matches!(s.kind, SeatKind::Open) {
-                        s.kind = SeatKind::Bot(self.bot_level);
+                        s.kind = SeatKind::Bot(self.bot_level, BotPersona::Balanced);
                     }
                 }
                 let config = build_game_config(self.scenario, self.seats.len() as u8, self.rules);
@@ -1020,6 +1133,21 @@ impl Room {
                     text,
                 });
                 self.broadcast(&line);
+                Ok(())
+            }
+
+            ClientMsg::QuickChat { emote } => {
+                let c = self.conns.get_mut(&conn).ok_or("BadMessage")?;
+                if c.last_chat.is_some_and(|t| now < t + CHAT_INTERVAL) {
+                    return Err("RateLimited".into());
+                }
+                c.last_chat = Some(now);
+                let msg = ServerMsg::QuickChat {
+                    seat,
+                    name: self.seat_name(seat),
+                    emote,
+                };
+                self.broadcast(&msg);
                 Ok(())
             }
         }
@@ -1102,7 +1230,7 @@ impl Room {
                     name: name.clone(),
                     bot: None,
                 },
-                SeatKind::Bot(level) => ReplayPlayer {
+                SeatKind::Bot(level, _) => ReplayPlayer {
                     name: String::new(),
                     bot: Some(*level),
                 },
@@ -1207,7 +1335,10 @@ impl Room {
             .enumerate()
             .map(|(i, s)| match &s.kind {
                 SeatKind::Open => SeatView::Open,
-                SeatKind::Bot(level) => SeatView::Bot { level: *level },
+                SeatKind::Bot(level, persona) => SeatView::Bot {
+                    level: *level,
+                    persona: *persona,
+                },
                 SeatKind::Human { name, account, .. } => SeatView::Human {
                     name: name.clone(),
                     registered: account.is_some(),
@@ -1235,6 +1366,32 @@ impl Room {
 
     pub(crate) fn subscribe_summary(&self) -> watch::Receiver<Option<PublicRoomSummary>> {
         self.summary_tx.subscribe()
+    }
+
+    pub(crate) fn subscribe_meta(&self) -> watch::Receiver<RoomMatchMeta> {
+        self.meta_tx.subscribe()
+    }
+
+    fn match_meta(&self) -> RoomMatchMeta {
+        let finished = self.replay_id.is_some()
+            || self
+                .game
+                .as_ref()
+                .is_some_and(|g| g.state.phase == Phase::GameOver);
+        let open_seats = self
+            .seats
+            .iter()
+            .filter(|s| matches!(s.kind, SeatKind::Open))
+            .count() as u8;
+        RoomMatchMeta {
+            is_public: self.is_public,
+            started: self.game.is_some(),
+            finished,
+            scenario: self.scenario,
+            max_players: self.seats.len() as u8,
+            open_seats,
+            ranked: self.ranked,
+        }
     }
 
     fn public_summary(&self) -> Option<PublicRoomSummary> {
@@ -1272,6 +1429,7 @@ impl Room {
 
     fn refresh_summary(&self) {
         let _ = self.summary_tx.send(self.public_summary());
+        let _ = self.meta_tx.send(self.match_meta());
     }
 
     fn legal_for(&self, viewer: Option<u8>) -> LegalActions {
@@ -1378,7 +1536,10 @@ impl Room {
                         token: token.clone(),
                         account: account.clone(),
                     },
-                    SeatKind::Bot(level) => SeatRecord::Bot { level: *level },
+                    SeatKind::Bot(level, persona) => SeatRecord::Bot {
+                        level: *level,
+                        persona: *persona,
+                    },
                 })
                 .collect(),
             started: self.game.is_some(),

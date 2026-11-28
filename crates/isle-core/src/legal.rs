@@ -82,6 +82,9 @@ impl GameState {
                 if self.can_use_fish() {
                     self.push_fishermen_actions(player, out);
                 }
+                if self.can_run_explorer_mission() {
+                    self.push_explorer_actions(player, out);
+                }
                 if !self.ship_moved {
                     for from in edges_in(self.movable_ships(player)) {
                         for to in edges_in(self.ship_moves(player, from)) {
@@ -99,7 +102,7 @@ impl GameState {
                         }
                     }
                 }
-                if self.config.scenario.is_caravans() && ps.coins >= 2 {
+                if self.config.scenario.uses_coins() && ps.coins >= 2 {
                     for r in Resource::ALL {
                         if self.bank[r] > 0 {
                             out.push(Action::SpendCoinsResource(r));
@@ -322,6 +325,31 @@ impl GameState {
         }
         if ps.fish >= 7 && self.dev_deck_len > 0 {
             out.push(Action::FishBuyDevCard);
+        }
+    }
+
+    fn push_explorer_actions(&self, player: u8, out: &mut Vec<Action>) {
+        let ps = &self.players[player as usize];
+        if ps.explorer_missions[0] < 3 && ps.hand.contains(&cost::PIRATE_LAIR) {
+            for t in bits(self.board.pirate_lairs) {
+                if self.can_reach_pirate_lair(player, t) {
+                    out.push(Action::RaidPirateLair(t));
+                }
+            }
+        }
+        if ps.explorer_missions[1] < 3 && ps.hand.contains(&cost::FISH_SHOAL) {
+            for t in bits(self.board.deep_shoals) {
+                if self.can_reach_deep_shoal(player, t) {
+                    out.push(Action::HaulFishShoal(t));
+                }
+            }
+        }
+        if ps.explorer_missions[2] < 3 && ps.hand.contains(&cost::SPICE_TRADE) {
+            for t in bits(self.board.spice_islands) {
+                if self.can_reach_spice_island(player, t) {
+                    out.push(Action::TradeSpice(t));
+                }
+            }
         }
     }
 

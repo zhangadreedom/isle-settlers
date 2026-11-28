@@ -70,8 +70,9 @@ fn parse_args() -> Args {
                     "citadels" | "cities" | "ck" => Scenario::Citadels,
                     "fishermen" | "fish" => Scenario::Fishermen,
                     "caravans" | "camel" | "camels" => Scenario::Caravans,
+                    "explorers" | "pirates" | "ep" => Scenario::Explorers,
                     _ => usage(
-                        "--scenario must be classic, archipelago, fog, citadels, fishermen or caravans",
+                        "--scenario must be classic, archipelago, fog, citadels, fishermen, caravans or explorers",
                     ),
                 }
             }
@@ -105,7 +106,7 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: isle-sim [--games N] [--players 2-6] [--scenario classic|archipelago|fog|citadels|fishermen|caravans]\n\
+        "usage: isle-sim [--games N] [--players 2-6] [--scenario classic|archipelago|fog|citadels|fishermen|caravans|explorers]\n\
          \x20               [--friendly-robber] [--paired-turns] [--event-deck] [--seed S] [--threads T]\n\
          \x20               [--bot NAME | --bots NAME,NAME,...] [--rotate] [--max-turns N] [--check]\n\
          bots: random, weighted, greedy, greedy:trade, mcts, mcts:N (with optional @road|@city|@warlord|@merchant)"
@@ -136,6 +137,9 @@ struct Stats {
     camels: u64,
     bridges: u64,
     coins: u64,
+    /// Explorers: mission steps completed and champion crowns claimed.
+    missions: u64,
+    champions: u64,
 }
 
 fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
@@ -173,8 +177,14 @@ fn run_shard(args: &Args, shard: u64, count: u64) -> Stats {
             s.defender_points += g.players[p].defender_points as u64;
             s.bridges += g.bridges[p].count_ones() as u64;
             s.coins += g.players[p].coins as u64;
+            s.missions += g.players[p].explorer_missions.iter().sum::<u8>() as u64;
         }
         s.camels += g.camels.count_ones() as u64;
+        s.champions += g
+            .explorer_champions
+            .iter()
+            .filter(|c| c.is_some())
+            .count() as u64;
         if g.board.layout.has_fog() {
             s.revealed += fog_pool_len - g.fog_terrain_len as u64;
         }
@@ -232,6 +242,8 @@ fn main() {
         total.camels += s.camels;
         total.bridges += s.bridges;
         total.coins += s.coins;
+        total.missions += s.missions;
+        total.champions += s.champions;
         for p in 0..MAX_PLAYERS {
             total.wins[p] += s.wins[p];
             total.wins_by_bot[p] += s.wins_by_bot[p];
@@ -321,6 +333,20 @@ fn main() {
             "bridges built   {:.2} / {} per player",
             total.bridges as f64 / per_player,
             isle_core::MAX_BRIDGES
+        );
+        println!(
+            "coins at end    {:.2} per player",
+            total.coins as f64 / per_player
+        );
+    }
+    if args.scenario == Scenario::Explorers {
+        println!(
+            "missions done   {:.2} / 9 per player",
+            total.missions as f64 / per_player
+        );
+        println!(
+            "champions       {:.2} / 3 per game",
+            total.champions as f64 / g
         );
         println!(
             "coins at end    {:.2} per player",

@@ -35,6 +35,7 @@ const DAILY_SCENARIO_ROTATION: readonly Scenario[] = [
   'Citadels',
   'Fishermen',
   'Caravans',
+  'Explorers',
 ];
 
 interface ScenarioMeta {
@@ -77,6 +78,11 @@ const SCENARIO_META: Record<string, ScenarioMeta> = {
     name: '绿洲驼商',
     defaultVp: 12,
     tagline: '引导绿洲骆驼商队穿村加分，跨黄金河造桥积累金币',
+  },
+  Explorers: {
+    name: '远洋征途',
+    defaultVp: 15,
+    tagline: '推进海盗清剿、远洋渔运与香料盟约三线任务夺冠',
   },
 };
 

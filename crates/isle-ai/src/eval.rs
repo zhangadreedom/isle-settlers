@@ -306,6 +306,31 @@ pub fn scores(s: &GameState, w: &Weights, out: &mut [f32; MAX_PLAYERS]) {
             }
         }
 
+        if s.config.scenario.is_explorers() {
+            let c_mult = if w.persona == BotPersona::Merchant {
+                1.35
+            } else {
+                1.0
+            };
+            score += 0.22 * c_mult * ps.coins.min(10) as f32;
+            if ps.explorer_missions[2] >= 1 {
+                score += 0.35 * c_mult;
+            }
+            if ps.explorer_missions[2] >= 2 {
+                score += 0.55 * c_mult;
+            }
+            for m in 0..3 {
+                if ps.explorer_missions[m] < 3 && crate::sea::explorer_track_reached(s, q, m) {
+                    score += 0.45
+                        + if s.explorer_champions[m].is_none() && ps.explorer_missions[m] == 2 {
+                            0.35
+                        } else {
+                            0.0
+                        };
+                }
+            }
+        }
+
         match w.persona {
             BotPersona::Balanced => {}
             BotPersona::RoadBuilder => {

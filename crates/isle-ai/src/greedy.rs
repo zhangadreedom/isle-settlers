@@ -29,6 +29,8 @@ enum Target {
     /// Citadels: recruit / promote or activate a knight for barbarian defense.
     Knight,
     ActivateKnight,
+    /// Explorers: complete mission track `0..=2`.
+    ExplorerMission(u8),
 }
 
 impl Target {
@@ -42,8 +44,40 @@ impl Target {
             Target::DevCard => cost::DEV_CARD,
             Target::Knight => cost::KNIGHT,
             Target::ActivateKnight => cost::ACTIVATE_KNIGHT,
+            Target::ExplorerMission(m) => explorer_mission_cost(m),
         }
     }
+}
+
+#[inline]
+pub(crate) const fn explorer_mission_cost(mission: u8) -> ResourceSet {
+    match mission {
+        0 => cost::PIRATE_LAIR,
+        1 => cost::FISH_SHOAL,
+        _ => cost::SPICE_TRADE,
+    }
+}
+
+pub(crate) fn explorer_mission_value(s: &GameState, p: u8, mission: u8, persona: BotPersona) -> f32 {
+    let ps = &s.players[p as usize];
+    let m = mission as usize;
+    let next = ps.explorer_missions[m] + 1;
+    let mut val = 75.0 + next as f32 * 4.0;
+    if next == 3 && s.explorer_champions[m].is_none() {
+        val += 35.0;
+    }
+    if mission == 2 && next <= 2 {
+        val += 20.0;
+    }
+    let coins = 2 + u8::from(mission == 2 || ps.explorer_missions[2] >= 1);
+    val += coins as f32 * 2.5;
+    match (persona, mission) {
+        (BotPersona::Warlord, 0) => val *= 1.25,
+        (BotPersona::RoadBuilder, 1) => val *= 1.25,
+        (BotPersona::Merchant, 2) => val *= 1.25,
+        _ => {}
+    }
+    val
 }
 
 /// A gold field's pips count as this much of a regular resource (any).
@@ -338,6 +372,22 @@ pub(crate) fn spot_value_with(s: &GameState, p: u8, v: u8, persona: BotPersona) 
                 || !(topo.tile_edge_mask(t) & s.board.river_edges).is_empty();
             if gives_coin && terrain.produces() {
                 val += c_mult * tile_pips(s, t);
+            }
+        }
+    }
+    if s.config.scenario.is_explorers() {
+        let topo = s.topo();
+        if !(topo.vertex_edge_mask[v as usize] & s.board.sea_edges).is_empty() {
+            let has_coast =
+                !(topo.edges_touching(s.buildings_of(p)) & s.board.sea_edges).is_empty();
+            val += if has_coast { 0.8 } else { 2.6 };
+        }
+        for &t in &topo.vertex_tiles[v as usize] {
+            if t == NONE {
+                break;
+            }
+            if (s.board.pirate_lairs | s.board.spice_islands).contains(t) {
+                val += 2.8;
             }
         }
     }
@@ -809,6 +859,33 @@ fn choose_target_with(
     let can_bridge = s.config.scenario.is_caravans()
         && ps.bridges_left > 0
         && !s.bridge_spots(p).is_empty();
+    if s.config.scenario.is_explorers() && !hand.contains(&cost::CITY) && !hand.contains(&cost::SETTLEMENT)
+    {
+        let mut best_m: Option<(u32, f32, u8)> = None;
+        for m in [2u8, 0, 1] {
+            if ps.explorer_missions[m as usize] < 3
+                && crate::sea::explorer_track_reached(s, p, m as usize)
+            {
+                let miss = missing(hand, explorer_mission_cost(m));
+                let val = explorer_mission_value(s, p, m, persona);
+                if best_m.is_none_or(|(bm, bv, _)| (miss, -val) < (bm, -bv)) {
+                    best_m = Some((miss, val, m));
+                }
+            }
+        }
+        if let Some((miss, _, m)) = best_m
+            && (miss <= 1 || (!can_settle && (!can_city || miss <= missing(hand, cost::CITY))))
+        {
+            return Target::ExplorerMission(m);
+        }
+        if ps.ships_left > 0
+            && ps.settlements_left == 0
+            && !s.ship_spots(p).is_empty()
+            && best_sea_target(s, p) > 2.5
+        {
+            return Target::Ship;
+        }
+    }
     if persona == BotPersona::Warlord
         && s.dev_deck_len > 0
         && s.largest_army_owner != Some(p)
@@ -1229,6 +1306,7 @@ impl GreedyBot {
         let citadels = s.config.scenario.is_citadels();
         let fishermen = s.config.scenario.is_fishermen();
         let caravans = s.config.scenario.is_caravans();
+        let explorers = s.config.scenario.is_explorers();
 
         // Fishermen: pass the Old Boot before building (while own public VP is lower).
         if fishermen
@@ -1280,6 +1358,51 @@ impl GreedyBot {
             _ => None,
         }) {
             return Some(a);
+        }
+
+        // Explorers: complete any connected mission immediately (+1..2 VP and +2..3 coins),
+        // or spend 2 coins to finish an immediate City, Settlement or connected Mission!
+        if explorers {
+            if let Some(a) = best_by(legal, |a| match a {
+                Action::RaidPirateLair(_) => Some(explorer_mission_value(s, p, 0, persona)),
+                Action::HaulFishShoal(_) => Some(explorer_mission_value(s, p, 1, persona)),
+                Action::TradeSpice(_) => Some(explorer_mission_value(s, p, 2, persona)),
+                _ => None,
+            }) {
+                return Some(a);
+            }
+            if ps.coins >= 2 {
+                let can_city = ps.cities_left > 0 && !s.settlements[p as usize].is_empty();
+                let can_settle =
+                    ps.settlements_left > 0 && !s.settlement_spots(p, true).is_empty();
+                let mut goals: Vec<ResourceSet> = Vec::with_capacity(5);
+                if can_city {
+                    goals.push(cost::CITY);
+                }
+                if can_settle {
+                    goals.push(cost::SETTLEMENT);
+                }
+                for m in [2u8, 0, 1] {
+                    if ps.explorer_missions[m as usize] < 3
+                        && crate::sea::explorer_track_reached(s, p, m as usize)
+                    {
+                        goals.push(explorer_mission_cost(m));
+                    }
+                }
+                let max_miss = (ps.coins / 2) as u32;
+                for goal in goals {
+                    let miss = missing(hand, goal);
+                    if miss > 0
+                        && miss <= max_miss
+                        && let Some(a) = legal.iter().copied().find(|a| match a {
+                            Action::SpendCoinsResource(r) => goal[*r] > hand[*r],
+                            _ => false,
+                        })
+                    {
+                        return Some(a);
+                    }
+                }
+            }
         }
 
         // Caravans: spend 2 coins to finish an immediate City or Settlement, or build a VP-winning bridge!
@@ -1458,10 +1581,10 @@ impl GreedyBot {
         }
 
         // 4. Trade surplus with the bank (or fish / coins / Citadels TradeGood) for a missing card.
-        if caravans
+        if (caravans || explorers)
             && missing(hand, need) > 0
-            && (missing(hand, need) <= 2 || ps.coins >= 6)
-            && can_spend_coins(s, p, false)
+            && (missing(hand, need) <= 2 || ps.coins >= 6 || (explorers && ps.coins >= 4))
+            && (explorers || can_spend_coins(s, p, false))
             && let Some(a) = best_by(legal, |a| match a {
                 Action::SpendCoinsResource(r) if need[*r] > hand[*r] => {
                     Some((need[*r] - hand[*r]) as f32)

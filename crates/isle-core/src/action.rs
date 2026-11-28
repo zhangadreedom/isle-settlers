@@ -143,8 +143,14 @@ pub enum Action {
     PlaceCamel(u8),
     /// Caravans: build a stone bridge across a golden river `edge`.
     BuildBridge(u8),
-    /// Caravans (2 coins): buy one resource card of choice from the bank.
+    /// Caravans / Explorers (2 coins): buy one resource card of choice from the bank.
     SpendCoinsResource(Resource),
+    /// Explorers (1 Wool + 1 Ore): raid a pirate lair on `tile`.
+    RaidPirateLair(u8),
+    /// Explorers (1 Lumber + 1 Grain): haul fish from a deep shoal on `tile`.
+    HaulFishShoal(u8),
+    /// Explorers (1 Wool + 1 Grain): trade at a spice island on `tile`.
+    TradeSpice(u8),
 }
 
 impl Action {
@@ -216,6 +222,9 @@ impl Action {
             Action::PlaceCamel(e) => out.extend([34, e]),
             Action::BuildBridge(e) => out.extend([35, e]),
             Action::SpendCoinsResource(r) => out.extend([36, resource(r)]),
+            Action::RaidPirateLair(t) => out.extend([37, t]),
+            Action::HaulFishShoal(t) => out.extend([38, t]),
+            Action::TradeSpice(t) => out.extend([39, t]),
         }
     }
 
@@ -338,6 +347,9 @@ impl Action {
             34 => (Action::PlaceCamel(arg(0)?), 1),
             35 => (Action::BuildBridge(arg(0)?), 1),
             36 => (Action::SpendCoinsResource(resource(0)?), 1),
+            37 => (Action::RaidPirateLair(arg(0)?), 1),
+            38 => (Action::HaulFishShoal(arg(0)?), 1),
+            39 => (Action::TradeSpice(arg(0)?), 1),
             _ => return None,
         };
         Some((action, 1 + operands))
@@ -575,6 +587,12 @@ pub enum Event {
         player: u8,
         cost: u8,
         resource: Resource,
+    },
+    ExplorerMission {
+        player: u8,
+        mission: u8,
+        step: u8,
+        champion_claimed: bool,
     },
     GameWon {
         player: u8,

@@ -152,6 +152,8 @@ pub enum Scenario {
     Fishermen,
     /// Caravans & Golden River: oasis, golden river, bridges, camel caravans and gold coins, 2–6 players.
     Caravans,
+    /// Explorers & Pirates: pirate lairs, fish shoals, spice islands, missions and compensation gold, 2–6 players.
+    Explorers,
 }
 
 impl Scenario {
@@ -160,6 +162,7 @@ impl Scenario {
             Scenario::Classic | Scenario::Fishermen => 10,
             Scenario::Archipelago | Scenario::FogIslands | Scenario::Caravans => 12,
             Scenario::Citadels => 13,
+            Scenario::Explorers => 15,
         }
     }
 
@@ -181,6 +184,16 @@ impl Scenario {
     #[inline]
     pub const fn is_caravans(self) -> bool {
         matches!(self, Scenario::Caravans)
+    }
+
+    #[inline]
+    pub const fn is_explorers(self) -> bool {
+        matches!(self, Scenario::Explorers)
+    }
+
+    #[inline]
+    pub const fn uses_coins(self) -> bool {
+        matches!(self, Scenario::Caravans | Scenario::Explorers)
     }
 }
 
@@ -243,8 +256,8 @@ impl GameConfig {
             | Scenario::Citadels
             | Scenario::Fishermen
             | Scenario::Caravans => BoardLayout::for_players(self.num_players),
-            Scenario::Archipelago if ext => BoardLayout::ArchipelagoExtended,
-            Scenario::Archipelago => BoardLayout::Archipelago,
+            Scenario::Archipelago | Scenario::Explorers if ext => BoardLayout::ArchipelagoExtended,
+            Scenario::Archipelago | Scenario::Explorers => BoardLayout::Archipelago,
             Scenario::FogIslands if ext => BoardLayout::FogIslandsExtended,
             Scenario::FogIslands => BoardLayout::FogIslands,
         }
@@ -372,10 +385,12 @@ pub struct PlayerState {
     pub harbors: u8,
     /// Fishermen: fish tokens held (`0..=MAX_FISH_HAND`).
     pub fish: u8,
-    /// Caravans: gold coins held (`0..=MAX_COINS`).
+    /// Caravans / Explorers: gold coins held (`0..=MAX_COINS`).
     pub coins: u8,
     /// Caravans: stone bridges remaining (`0..=MAX_BRIDGES`).
     pub bridges_left: u8,
+    /// Explorers: progress `0..=3` on `[PirateLairs, FishHauls, SpiceTrade]`.
+    pub explorer_missions: [u8; 3],
 }
 
 impl PlayerState {
@@ -400,6 +415,7 @@ impl PlayerState {
             fish: 0,
             coins: 0,
             bridges_left: MAX_BRIDGES,
+            explorer_missions: [0; 3],
         }
     }
 
@@ -506,6 +522,8 @@ pub struct GameState {
     pub old_boot_owner: Option<u8>,
     /// Caravans: seat holding Wealthiest Settler (`+2` VP; 0-coin seats lose 1 VP).
     pub wealthiest_owner: Option<u8>,
+    /// Explorers: first player to reach step 3 on each mission track (`+1` VP each).
+    pub explorer_champions: [Option<u8>; 3],
     pub winner: Option<u8>,
     pub rng: Rng,
 }
@@ -552,6 +570,9 @@ impl GameState {
         }
         if config.scenario.is_caravans() {
             board.init_river_edges();
+        }
+        if config.scenario.is_explorers() {
+            board.init_explorer_sites();
         }
         let mut rng = Rng::new(seed);
         let mut dev_deck = [DevCard::Knight; MAX_DEV_DECK];
@@ -663,6 +684,7 @@ impl GameState {
             dice_deck_len,
             old_boot_owner: None,
             wealthiest_owner: None,
+            explorer_champions: [None; 3],
             winner: None,
             rng,
         })
@@ -858,6 +880,14 @@ impl GameState {
                 vp = vp.saturating_sub(1);
             }
         }
+        if self.config.scenario == Scenario::Explorers {
+            vp += self.players[i].explorer_missions.iter().sum::<u8>();
+            vp += self
+                .explorer_champions
+                .iter()
+                .filter(|&&c| c == Some(p))
+                .count() as u8;
+        }
         vp
     }
 
@@ -884,12 +914,52 @@ impl GameState {
                 || matches!(self.phase, Phase::PairedTurn { .. }))
     }
 
-    /// Best maritime ratio for giving `r`: 2 (special harbor), 3 (generic) or 4.
+    /// Whether Explorers mission actions are allowed now.
+    #[inline]
+    pub(crate) fn can_run_explorer_mission(&self) -> bool {
+        self.config.scenario.is_explorers()
+            && ((self.phase == Phase::Main && self.trade.is_none())
+                || matches!(self.phase, Phase::PairedTurn { .. }))
+    }
+
+    /// Whether `p` has a ship or building adjacent to pirate lair `tile`.
+    #[inline]
+    pub fn can_reach_pirate_lair(&self, p: u8, tile: u8) -> bool {
+        let topo = self.topo();
+        (tile as usize) < topo.num_tiles
+            && self.board.pirate_lairs.contains(tile)
+            && (!(self.ships[p as usize] & topo.tile_edge_mask(tile)).is_empty()
+                || !(self.buildings_of(p) & topo.tile_vertex_mask[tile as usize]).is_empty())
+    }
+
+    /// Whether `p` has a ship adjacent to deep shoal `tile`.
+    #[inline]
+    pub fn can_reach_deep_shoal(&self, p: u8, tile: u8) -> bool {
+        let topo = self.topo();
+        (tile as usize) < topo.num_tiles
+            && self.board.deep_shoals.contains(tile)
+            && !(self.ships[p as usize] & topo.tile_edge_mask(tile)).is_empty()
+    }
+
+    /// Whether `p` has a ship or building adjacent to spice island `tile`.
+    #[inline]
+    pub fn can_reach_spice_island(&self, p: u8, tile: u8) -> bool {
+        let topo = self.topo();
+        (tile as usize) < topo.num_tiles
+            && self.board.spice_islands.contains(tile)
+            && (!(self.ships[p as usize] & topo.tile_edge_mask(tile)).is_empty()
+                || !(self.buildings_of(p) & topo.tile_vertex_mask[tile as usize]).is_empty())
+    }
+
+    /// Best maritime ratio for giving `r`: 2 (special harbor), 3 (generic / Spice Lv2) or 4.
     pub fn trade_ratio(&self, p: u8, r: crate::resources::Resource) -> u8 {
         let h = self.players[p as usize].harbors;
         if h & (1 << r as u8) != 0 {
             2
-        } else if h & (1 << 5) != 0 {
+        } else if h & (1 << 5) != 0
+            || (self.config.scenario == Scenario::Explorers
+                && self.players[p as usize].explorer_missions[2] >= 2)
+        {
             3
         } else {
             4
@@ -1368,8 +1438,55 @@ impl GameState {
             if ps.coins > MAX_COINS {
                 return Err(format!("player {p} coins {} exceeds max", ps.coins));
             }
-            if !self.config.scenario.is_caravans() && ps.coins != 0 {
-                return Err(format!("player {p} holds coins outside caravans scenario"));
+            if !self.config.scenario.uses_coins() && ps.coins != 0 {
+                return Err(format!("player {p} holds coins outside coin scenario"));
+            }
+            if self.config.scenario.is_explorers() {
+                if ps.explorer_missions.iter().any(|&m| m > 3) {
+                    return Err(format!("player {p} explorer mission exceeds 3"));
+                }
+            } else if ps.explorer_missions != [0; 3] {
+                return Err(format!(
+                    "player {p} has explorer mission progress outside explorers"
+                ));
+            }
+        }
+        if self.config.scenario.is_explorers() {
+            if !(self.board.pirate_lairs & self.board.deep_shoals).is_empty() {
+                return Err("pirate lairs and deep shoals overlap".into());
+            }
+            for t in bits(self.board.pirate_lairs | self.board.deep_shoals) {
+                if t as usize >= topo.num_tiles || !self.board.is_sea(t) {
+                    return Err("explorer sea site off sea".into());
+                }
+            }
+            for t in bits(self.board.spice_islands) {
+                if t as usize >= topo.num_tiles || !self.board.terrain[t as usize].is_land() {
+                    return Err("spice island off land".into());
+                }
+            }
+            for m in 0..3 {
+                match self.explorer_champions[m] {
+                    Some(c)
+                        if (c as usize) < n && self.players[c as usize].explorer_missions[m] == 3 =>
+                        {}
+                    Some(_) => return Err(format!("invalid explorer_champions[{m}]")),
+                    None => {
+                        if (0..n).any(|q| self.players[q].explorer_missions[m] == 3) {
+                            return Err(format!("unassigned explorer_champions[{m}]"));
+                        }
+                    }
+                }
+            }
+        } else {
+            if !self.board.pirate_lairs.is_empty()
+                || !self.board.deep_shoals.is_empty()
+                || !self.board.spice_islands.is_empty()
+            {
+                return Err("explorer sites on non-explorers board".into());
+            }
+            if self.explorer_champions != [None; 3] {
+                return Err("explorer champions outside explorers scenario".into());
             }
         }
         if self.config.scenario.is_caravans() {

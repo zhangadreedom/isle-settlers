@@ -7,7 +7,10 @@ import type {
   ChatLine,
   ClientMsg,
   HouseRules,
+  MatchmakeRequest,
+  MatchmakeResponse,
   PublicRoomSummary,
+  QuickEmote,
   RoomInfo,
   Scenario,
   ServerMsg,
@@ -70,6 +73,23 @@ export async function fetchPublicRooms(): Promise<PublicRoomSummary[]> {
   }
 }
 
+/** Joins an open matching public room or creates a waiting public room (`POST /api/matchmake`). */
+export async function requestQuickMatch(req: MatchmakeRequest): Promise<MatchmakeResponse | null> {
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const tok = sessionToken();
+    if (tok) headers.Authorization = `Bearer ${tok}`;
+    const res = await fetch('/api/matchmake', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(req),
+    });
+    return res.ok ? ((await res.json()) as MatchmakeResponse) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function savedName(): string {
   try {
     return storage()?.getItem(NAME_KEY) ?? '';
@@ -108,6 +128,7 @@ export function createConnection(hello: Hello) {
   const onSnapshot = new Set<(s: Snapshot) => void>();
   const onError = new Set<(code: string) => void>();
   const onChat = new Set<(c: ChatLine) => void>();
+  const onQuickChat = new Set<(q: { seat: number | null; name: string; emote: QuickEmote }) => void>();
 
   let ws: WebSocket | null = null;
   let roomId = hello.type === 'Join' ? hello.room.toUpperCase() : null;
@@ -184,6 +205,9 @@ export function createConnection(hello: Hello) {
       case 'Chat':
         onChat.forEach((f) => f(msg.value));
         break;
+      case 'QuickChat':
+        onQuickChat.forEach((f) => f(msg.value));
+        break;
       case 'Error':
         if (!joined && FATAL.has(msg.value.code)) {
           if (msg.value.code === 'SessionExpired' || msg.value.code === 'AccountsDisabled') forgetSession();
@@ -231,6 +255,7 @@ export function createConnection(hello: Hello) {
     onSnapshot: subscribe(onSnapshot),
     onError: subscribe(onError),
     onChat: subscribe(onChat),
+    onQuickChat: subscribe(onQuickChat),
   };
 }
 

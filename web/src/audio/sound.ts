@@ -692,6 +692,9 @@ export function playForEvents(events: Event[], me: number | null): void {
       case 'BridgeBuilt':
         build ??= 'city';
         break;
+      case 'ExplorerMission':
+        build = 'upgrade';
+        break;
       case 'CoinsGained':
         if (me === null || e.value.player === me) gained = true;
         break;

@@ -194,6 +194,7 @@ export function layoutFor(scenario: Scenario, players: number): BoardLayout {
   const ext = players > 4;
   switch (scenario) {
     case 'Archipelago':
+    case 'Explorers':
       return ext ? 'ArchipelagoExtended' : 'Archipelago';
     case 'FogIslands':
       return ext ? 'FogIslandsExtended' : 'FogIslands';

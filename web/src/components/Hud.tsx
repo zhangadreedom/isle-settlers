@@ -117,6 +117,10 @@ export function PlayerList(props: { game: Game }) {
                   <span title="黄金河金币（满 2 枚可兑资源，≥4 枚争富甲一方 +2 分）">币 {p.coins}</span>
                   <span title={`跨河石拱桥（还能造 ${p.bridgesLeft} 座）`}>桥 {3 - p.bridgesLeft}</span>
                 </Show>
+                <Show when={g.explorers}>
+                  <span title="轮空与任务金币（每 2 枚可向银行购任意资源）">币 {p.coins}</span>
+                  <span title="三系远洋任务进度：海盗 / 渔运 / 香料（每阶 +1 分）">任 {p.explorerMissions.join('/')}</span>
+                </Show>
                 <span title={g.seafaring ? '最长连续商路（道路和船）' : '最长连续道路'}>路 {p.longestRoad}</span>
                 <Show when={g.seafaring}>
                   <span title={`海上的船（还能造 ${p.shipsLeft} 艘）`}>船 {15 - p.shipsLeft}</span>
@@ -131,7 +135,8 @@ export function PlayerList(props: { game: Game }) {
                   metrosOf(p.seat).length > 0 ||
                   g.view().oldBootOwner === p.seat ||
                   g.view().wealthiestOwner === p.seat ||
-                  (g.caravans && g.view().wealthiestOwner !== null && p.coins === 0)
+                  (g.caravans && g.view().wealthiestOwner !== null && p.coins === 0) ||
+                  (g.explorers && g.view().explorerChampions.includes(p.seat))
                 }
               >
                 <div class="badges">
@@ -168,6 +173,15 @@ export function PlayerList(props: { game: Game }) {
                     <span class="badge boot-badge" title="已有首富产生，身无分文（0 币）扣 1 分">
                       赤贫 −1
                     </span>
+                  </Show>
+                  <Show when={g.explorers}>
+                    <For each={['海盗王冠', '渔运王冠', '香料王冠']}>
+                      {(title, idx) => (
+                        <Show when={g.view().explorerChampions[idx()] === p.seat}>
+                          <span class="badge">{title} +1</span>
+                        </Show>
+                      )}
+                    </For>
                   </Show>
                 </div>
               </Show>
@@ -313,6 +327,9 @@ const MODE_PROMPT: Record<Exclude<BuildMode, null>, string> = {
   chase: '先点强盗旁已激活的铁卫，再点强盗要去的地块（再点一次取消）',
   fishRoad: '消耗 5 条海鱼：点选发光位置免费铺筑道路（再点一次取消）',
   bridge: '消耗 2 砖 + 1 木：点选发光黄金河段架设石拱桥（立得 +2 金币）',
+  raidLair: '围剿海盗巢穴（1羊+1矿）：点选发光的海盗巢海域执行任务',
+  haulFish: '远洋渔运归港（1木+1麦）：点选发光的远洋渔场执行任务',
+  tradeSpice: '香料外岛盟约（1羊+1麦）：点选发光的香料外岛执行任务',
 };
 
 function modePrompt(g: Game): string {
@@ -404,6 +421,7 @@ export function HandBar(props: {
   onCitadel?: () => void;
   onFishMarket?: () => void;
   onCoinMarket?: () => void;
+  onExplorers?: () => void;
   onDevCard: (card: DevCard) => void;
 }) {
   const g = props.game;
@@ -607,6 +625,27 @@ export function HandBar(props: {
                       金币兑物 ({g.me !== null ? g.view().players[g.me]?.coins ?? 0 : 0})
                     </button>
                   </Show>
+                </Show>
+                <Show when={g.explorers && canActMain()}>
+                  <button
+                    class="build"
+                    classList={{
+                      primary: g.has('RaidPirateLair') || g.has('HaulFishShoal') || g.has('TradeSpice'),
+                    }}
+                    onClick={() => props.onExplorers?.()}
+                    title="推进围剿海盗、远洋渔运与香料盟约三大任务链（每阶 +1 分）"
+                  >
+                    远洋任务
+                  </button>
+                  <button
+                    class="build"
+                    classList={{ primary: g.has('SpendCoinsResource') }}
+                    disabled={!g.has('SpendCoinsResource')}
+                    onClick={() => props.onCoinMarket?.()}
+                    title="每 2 枚金币可从银行购买任意 1 张资源"
+                  >
+                    金币兑物 ({g.me !== null ? g.view().players[g.me]?.coins ?? 0 : 0})
+                  </button>
                 </Show>
                 <button class="build" disabled={!g.has('BuyDevCard')} onClick={() => g.act((a) => a.type === 'BuyDevCard')}>
                   发展卡

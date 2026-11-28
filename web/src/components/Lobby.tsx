@@ -7,7 +7,7 @@ import type { BotLevel, HouseRules, PublicRoomSummary, Scenario } from '../gener
 import type { LocalOptions } from '../game/source';
 import { scenarioBlurb, scenarioTitle, t } from '../i18n';
 import { account, accountsEnabled } from '../net/account';
-import { fetchPublicRooms, saveName, savedName } from '../net/connection';
+import { fetchPublicRooms, requestQuickMatch, saveName, savedName } from '../net/connection';
 import { canInstallPwa, promptInstallPwa } from '../pwa';
 import { AccountPanel } from './Account';
 import { SoundToggle, ThemeToggle } from './Hud';
@@ -34,6 +34,7 @@ const SCENARIO_SHORT: Record<Scenario, string> = {
   Citadels: '城邦',
   Fishermen: '渔场',
   Caravans: '商队',
+  Explorers: '远洋',
 };
 
 /** Seats each scenario can be played with. */
@@ -44,6 +45,7 @@ const MAX_SEATS: Record<Scenario, number> = {
   Citadels: 6,
   Fishermen: 6,
   Caravans: 6,
+  Explorers: 6,
 };
 
 const PERSONAS: { suffix: BotPersonaSuffix; zh: string; en: string; tip: string }[] = [
@@ -73,7 +75,7 @@ export function Lobby(props: {
   onStartTutorial: () => void;
   onStartLocal: (o: LocalOptions) => void;
   onCreateRoom: (o: CreateRoom) => void;
-  onJoinRoom: (room: string) => void;
+  onJoinRoom: (room: string, directName?: string) => void;
 }) {
   const [tab, setTab] = createSignal<'local' | 'online' | 'rank'>('local');
   const players = () => props.players;
@@ -101,6 +103,7 @@ export function Lobby(props: {
   const [isPublic, setIsPublic] = createSignal(true);
   const [publicRooms, setPublicRooms] = createSignal<PublicRoomSummary[]>([]);
   const [loadingRooms, setLoadingRooms] = createSignal(false);
+  const [matching, setMatching] = createSignal(false);
   const [customVp, setCustomVp] = createSignal<number | null>(null);
   const [friendlyRobber, setFriendlyRobber] = createSignal(false);
   const [pairedTurns, setPairedTurns] = createSignal(false);
@@ -156,7 +159,24 @@ export function Lobby(props: {
     });
   };
 
-  // Accept a bare code or a pasted invite link.
+  const quickMatch = async () => {
+    if (matching()) return;
+    const signedIn = account()?.username;
+    const n = signedIn ?? (name().trim() || '玩家');
+    if (!signedIn) saveName(n);
+    setMatching(true);
+    try {
+      const res = await requestQuickMatch({
+        scenario: scenario(),
+        players: players(),
+        ranked: ranked(),
+      });
+      if (res?.roomId) props.onJoinRoom(res.roomId, n);
+      else createRoom();
+    } finally {
+      setMatching(false);
+    }
+  };
   const roomCode = () => (code().match(/#\/r\/([A-Za-z0-9]+)/)?.[1] ?? code()).trim().toUpperCase();
 
   return (
@@ -253,6 +273,13 @@ export function Lobby(props: {
                 title="沙漠绿洲延伸骆驼商队（穿村+1分、路长翻倍），跨黄金河架设石桥赚取金币，2–6 人"
               >
                 {scenarioTitle('Caravans')}
+              </button>
+              <button
+                classList={{ on: scenario() === 'Explorers' }}
+                onClick={() => setScenario('Explorers')}
+                title="远航推进海盗清剿、远洋渔运与香料盟约三大任务链（每阶+1分、满阶夺王冠），轮空自动补+1金币，2–6 人"
+              >
+                {scenarioTitle('Explorers')}
               </button>
             </div>
           </div>
@@ -511,8 +538,11 @@ export function Lobby(props: {
             <Show when={ranked()}>排位局在至少两名登录玩家参加时计分，AI 和游客不计。</Show>
           </p>
           <div class="row lobby-actions">
-            <button class="primary big" disabled={!props.ready} onClick={createRoom}>
-              创建房间
+            <button class="primary big" disabled={!props.ready || matching()} onClick={() => void quickMatch()}>
+              {matching() ? t('匹配中…', 'Matching…') : t('⚡ 快速匹配', '⚡ Quick Match')}
+            </button>
+            <button class="big" disabled={!props.ready} onClick={createRoom}>
+              {t('创建房间', 'Create Room')}
             </button>
           </div>
 
